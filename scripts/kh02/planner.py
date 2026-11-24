@@ -667,3 +667,471 @@ def migrate_shotbook_v1_to_v2(
             "video_use_ref_sha": VIDEO_USE_REF_SHA,
         },
     }
+
+
+# ==============================================================================
+# KH-02.R1 (R1.02) — Hook, Retention & Editorial Energy Director
+# ==============================================================================
+
+ENERGY_MODE_DEFAULTS: dict[str, dict[str, Any]] = {
+    "kinetic": {"opening_review_window_sec": 2.0, "static_review_threshold_sec": 2.0, "allow_calm_opening": False, "default_intensity": "high"},
+    "proof": {"opening_review_window_sec": 2.0, "static_review_threshold_sec": 2.5, "allow_calm_opening": True, "default_intensity": "high"},
+    "reaction": {"opening_review_window_sec": 1.8, "static_review_threshold_sec": 2.2, "allow_calm_opening": False, "default_intensity": "high"},
+    "payoff": {"opening_review_window_sec": 2.0, "static_review_threshold_sec": 2.5, "allow_calm_opening": True, "default_intensity": "high"},
+    "explanatory": {"opening_review_window_sec": 3.0, "static_review_threshold_sec": 4.0, "allow_calm_opening": True, "default_intensity": "mid"},
+    "suspense": {"opening_review_window_sec": 3.5, "static_review_threshold_sec": 3.5, "allow_calm_opening": True, "default_intensity": "mid"},
+    "calm": {"opening_review_window_sec": 4.0, "static_review_threshold_sec": 5.0, "allow_calm_opening": True, "default_intensity": "low"},
+    "emotional": {"opening_review_window_sec": 4.0, "static_review_threshold_sec": 5.5, "allow_calm_opening": True, "default_intensity": "low"},
+}
+
+FABRICATED_CLAIM_PATTERNS = (
+    "10x guaranteed", "100% guaranteed", "viral guaranteed", "instant million",
+    "secret hack", "only 2 left", "limited time only", "act now before",
+    "doctors hate", "never fails", "99% ctr", "95% retention",
+)
+
+
+def resolve_pacing_budget(
+    brief: dict[str, Any],
+    *,
+    total_duration_sec: float = 20.0,
+) -> dict[str, Any]:
+    """Resolve pacing & energy budget grounded in mode/profile (editorial intent only; zero fake CTR/retention metrics)."""
+    mode = brief.get("mode", "talking_head")
+    profile = brief.get("profile", "editorial_pro")
+    explicit_energy = brief.get("energy_mode")
+    if explicit_energy and explicit_energy in ENERGY_MODE_DEFAULTS:
+        energy = explicit_energy
+    elif profile == "minimal_documentary" or mode in ("documentary", "interview"):
+        energy = "calm"
+    elif mode == "narrative":
+        energy = "suspense"
+    elif mode in ("education", "tutorial", "software_demo", "faceless"):
+        energy = "explanatory"
+    elif mode in ("product_demo", "talking_head"):
+        energy = "proof"
+    else:
+        energy = "kinetic"
+
+    cfg = ENERGY_MODE_DEFAULTS[energy]
+    is_long_form = total_duration_sec >= 90.0
+    return {
+        "profile": profile,
+        "mode": mode,
+        "energy_mode": energy,
+        "opening_review_window_sec": cfg["opening_review_window_sec"] if not is_long_form else max(4.0, cfg["opening_review_window_sec"]),
+        "static_review_threshold_sec": cfg["static_review_threshold_sec"],
+        "allow_calm_opening": cfg["allow_calm_opening"],
+        "chaptered_arcs": is_long_form,
+        "editorial_intent_only": True,
+        "note": "Editorial pacing intent only — never a measured retention/CTR prediction or fixed cut quota.",
+    }
+
+
+def evaluate_hook_truthfulness(
+    option: dict[str, Any],
+    *,
+    brief: dict[str, Any],
+    inventory: dict[str, Any],
+    transcript: dict[str, Any] | None = None,
+    cut_policy: str = "LOCK_VOICE",
+) -> tuple[bool, list[str]]:
+    """Verify opening hook truthfulness: no fake claims, no spoilers in suspense, no unapproved speech rewrite/reorder."""
+    issues: list[str] = []
+    usable_ids = {a["asset_id"] for a in inventory.get("assets", []) if a.get("usable_in_render")}
+    for aid in option.get("evidence_asset_ids", []):
+        if aid not in usable_ids:
+            issues.append(f"unsupported_evidence_asset:{aid}")
+
+    combined_copy = f"{option.get('opening_line', '')} {option.get('opening_visual', '')} {option.get('strategy', '')}".lower()
+    for pat in FABRICATED_CLAIM_PATTERNS:
+        if pat in combined_copy:
+            issues.append(f"fabricated_or_clickbait_claim:{pat}")
+
+    # Refuse sensitive/unverified claims explicitly marked in brief
+    for sc in brief.get("sensitive_claims", []):
+        tok = str(sc).strip().lower()
+        if tok and len(tok) >= 4 and tok in combined_copy:
+            issues.append(f"sensitive_unverified_claim:{tok}")
+
+    # Suspense / narrative spoiler protection
+    if brief.get("mode") == "narrative" or brief.get("energy_mode") == "suspense":
+        if option.get("reveals_payoff_early") or "spoiler" in combined_copy or "ending reveal" in combined_copy:
+            issues.append("suspense_spoiler_violation")
+
+    # Speech truthfulness & PRESERVE_SCRIPT_TRIM / LOCK_VOICE non-reorder enforcement
+    words = (transcript or {}).get("words", [])
+    if words:
+        first_phrase_ids = [w["word_id"] for w in words[: min(8, len(words))]]
+        opt_wids = option.get("source_word_ids") or []
+        if cut_policy in ("LOCK_VOICE", "PRESERVE_SCRIPT_TRIM"):
+            if option.get("preserves_original_speech") is False:
+                issues.append(f"unauthorized_speech_rewrite_under_{cut_policy}")
+            if opt_wids and first_phrase_ids and opt_wids[0] != first_phrase_ids[0]:
+                # Opening speech line must start with the true opening word under LOCK_VOICE / PRESERVE_SCRIPT_TRIM
+                issues.append(f"unauthorized_speech_reorder:{opt_wids[0]}!={first_phrase_ids[0]}")
+
+    return (len(issues) == 0), issues
+
+
+def build_hook_candidates(
+    brief: dict[str, Any],
+    inventory: dict[str, Any],
+    *,
+    transcript: dict[str, Any] | None = None,
+    cut_policy: str = "LOCK_VOICE",
+    custom_options: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Generate 2-3 distinct authentic opening hook candidates grounded in real transcript and verified assets."""
+    usable = [a for a in inventory.get("assets", []) if a.get("usable_in_render")]
+    primary = next((a for a in usable if a["kind"] in ("a_roll", "b_roll")), usable[0])
+    evid = [a["asset_id"] for a in usable if a["kind"] in ("real_ui", "still_asset")]
+    words = (transcript or {}).get("words", [])
+    phrases = (transcript or {}).get("phrases", [])
+    first_line = phrases[0]["text"] if phrases else brief.get("key_message", "")
+    first_wids = list(phrases[0]["word_ids"]) if phrases else [w["word_id"] for w in words[:6]]
+    mode = brief.get("mode", "talking_head")
+    energy = resolve_pacing_budget(brief)["energy_mode"]
+
+    if custom_options is not None:
+        raw_opts = [dict(o) for o in custom_options]
+    else:
+        raw_opts = [
+            {
+                "option_id": "hook_opt_01_authentic_lead",
+                "strategy": "Direct authentic reaction + kinetic keyword accent on opening phrase",
+                "opening_visual": (
+                    f"Tight micro-reframe on presenter/subject ({primary['asset_id']}) at f0 with kinetic phrase mask "
+                    "revealing verified subject focus without duplicating the full sentence."
+                ),
+                "opening_line": first_line,
+                "opening_audio_role": "natural_voice_lead" if energy in ("calm", "emotional") else "subtle_air_accent_on_reveal",
+                "source_word_ids": first_wids,
+                "evidence_asset_ids": [primary["asset_id"]],
+                "preserves_original_speech": True,
+                "pros": [
+                    "Immediate human eye contact and honest emotional delivery from frame 0.",
+                    "100% compatible with LOCK_VOICE and PRESERVE_SCRIPT_TRIM without reordering speech.",
+                ],
+                "cons": ["Delays full product/UI frame until the keyword cue lands."],
+            },
+            {
+                "option_id": "hook_opt_02_result_preview_spotlight",
+                "strategy": "Verified result/evidence spotlight preview paired with original opening line",
+                "opening_visual": (
+                    f"Clean visual glimpse of verified real asset ({evid[0]}) with selective spotlight focus "
+                    "handing off seamlessly into presenter reaction."
+                    if evid else
+                    f"Visual focus crop on primary footage ({primary['asset_id']}) highlighting concrete outcome before wider frame."
+                ),
+                "opening_line": first_line,
+                "opening_audio_role": "quiet_direct_entry" if energy in ("calm", "emotional") else "clean_ui_preview_whoosh",
+                "source_word_ids": first_wids,
+                "evidence_asset_ids": [primary["asset_id"]] + (evid[:1] if evid else []),
+                "preserves_original_speech": True,
+                "reveals_payoff_early": (mode == "narrative" or energy == "suspense"),
+                "pros": [
+                    "Shows concrete visual proof within the first 0.5-1.5s to answer viewer curiosity immediately.",
+                    "Eliminates slow talking-head ramp on product/demo reels.",
+                ],
+                "cons": ["Requires strict spoiler check on suspense/narrative scripts."],
+            },
+            {
+                "option_id": "hook_opt_03_calm_direct_context",
+                "strategy": "Calm direct-context opening with clean lower kicker and zero forced zoom/SFX",
+                "opening_visual": f"Steady framing on {primary['asset_id']} with restrained editorial kicker and generous breathing room.",
+                "opening_line": first_line,
+                "opening_audio_role": "intentional_silence_voice_only",
+                "source_word_ids": first_wids,
+                "evidence_asset_ids": [primary["asset_id"]],
+                "preserves_original_speech": True,
+                "pros": [
+                    "Ideal for calm interviews, documentaries, tutorials, and high-trust explainers.",
+                    "Zero visual noise or artificial hype; preserves natural delivery gravitas.",
+                ],
+                "cons": ["Lower initial visual contrast on fast-scroll short product reels."],
+            },
+        ]
+
+    evaluated: list[dict[str, Any]] = []
+    for opt in raw_opts:
+        ok, issues = evaluate_hook_truthfulness(
+            opt, brief=brief, inventory=inventory, transcript=transcript, cut_policy=cut_policy,
+        )
+        item = dict(opt)
+        item["truthfulness_ok"] = ok
+        item["truthfulness_issues"] = issues
+        item["selected"] = False
+        item["rejected_reason"] = None
+        evaluated.append(item)
+    return evaluated
+
+
+def choose_opening(
+    options: list[dict[str, Any]],
+    *,
+    brief: dict[str, Any],
+    preferred_option_id: str | None = None,
+) -> dict[str, Any]:
+    """Select the strongest truthful opening option matching content energy mode (never chooses invalid/untruthful option)."""
+    valid = [o for o in options if o.get("truthfulness_ok")]
+    if not valid:
+        raise ValueError(f"All hook options failed truthfulness checks: {[o.get('truthfulness_issues') for o in options]}")
+
+    energy = resolve_pacing_budget(brief)["energy_mode"]
+    chosen = None
+    if preferred_option_id:
+        chosen = next((o for o in valid if o["option_id"] == preferred_option_id), None)
+    if chosen is None:
+        if energy in ("calm", "emotional", "explanatory", "suspense"):
+            chosen = next((o for o in valid if "calm" in o["option_id"]), None) or next((o for o in valid if "authentic" in o["option_id"]), valid[0])
+        elif energy in ("proof", "kinetic", "payoff"):
+            chosen = next((o for o in valid if "authentic" in o["option_id"] or "spotlight" in o["option_id"]), valid[0])
+        else:
+            chosen = valid[0]
+
+    out_opts: list[dict[str, Any]] = []
+    for o in options:
+        item = dict(o)
+        if item["option_id"] == chosen["option_id"]:
+            item["selected"] = True
+            item["rejected_reason"] = None
+        else:
+            item["selected"] = False
+            if not item["truthfulness_ok"]:
+                item["rejected_reason"] = f"Rejected by truthfulness gate: {', '.join(item['truthfulness_issues'])}"
+            else:
+                item["rejected_reason"] = f"Valid alternative, less aligned with energy_mode={energy!r} than {chosen['option_id']}."
+        out_opts.append(item)
+
+    return {
+        "selected_option_id": chosen["option_id"],
+        "selected_option": next(o for o in out_opts if o["selected"]),
+        "options": out_opts,
+        "selection_rationale": (
+            f"Selected {chosen['option_id']} ({chosen['strategy']}) for mode={brief.get('mode')!r}, "
+            f"energy_mode={energy!r}; passed all truthfulness & speech-preservation checks."
+        ),
+    }
+
+
+def plan_attention_beats(
+    beats: list[dict[str, Any]],
+    *,
+    brief: dict[str, Any],
+    fps: float = 24.0,
+) -> list[dict[str, Any]]:
+    """Annotate each semantic beat with editorial attention intent, rehooks, planned quiet holds, and sound roles."""
+    budget = resolve_pacing_budget(brief)
+    energy = budget["energy_mode"]
+    static_thresh = float(budget["static_review_threshold_sec"])
+    attention_beats: list[dict[str, Any]] = []
+
+    for idx, b in enumerate(beats):
+        fn = b.get("semantic_function", "reveal")
+        dur_sec = max(0.05, (int(b["end_frame"]) - int(b["start_frame"])) / max(1.0, fps))
+        is_hold = bool(b.get("intentional_hold"))
+        if energy in ("calm", "emotional"):
+            intensity = "low" if fn not in ("payoff", "reveal") else "mid"
+        elif fn in ("hook", "payoff", "evidence", "cta"):
+            intensity = "high"
+        elif fn in ("breath",):
+            intensity = "low"
+        else:
+            intensity = "mid"
+
+        # Distinguish readable payoff hold vs empty waiting needing purposeful rehook
+        rehook_reason = None
+        if idx > 0 and dur_sec > static_thresh and not is_hold:
+            rehook_reason = f"Interval {dur_sec:.2f}s > {static_thresh:.1f}s ({energy}); introduce meaningful scale/detail shift or evidence reveal."
+        elif fn in ("evidence", "reveal", "step"):
+            rehook_reason = f"Purposeful {fn} shift: new visual information scale rather than decorative flash."
+
+        sound_role = (
+            "intentional_silence" if energy in ("calm", "emotional") and fn in ("breath", "hook")
+            else ("transition_whoosh_and_object_pop" if fn in ("evidence", "reveal")
+                  else ("subtle_step_click_series" if fn == "step"
+                        else ("warm_payoff_chime_or_settle" if fn in ("payoff", "cta") else "clean_hook_accent")))
+        )
+        viewer_q = {
+            "hook": "What is this about and why should I watch the next second?",
+            "evidence": "Show me concrete proof — what does it actually look like?",
+            "step": "What are the exact components or steps inside?",
+            "reveal": "What detail changes my understanding here?",
+            "payoff": "Did the opening promise deliver a satisfying concrete outcome?",
+            "cta": "What is the clear final takeaway?",
+        }.get(fn, f"What new information advances the {fn} beat?")
+
+        attention_beats.append({
+            "beat_id": b["beat_id"],
+            "viewer_question": viewer_q,
+            "answer_payoff": b.get("planned_information_change", b.get("viewer_goal", "")),
+            "semantic_role": fn,
+            "source_word_ids": list(b.get("source_word_ids", [])),
+            "priority": int(b.get("priority", 4)),
+            "intended_intensity": intensity,
+            "visual_focal_subject": b.get("focus_subject", ""),
+            "expected_information_change": b.get("planned_information_change", ""),
+            "motion_purpose": "readable_hold" if is_hold else f"motivated_{fn}_focus",
+            "sound_role": sound_role,
+            "planned_quiet_hold": is_hold or (energy in ("calm", "emotional") and intensity == "low"),
+            "rehook_reason": rehook_reason,
+            "continuity": f"{b.get('continuity_in', 'open')} -> {b.get('continuity_out', 'settle')}",
+        })
+    return attention_beats
+
+
+def audit_payoff(
+    hook_decision: dict[str, Any],
+    beats: list[dict[str, Any]],
+    *,
+    claim_evidence: list[dict[str, Any]] | None = None,
+    brief: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Audit promise -> payoff linkage, spoiler integrity, and evidence verification."""
+    issues: list[str] = []
+    unverified_claims: list[str] = []
+    fns = [b.get("semantic_function") for b in beats]
+    has_payoff = any(fn in ("payoff", "cta", "evidence", "reveal") for fn in fns[1:]) if len(fns) > 1 else bool(fns)
+    if not has_payoff:
+        issues.append("missing_payoff_or_answer_beat_after_opening")
+
+    sel = hook_decision.get("selected_option") or {}
+    spoiler_violation = "suspense_spoiler_violation" in (sel.get("truthfulness_issues") or [])
+    if spoiler_violation:
+        issues.append("opening_violates_suspense_spoiler_protection")
+
+    for clm in (claim_evidence or []):
+        if clm.get("verification_status") == "UNVERIFIED_BLOCKED" and clm.get("allowed_display"):
+            unverified_claims.append(str(clm.get("claim_id", "unknown")))
+            issues.append(f"unverified_claim_displayed:{clm.get('claim_id')}")
+
+    return {
+        "promise_payoff_linked": has_payoff and not issues,
+        "spoiler_violation": spoiler_violation,
+        "unverified_claims": unverified_claims,
+        "issues": issues,
+    }
+
+
+def emit_hook_and_pacing_artifacts(
+    out_dir: str | Path,
+    *,
+    run_id: str,
+    brief: dict[str, Any],
+    hook_decision: dict[str, Any],
+    pacing_budget: dict[str, Any],
+    attention_beats: list[dict[str, Any]],
+    payoff_audit: dict[str, Any],
+    beats: list[dict[str, Any]],
+    visual_events: list[dict[str, Any]] | None = None,
+    audio_cues: list[dict[str, Any]] | None = None,
+    fps: float = 24.0,
+) -> dict[str, Path]:
+    """Write HOOK_OPTIONS.json, HOOK_DECISION.md, PACING_PLAN.json, ATTENTION_BEATS.md & EDITORIAL_COVERAGE.json."""
+    base = Path(out_dir)
+    base.mkdir(parents=True, exist_ok=True)
+
+    hook_doc = {
+        "schema_version": "kh02r1.hook_plan.v1",
+        "run_id": run_id,
+        "mode": brief["mode"],
+        "energy_mode": pacing_budget["energy_mode"],
+        "selected_option_id": hook_decision["selected_option_id"],
+        "selection_rationale": hook_decision["selection_rationale"],
+        "options": hook_decision["options"],
+        "pacing_budget": pacing_budget,
+        "attention_beats": attention_beats,
+        "payoff_audit": payoff_audit,
+    }
+    errs = validate_schema(hook_doc, "hook_plan")
+    if errs:
+        raise ValueError(f"HOOK_OPTIONS failed schema validation: {errs[:3]}")
+
+    def _wj(name: str, obj: Any) -> Path:
+        p = base / name
+        p.write_text(json.dumps_pretty(obj) + "\n", encoding="utf-8")
+        return p
+
+    paths: dict[str, Path] = {}
+    paths["hook_options"] = _wj("HOOK_OPTIONS.json", hook_doc)
+    paths["pacing_plan"] = _wj("PACING_PLAN.json", {
+        "schema_version": "kh02r1.pacing_plan.v1",
+        "run_id": run_id,
+        "pacing_budget": pacing_budget,
+        "attention_beats": attention_beats,
+        "payoff_audit": payoff_audit,
+    })
+
+    # EDITORIAL_COVERAGE.json mapping each beat window to applied visuals and audio
+    vis = visual_events or []
+    aud = audio_cues or []
+    coverage_rows = []
+    for b in beats:
+        sf, ef = int(b["start_frame"]), int(b["end_frame"])
+        b_vis = [ev["event_id"] for ev in vis if ev.get("beat_id") == b["beat_id"] or (int(ev["start_frame"]) < ef and int(ev["end_frame"]) > sf)]
+        b_aud = [cu["cue_id"] for cu in aud if int(cu["frame_start"]) < ef and int(cu["frame_end"]) > sf]
+        coverage_rows.append({
+            "beat_id": b["beat_id"],
+            "semantic_function": b["semantic_function"],
+            "start_frame": sf,
+            "end_frame": ef,
+            "duration_sec": round((ef - sf) / max(1.0, fps), 3),
+            "intentional_hold": bool(b.get("intentional_hold")),
+            "visual_event_ids": b_vis,
+            "audio_cue_ids": b_aud,
+            "coverage_status": "COVERED" if b_vis else ("INTENTIONAL_HOLD" if b.get("intentional_hold") else "VOICE_ONLY"),
+        })
+    paths["editorial_coverage"] = _wj("EDITORIAL_COVERAGE.json", {
+        "schema_version": "kh02r1.editorial_coverage.v1",
+        "run_id": run_id,
+        "beats": coverage_rows,
+    })
+
+    # HOOK_DECISION.md
+    h_lines = [
+        f"# Hook & Opening Decision — `{run_id}`",
+        "",
+        f"- **Selected Option**: `{hook_decision['selected_option_id']}`",
+        f"- **Energy Mode**: `{pacing_budget['energy_mode']}` (`editorial_intent_only=true`; zero invented CTR/retention claims)",
+        f"- **Rationale**: {hook_decision['selection_rationale']}",
+        f"- **Payoff Audit**: `promise_payoff_linked={payoff_audit['promise_payoff_linked']}`, `spoiler_violation={payoff_audit['spoiler_violation']}`",
+        "",
+        "## Evaluated Opening Options",
+        "",
+    ]
+    for opt in hook_decision["options"]:
+        badge = "SELECTED" if opt["selected"] else ("REJECTED_TRUTHFULNESS" if not opt["truthfulness_ok"] else "ALTERNATIVE")
+        h_lines.append(f"### `{opt['option_id']}` [{badge}]")
+        h_lines.append(f"- **Strategy**: {opt['strategy']}")
+        h_lines.append(f"- **Opening Visual**: {opt['opening_visual']}")
+        h_lines.append(f"- **Opening Line**: {opt['opening_line']}")
+        h_lines.append(f"- **Audio Role**: `{opt['opening_audio_role']}`")
+        if opt.get("rejected_reason"):
+            h_lines.append(f"- **Status Note**: {opt['rejected_reason']}")
+        h_lines.append("")
+    p_hd = base / "HOOK_DECISION.md"
+    p_hd.write_text("\n".join(h_lines), encoding="utf-8")
+    paths["hook_decision_md"] = p_hd
+
+    # ATTENTION_BEATS.md
+    a_lines = [
+        f"# Attention Beats & Editorial Energy Curve — `{run_id}`",
+        "",
+        "> Editorial intent map only (NOT measured audience retention).",
+        "",
+        "| Beat | Role | Intensity | Viewer Question | Focal Subject | Motion Purpose | Sound Role | Rehook / Quiet Hold |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for ab in attention_beats:
+        rh = "QUIET_HOLD" if ab["planned_quiet_hold"] else (ab.get("rehook_reason") or "Continuous flow")
+        a_lines.append(
+            f"| `{ab['beat_id']}` | `{ab['semantic_role']}` | `{ab['intended_intensity']}` | {ab['viewer_question']} | "
+            f"{ab['visual_focal_subject']} | `{ab['motion_purpose']}` | `{ab['sound_role']}` | {rh} |"
+        )
+    a_lines.append("")
+    p_ab = base / "ATTENTION_BEATS.md"
+    p_ab.write_text("\n".join(a_lines), encoding="utf-8")
+    paths["attention_beats_md"] = p_ab
+
+    return paths

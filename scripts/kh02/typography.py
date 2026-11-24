@@ -324,3 +324,24 @@ def build_master_srt(mapped_words: list[dict[str, Any]], out_path: str | Path) -
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text("\n".join(lines), encoding="utf-8")
     return dst
+
+
+def measure_layout_mobile(
+    text: str,
+    *,
+    font_size_px: int,
+    normalized_box: list[float],
+    canvas_width: int = 720,
+    canvas_height: int = 1280,
+    language: str = "en",
+) -> dict[str, Any]:
+    """R1.05 mobile 360px readability & layout metric wrapper accepting normalized box coordinates."""
+    bx, by, bw, bh = [float(v) for v in normalized_box]
+    return measure_text_layout(
+        text,
+        font_size_px=font_size_px,
+        box_width_px=bw * canvas_width,
+        box_height_px=bh * canvas_height,
+        canvas_width_px=canvas_width,
+        language=language,
+    )

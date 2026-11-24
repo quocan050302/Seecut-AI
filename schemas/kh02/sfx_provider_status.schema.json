@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh02/sfx_provider_status.schema.json",
+  "title": "KH-02.R1 SFX Provider Availability & Configuration Status",
+  "type": "object",
+  "required": ["schema_version", "checked_at_utc", "overall_status", "providers", "missing_categories", "next_action"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh02r1.sfx_provider_status.v1" },
+    "checked_at_utc": { "type": "string" },
+    "overall_status": {
+      "type": "string",
+      "enum": [
+        "LOCAL_READY", "MCP_LIVE_READY", "API_LIVE_READY",
+        "BLOCKED_PROVIDER_CONFIG", "BLOCKED_SFX_ASSETS", "OFFLINE_CACHE_ONLY", "OFF_BY_BRIEF"
+      ]
+    },
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["provider_id", "kind", "status", "can_search", "can_download", "reason"],
+        "properties": {
+          "provider_id": { "type": "string" },
+          "kind": { "type": "string", "enum": ["local", "mcp", "api"] },
+          "status": {
+            "type": "string",
+            "enum": ["READY", "SEARCH_ONLY", "EMPTY_LIBRARY", "BLOCKED_PROVIDER_CONFIG", "BLOCKED_AUTH", "BLOCKED_QUOTA", "OFFLINE", "ERROR"]
+          },
+          "can_search": { "type": "boolean" },
+          "can_download": { "type": "boolean" },
+          "discovered_tools": { "type": "array", "items": { "type": "string" } },
+          "verified_asset_count": { "type": "integer", "minimum": 0 },
+          "quota_remaining": { "type": ["integer", "null"] },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "missing_categories": { "type": "array", "items": { "type": "string" } },
+    "next_action": { "type": "string" }
+  }
+}
+

@@ -131,3 +131,89 @@ def validate_seam(
                 "message": "Hard cut requires approved_exceptions entry ALLOW_INTENTIONAL_CUT per 00-总纲 rule 9",
             })
     return issues
+
+
+# KH-02.R1 (R1.05) contract helpers
+def solve_anchor_handoff(
+    from_beat: dict[str, Any],
+    to_beat: dict[str, Any],
+    *,
+    from_pose: dict[str, Any] | None = None,
+    to_pose: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Solve shared anchor coordinates and direction continuity across adjacent beats."""
+    anchor_id = solve_match_anchor(from_beat, to_beat)
+    p0 = from_pose or {"x": 0.5, "y": 0.5, "scale": 1.0, "opacity": 1.0}
+    p1 = to_pose or {"x": 0.5, "y": 0.5, "scale": 1.0, "opacity": 1.0}
+    dx = round(float(p1.get("x", 0.5)) - float(p0.get("x", 0.5)), 4)
+    dy = round(float(p1.get("y", 0.5)) - float(p0.get("y", 0.5)), 4)
+    direction = "horizontal_slide" if abs(dx) > abs(dy) and abs(dx) > 0.05 else ("vertical_slide" if abs(dy) > 0.05 else "in_place_morph")
+    return {
+        "anchor_id": anchor_id,
+        "has_shared_anchor": anchor_id is not None,
+        "from_pose": p0,
+        "to_pose": p1,
+        "delta": [dx, dy],
+        "direction": direction,
+    }
+
+
+def plan_transition_seam(
+    from_beat: dict[str, Any],
+    to_beat: dict[str, Any],
+    *,
+    fps: float = 24.0,
+    profile: str = "editorial_pro",
+    allow_intentional_cut: bool = False,
+    cue_id: str | None = None,
+) -> dict[str, Any]:
+    """Plan seam transition with explicit anchor handoff, direction, audio bridge & optional linked SFX cue."""
+    tr = choose_transition(from_beat, to_beat, fps=fps, profile=profile, allow_intentional_cut=allow_intentional_cut)
+    handoff = solve_anchor_handoff(from_beat, to_beat)
+    tr["anchor_handoff"] = handoff
+    if cue_id:
+        tr["cue_id"] = cue_id
+        tr["audio_bridge"] = "sfx_whoosh_bridge"
+    return tr
+
+
+def validate_continuity(
+    shotbook: dict[str, Any],
+    *,
+    fps: float = 24.0,
+) -> list[dict[str, Any]]:
+    """Validate cross-beat transition seams, orphan layers, and audio-seam alignment."""
+    beats = shotbook.get("beats", [])
+    transitions = shotbook.get("transitions", [])
+    issues = validate_seam(
+        transitions, beats, fps=fps, profile=shotbook.get("profile", "editorial_pro"),
+        approved_exceptions=shotbook.get("approved_exceptions"),
+    )
+    beat_ids = {b["beat_id"] for b in beats}
+    # Check orphan visual events whose frame interval falls outside their declared beat
+    bmap = {b["beat_id"]: b for b in beats}
+    for ev in shotbook.get("visual_events", []):
+        if (ev.get("params") or {}).get("kind") == "progress_spine":
+            continue
+        b = bmap.get(ev.get("beat_id"))
+        if not b:
+            issues.append({"severity": "P0", "transition_id": ev["event_id"], "code": "ORPHAN_LAYER", "message": "Visual event has unknown beat_id"})
+            continue
+        if int(ev["end_frame"]) < int(b["start_frame"]) or int(ev["start_frame"]) > int(b["end_frame"]):
+            issues.append({
+                "severity": "P1", "transition_id": ev["event_id"], "code": "ORPHAN_LAYER_RANGE",
+                "message": f"Layer {ev['event_id']} [{ev['start_frame']},{ev['end_frame']}) disjoint from beat {b['beat_id']} [{b['start_frame']},{b['end_frame']})",
+            })
+    # Check audio cue linked to transition is aligned near seam
+    cue_map = {c["cue_id"]: c for c in shotbook.get("audio_cues", [])}
+    tol_frames = max(3, int(round(0.25 * fps)))
+    for tr in transitions:
+        cid = tr.get("cue_id")
+        if cid and cid in cue_map:
+            cu = cue_map[cid]
+            if abs(int(cu["frame_start"]) - int(tr["boundary_frame"])) > tol_frames:
+                issues.append({
+                    "severity": "P1", "transition_id": tr["transition_id"], "code": "SEAM_AUDIO_OFF_SEAM",
+                    "message": f"Linked cue {cid} at f{cu['frame_start']} too far from seam f{tr['boundary_frame']} (tol={tol_frames}f)",
+                })
+    return issues

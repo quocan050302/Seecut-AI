@@ -24,7 +24,14 @@
           "catalog_name": { "type": ["string", "null"] },
           "purpose": { "type": "string" },
           "engine_support": { "type": "string", "enum": ["hyperframes_gsap_dom", "hf_hw_svg", "local_css_gsap", "unsupported"] },
-          "availability": { "type": "string", "enum": ["AVAILABLE_VERIFIED", "CATALOG_LISTED", "LOCAL_VERIFIED", "UNAVAILABLE"] },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "AVAILABLE_VERIFIED", "IMPLEMENTED_VERIFIED", "AVAILABLE_UNTESTED",
+              "CATALOG_LISTED", "LOCAL_VERIFIED", "PARTIAL", "UNSUPPORTED",
+              "UNAVAILABLE", "BLOCKED_ENV"
+            ]
+          },
           "asset_requirements": { "type": "array", "items": { "type": "string" } },
           "license": { "type": "string" },
           "aspect_constraints": { "type": "array", "items": { "type": "string" } },

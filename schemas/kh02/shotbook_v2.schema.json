@@ -238,7 +238,7 @@
         ],
         "properties": {
           "cue_id": { "type": "string", "minLength": 1 },
-          "kind": { "type": "string", "enum": ["voice", "sfx_hook", "sfx_pop", "sfx_whoosh", "sfx_impact", "sfx_ding", "sfx_click", "bgm", "ambience"] },
+          "kind": { "type": "string", "enum": ["voice", "sfx_hook", "sfx_pop", "sfx_whoosh", "sfx_impact", "sfx_ding", "sfx_click", "sfx_riser", "sfx_rustle", "sfx_chime", "sfx_texture", "sfx_foley", "bgm", "ambience"] },
           "asset_ref": { "type": ["string", "null"] },
           "frame_start": { "type": "integer", "minimum": 0 },
           "frame_end": { "type": "integer", "minimum": 1 },

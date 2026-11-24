@@ -41,6 +41,24 @@ Every `seecut-ai` execution MUST evaluate and report all **19 original gates** A
 | `KH02_OLIVIA` | Fresh Olivia edit from raw `olivia.mp4` (never flattened SC-01 MP4), full native render, H1/H2/pairwise vs SC-01, layered package & Export QA | `exports/SeeCut_Olivia_KH02_*.mp4`, `QUALITY_DIFF.md`, `FINAL_QA.json` |
 | `KH02_GENERALIZATION` | Cross-niche fixtures (6+ modes, 16:9/9:16/1:1, EN/VI/CJK, long-form) + honest distinction between `TEST_ONLY` vs smoke renders vs real footage | `references/kh02-cross-niche.md`, `T33`, `T34` |
 
+## Additive KH-02.R1 Subgates (13 Orthogonal Verification Gates)
+
+| Subgate | Scope & Fail-Closed Criteria | Primary Module / Evidence |
+|---|---|---|
+| `R1_ROUGH_CUT_CONTRACT` | All 13 pause/take candidate classifications, protected meaning/negation/ASR-confidence guard, policy non-broadening (`LOCK_VOICE` / `PRESERVE_SCRIPT_TRIM` / `EDITORIAL_CUT`), rational frame+sample time map | `scripts/kh02/rough_cut.py`, `CUT_CANDIDATES.json`, `CUT_DECISION_REPORT.md`, `EDL.json`, `TIME_MAP.json`, `OUTPUT_TRANSCRIPT.json` |
+| `R1_CUT_APPLIED` | Paired derived A/V FFmpeg trim executed before composition (or truthful `NOT_APPLICABLE`), exact frame/sample counts, zero mid-word split, zero seam clicks/drift, unchanged source SHA-256 | `CUT_VERIFICATION.json`, before/after waveforms & mouth-sync stills |
+| `R1_HOOK_PACING` | 2–3 distinct truthful opening options evaluated, fake claim/spoiler/speech-reorder blocked, energy-aware pacing budget (`editorial_intent_only=true`, zero fake CTR/retention), payoff audit | `HOOK_OPTIONS.json`, `HOOK_DECISION.md`, `PACING_PLAN.json`, `ATTENTION_BEATS.md`, `EDITORIAL_COVERAGE.json` |
+| `R1_SFX_LOCAL_INVENTORY` | Bounded read-only local SFX scan (zero symlinks/HOME scan), real `ffprobe` + onset measurement, truthful `BLOCKED_SFX_ASSETS` when `0` licensed files exist | `scripts/kh02/sfx_assets.py`, `SFX_ASSET_INDEX.json`, `SFX_CACHE_MANIFEST.json` |
+| `R1_MCP_LIVE` | Live authorized MCP tool discovery & real downloaded/verified asset; truthful `BLOCKED_PROVIDER_CONFIG` when unconfigured (never faked by search-only or mock) | `SFX_PROVIDER_STATUS.json`, `SFX_ACQUISITION_LOG.jsonl`, `SFX_QUERY_PLAN.json` |
+| `R1_SFX_ASSET_RIGHTS` | Per-asset rights (`CC0`/`CC-BY` attribution) separated from provider API terms; rejects `NC`/`ND`/`UNKNOWN`/filename-only; blocks `TEST_ONLY` fixtures in production | `SFX_RIGHTS_LEDGER.csv`, `verify_license()`, `assert_not_test_only_in_production()` |
+| `R1_SOUND_PLAN` | Multi-layer soundscape planned alongside visuals, adaptive density with zero artificial minimum counts, upstream `00-总纲` conflict logging, event coverage (`ADD`/`KEEP_NATURAL`/`SILENCE`/`MERGE_WITH_OTHER`/`UNAVAILABLE`) | `scripts/kh02/audio_mix.py`, `sfx_plan.json` |
+| `R1_SOUND_MIX` | Real chunked PCM stems (`dry_voice`, `sfx`, `ambience`, `music`, `mix`), smooth sidechain ducking, real EBU R128 + true peak, measured onset alignment, dry-vs-mix speech preservation (honestly `BLOCKED_SFX_ASSETS` on Olivia when no licensed files exist) | `stems/*.wav`, `SFX_APPLIED.json`, `SFX_ONSET_QA.json` |
+| `R1_EFFECT_CAPABILITY` | Real compiled R1 visual families (`clip_mask_wipe`, `spotlight_focus`, `kinetic_phrase_mask`, `light_sweep_badge`, `freeze_callout`, `stagger_grid_4`) verified in headless Chromium Effect Gallery (direct/reverse/repeat/cold seek + visible region diff) | `scripts/kh02/effects_gallery.py`, `GALLERY_VERIFICATION.json`, `CAPABILITY_REGISTRY_VERIFIED.json` |
+| `R1_SEAM_QA` | Camera pixel coverage/rotation bounds, anchor handoff continuity, zero orphan layers, boundary filmstrips/waveforms ±1.5s, zero flash/audio off-seam | `camera.py`, `transition.py`, `qc/timeline_*.png` |
+| `R1_OLIVIA_REMAKE` | Fresh Olivia edit strictly from raw `olivia.mp4` (never flattened SC-01/prior KH-02), real `PRESERVE_SCRIPT_TRIM`, new hook & verified effects, H1/H2/dual-order pairwise vs SC-01 & prior KH-02, native full-res export & honest candidate/adopted status | `exports/SeeCut_Olivia_KH02_R1_*.mp4`, `QUALITY_DIFF.md`, `FINAL_QA.json` |
+| `R1_HOLDOUT` | Unseen multi-niche holdouts (calm interview, fast product ad, software tutorial, education, documentary, 2-min long-form stress) with distinct pacing/mix/effect choices & unchanged source hashes | `tests/kh02/test_effects.py::test_r1_27_multi_niche_holdout_and_long_timeline` |
+| `R1_REGRESSION` | Full 64-group executable test matrix (`T01`–`T36` + `R1-01`..`R1-28`) executed twice cleanly with deterministic outputs and zero race/duplicate writes | `tests/TEST_RUN_1.log`, `tests/TEST_RUN_2.log`, `TEST_MATRIX.json` |
+
 ## Required Separated Status Flags
 Reports MUST never collapse these 7 independent statuses into one PASS:
 - `CODE_QA_PASS`

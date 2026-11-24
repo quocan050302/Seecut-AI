@@ -222,3 +222,27 @@ def validate_camera_continuity(
                     "message": f"Non-cut scale jump at frame {c['start_frame']}: {prev['scale_to']} -> {s0}",
                 })
     return issues
+
+
+def build_camera_path(
+    beats: list[dict[str, Any]],
+    *,
+    mode: str = "talking_head",
+    source_width: int = 1080,
+    source_height: int = 1920,
+    output_width: int = 1080,
+    output_height: int = 1920,
+    rotation_deg: int = 0,
+    face_rect: list[float] | str | None = None,
+) -> list[dict[str, Any]]:
+    """R1.05 rotation-aware virtual 2D camera path builder honoring source pixel coverage & face safety."""
+    eff_w, eff_h = (source_height, source_width) if abs(int(rotation_deg)) in (90, 270) else (source_width, source_height)
+    return plan_camera_path(
+        beats,
+        mode=mode,
+        source_width=eff_w,
+        source_height=eff_h,
+        output_width=output_width,
+        output_height=output_height,
+        face_rect=face_rect,
+    )

@@ -246,6 +246,116 @@ BUILTIN_CAPABILITIES: list[dict[str, Any]] = [
         "fallback_id": "local.clean_fade_slide",
     },
     {
+        "capability_id": "r1.clip_mask_wipe",
+        "catalog_name": None,
+        "category": "transition_reveal",
+        "purpose": "Directional CSS clip-path inset mask wipe reveal/transition for verified UI captures and split panels",
+        "engine_support": "local_css_gsap",
+        "availability": "LOCAL_VERIFIED",
+        "asset_requirements": [],
+        "license": "PolyForm Noncommercial 1.0.0 (seecut-ai)",
+        "aspect_constraints": ["9:16", "16:9", "1:1", "4:5"],
+        "params_schema": {"wipe_duration_sec": [0.15, 0.85]},
+        "fps_compatible": True,
+        "min_duration_sec": 0.4,
+        "max_duration_sec": 60.0,
+        "forbidden_combinations": [],
+        "alpha_supported": True,
+        "deterministic_seek": True,
+        "performance_class": "fast_gpu_clip",
+        "sound_roles": ["evidence_reveal", "transition_whoosh"],
+        "diagnostic_test": "tests/kh02/test_effects.py::TestR1EffectsAndGallery::test_r1_21_real_browser_effect_gallery",
+        "fallback_id": "local.clean_fade_slide",
+    },
+    {
+        "capability_id": "r1.spotlight_focus",
+        "catalog_name": None,
+        "category": "vfx_punctuation",
+        "purpose": "Selective background dim + crisp focal highlight frame isolating real product/UI evidence without falsifying colors",
+        "engine_support": "local_css_gsap",
+        "availability": "LOCAL_VERIFIED",
+        "asset_requirements": [],
+        "license": "PolyForm Noncommercial 1.0.0 (seecut-ai)",
+        "aspect_constraints": ["9:16", "16:9", "1:1", "4:5"],
+        "params_schema": {"dim_opacity": [0.25, 0.82]},
+        "fps_compatible": True,
+        "min_duration_sec": 0.6,
+        "max_duration_sec": 45.0,
+        "forbidden_combinations": [],
+        "alpha_supported": True,
+        "deterministic_seek": True,
+        "performance_class": "fast_composite",
+        "sound_roles": ["evidence_reveal", "object_pop"],
+        "diagnostic_test": "tests/kh02/test_effects.py::TestR1EffectsAndGallery::test_r1_21_real_browser_effect_gallery",
+        "fallback_id": "local.editorial_panel",
+    },
+    {
+        "capability_id": "r1.kinetic_phrase_mask",
+        "catalog_name": None,
+        "category": "typography",
+        "purpose": "Overflow-hidden upward slide-mask kinetic phrase entry synced to spoken keyword without random karaoke",
+        "engine_support": "local_css_gsap",
+        "availability": "LOCAL_VERIFIED",
+        "asset_requirements": [],
+        "license": "PolyForm Noncommercial 1.0.0 (seecut-ai)",
+        "aspect_constraints": ["9:16", "16:9", "1:1", "4:5"],
+        "params_schema": {"stagger_sec": [0.04, 0.25]},
+        "fps_compatible": True,
+        "min_duration_sec": 0.5,
+        "max_duration_sec": 25.0,
+        "forbidden_combinations": [],
+        "alpha_supported": True,
+        "deterministic_seek": True,
+        "performance_class": "fast_dom",
+        "sound_roles": ["hook_accent", "object_pop"],
+        "diagnostic_test": "tests/kh02/test_effects.py::TestR1EffectsAndGallery::test_r1_21_real_browser_effect_gallery",
+        "fallback_id": "local.clean_fade_slide",
+    },
+    {
+        "capability_id": "r1.light_sweep_badge",
+        "catalog_name": None,
+        "category": "vfx_punctuation",
+        "purpose": "Restrained deterministic diagonal gloss sweep on final hero verdict/CTA bar",
+        "engine_support": "local_css_gsap",
+        "availability": "LOCAL_VERIFIED",
+        "asset_requirements": [],
+        "license": "PolyForm Noncommercial 1.0.0 (seecut-ai)",
+        "aspect_constraints": ["9:16", "16:9", "1:1", "4:5"],
+        "params_schema": {"sweep_duration_sec": [0.25, 1.2]},
+        "fps_compatible": True,
+        "min_duration_sec": 0.6,
+        "max_duration_sec": 20.0,
+        "forbidden_combinations": ["minimal_documentary_overshoot"],
+        "alpha_supported": True,
+        "deterministic_seek": True,
+        "performance_class": "fast_composite",
+        "sound_roles": ["payoff_chime"],
+        "diagnostic_test": "tests/kh02/test_effects.py::TestR1EffectsAndGallery::test_r1_21_real_browser_effect_gallery",
+        "fallback_id": "local.editorial_panel",
+    },
+    {
+        "capability_id": "r1.freeze_callout",
+        "catalog_name": None,
+        "category": "vfx_punctuation",
+        "purpose": "Explicitly declared freeze-frame punctuation badge holding focal proof moment cleanly",
+        "engine_support": "local_css_gsap",
+        "availability": "LOCAL_VERIFIED",
+        "asset_requirements": [],
+        "license": "PolyForm Noncommercial 1.0.0 (seecut-ai)",
+        "aspect_constraints": ["9:16", "16:9", "1:1", "4:5"],
+        "params_schema": {"hold_sec": [0.4, 3.0]},
+        "fps_compatible": True,
+        "min_duration_sec": 0.4,
+        "max_duration_sec": 12.0,
+        "forbidden_combinations": [],
+        "alpha_supported": True,
+        "deterministic_seek": True,
+        "performance_class": "fast_dom",
+        "sound_roles": ["emphasis_impact", "ui_click"],
+        "diagnostic_test": "tests/kh02/test_effects.py::TestR1EffectsAndGallery::test_r1_21_real_browser_effect_gallery",
+        "fallback_id": "local.editorial_panel",
+    },
+    {
         "capability_id": "experimental.true_3d_camera",
         "catalog_name": None,
         "purpose": "True 3D perspective camera on flat 2D footage (UNSUPPORTED — do not hallucinate 3D depth)",
@@ -432,4 +542,120 @@ def select_capability(
         "requested_id": requested_id,
         "reason": f"No valid capability or fallback available: {'; '.join(errs)}",
         "errors": errs,
+    }
+
+
+# ==============================================================================
+# KH-02.R1 (R1.05) — Effect Capability Selection, Validation & Variety Audit
+# ==============================================================================
+
+def validate_effect_params(
+    registry: dict[str, Any],
+    capability_id: str,
+    params: dict[str, Any] | None = None,
+    *,
+    aspect_ratio: str = "9:16",
+    duration_sec: float = 2.0,
+    profile: str = "editorial_pro",
+) -> tuple[bool, list[str]]:
+    """Validate effect parameters, aspect constraints, duration bounds, and real availability."""
+    return validate_capability(
+        registry, capability_id, aspect_ratio=aspect_ratio, duration_sec=duration_sec, params=params, profile=profile,
+    )
+
+
+def choose_capabilities_for_beat(
+    registry: dict[str, Any],
+    beat: dict[str, Any],
+    *,
+    aspect_ratio: str = "9:16",
+    fps: float = 24.0,
+    profile: str = "editorial_pro",
+    previously_used: list[str] | None = None,
+) -> dict[str, Any]:
+    """Select purpose-driven working capability for a beat, avoiding monotonous single-effect repetition."""
+    fn = beat.get("semantic_function", "reveal")
+    dur_sec = max(0.3, (int(beat["end_frame"]) - int(beat["start_frame"])) / max(1.0, fps))
+    used = set(previously_used or [])
+
+    if profile == "minimal_documentary":
+        candidates = ["local.clean_fade_slide", "local.editorial_panel", "r1.spotlight_focus"]
+    elif fn == "hook":
+        candidates = ["r1.kinetic_phrase_mask", "hf.spring_pop", "local.editorial_panel"]
+    elif fn == "evidence":
+        candidates = ["r1.clip_mask_wipe", "r1.spotlight_focus", "hf.card_resize"]
+    elif fn == "step":
+        candidates = ["hf.stagger_cascade", "r1.spotlight_focus", "local.editorial_panel"]
+    elif fn in ("payoff", "cta"):
+        candidates = ["r1.light_sweep_badge", "r1.kinetic_phrase_mask", "local.editorial_panel"]
+    elif fn == "reveal":
+        candidates = ["r1.spotlight_focus", "r1.freeze_callout", "r1.clip_mask_wipe"]
+    else:
+        candidates = ["local.editorial_panel", "r1.kinetic_phrase_mask", "local.clean_fade_slide"]
+
+    # Prefer unused verified capability first to promote meaningful visual variety
+    ordered = [c for c in candidates if c not in used] + [c for c in candidates if c in used]
+    for cid in ordered:
+        sel = select_capability(registry, cid, aspect_ratio=aspect_ratio, duration_sec=dur_sec, profile=profile)
+        if sel["selected_id"] and not sel.get("fallback_used"):
+            return sel
+    return select_capability(registry, ordered[0], aspect_ratio=aspect_ratio, duration_sec=dur_sec, profile=profile)
+
+
+def mark_gallery_verified(
+    registry: dict[str, Any],
+    verified_results: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Promote ONLY genuinely Chromium-rendered & seek-verified capabilities to IMPLEMENTED_VERIFIED with preview SHAs."""
+    out = dict(registry)
+    caps = []
+    for c in registry.get("capabilities", []):
+        item = dict(c)
+        cid = item["capability_id"]
+        if cid in verified_results and verified_results[cid].get("pass"):
+            item["availability"] = "IMPLEMENTED_VERIFIED"
+            item["visual_preview_path"] = verified_results[cid].get("preview_path")
+            item["visual_preview_sha256"] = verified_results[cid].get("preview_sha256")
+            item["deterministic_seek_verified"] = True
+        caps.append(item)
+    out["capabilities"] = caps
+    return out
+
+
+def audit_effect_variety(
+    visual_events: list[dict[str, Any]],
+    registry: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Measure applied effect capability diversity & detect monotonous repetition or unverified capabilities."""
+    cap_counts: dict[str, int] = {}
+    kind_counts: dict[str, int] = {}
+    reg_map = {c["capability_id"]: c for c in (registry or {}).get("capabilities", [])}
+    unverified_used: list[str] = []
+    meaningful_changes = 0
+    decorative_moves = 0
+
+    for ev in visual_events:
+        cid = ev.get("capability_id", "unknown")
+        kind = str((ev.get("params") or {}).get("kind", "default"))
+        cap_counts[cid] = cap_counts.get(cid, 0) + 1
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+        if kind in ("progress_spine",):
+            decorative_moves += 1
+        else:
+            meaningful_changes += 1
+        if reg_map:
+            rc = reg_map.get(cid)
+            if not rc or rc.get("availability") in ("UNAVAILABLE", "UNSUPPORTED", "BLOCKED_ENV", "CATALOG_LISTED"):
+                unverified_used.append(f"{ev.get('event_id')}:{cid}")
+
+    return {
+        "total_events": len(visual_events),
+        "meaningful_visual_changes": meaningful_changes,
+        "decorative_moves": decorative_moves,
+        "unique_capabilities": len(cap_counts),
+        "unique_component_kinds": len(kind_counts),
+        "capability_counts": cap_counts,
+        "component_kind_counts": kind_counts,
+        "unverified_or_blocked_used": unverified_used,
+        "pass": len(unverified_used) == 0,
     }

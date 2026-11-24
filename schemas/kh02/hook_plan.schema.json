@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh02/hook_plan.schema.json",
+  "title": "KH-02.R1 Hook & Editorial Pacing Plan",
+  "type": "object",
+  "required": ["schema_version", "run_id", "mode", "energy_mode", "options", "selected_option_id", "pacing_budget", "payoff_audit"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh02r1.hook_plan.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "mode": { "type": "string", "minLength": 1 },
+    "energy_mode": {
+      "type": "string",
+      "enum": ["kinetic", "explanatory", "suspense", "calm", "emotional", "proof", "reaction", "payoff"]
+    },
+    "selected_option_id": { "type": "string", "minLength": 1 },
+    "selection_rationale": { "type": "string" },
+    "options": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "option_id", "strategy", "opening_visual", "opening_line", "opening_audio_role",
+          "source_word_ids", "evidence_asset_ids", "truthfulness_ok", "truthfulness_issues", "selected"
+        ],
+        "properties": {
+          "option_id": { "type": "string", "minLength": 1 },
+          "strategy": { "type": "string", "minLength": 1 },
+          "opening_visual": { "type": "string" },
+          "opening_line": { "type": "string" },
+          "opening_audio_role": { "type": "string" },
+          "source_word_ids": { "type": "array", "items": { "type": "string" } },
+          "evidence_asset_ids": { "type": "array", "items": { "type": "string" } },
+          "preserves_original_speech": { "type": "boolean" },
+          "truthfulness_ok": { "type": "boolean" },
+          "truthfulness_issues": { "type": "array", "items": { "type": "string" } },
+          "pros": { "type": "array", "items": { "type": "string" } },
+          "cons": { "type": "array", "items": { "type": "string" } },
+          "selected": { "type": "boolean" },
+          "rejected_reason": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "pacing_budget": {
+      "type": "object",
+      "required": ["profile", "energy_mode", "opening_review_window_sec", "static_review_threshold_sec", "editorial_intent_only"],
+      "properties": {
+        "profile": { "type": "string" },
+        "energy_mode": { "type": "string" },
+        "opening_review_window_sec": { "type": "number", "minimum": 0.5 },
+        "static_review_threshold_sec": { "type": "number", "minimum": 0.5 },
+        "allow_calm_opening": { "type": "boolean" },
+        "editorial_intent_only": { "type": "boolean", "const": true }
+      }
+    },
+    "attention_beats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["beat_id", "viewer_question", "answer_payoff", "semantic_role", "intended_intensity", "visual_focal_subject", "sound_role"],
+        "properties": {
+          "beat_id": { "type": "string" },
+          "viewer_question": { "type": "string" },
+          "answer_payoff": { "type": "string" },
+          "semantic_role": { "type": "string" },
+          "source_word_ids": { "type": "array", "items": { "type": "string" } },
+          "priority": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "intended_intensity": { "type": "string", "enum": ["low", "mid", "high"] },
+          "visual_focal_subject": { "type": "string" },
+          "expected_information_change": { "type": "string" },
+          "motion_purpose": { "type": "string" },
+          "sound_role": { "type": "string" },
+          "planned_quiet_hold": { "type": "boolean" },
+          "rehook_reason": { "type": ["string", "null"] },
+          "continuity": { "type": "string" }
+        }
+      }
+    },
+    "payoff_audit": {
+      "type": "object",
+      "required": ["promise_payoff_linked", "spoiler_violation", "unverified_claims", "issues"],
+      "properties": {
+        "promise_payoff_linked": { "type": "boolean" },
+        "spoiler_violation": { "type": "boolean" },
+        "unverified_claims": { "type": "array", "items": { "type": "string" } },
+        "issues": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
+

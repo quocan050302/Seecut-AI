@@ -481,6 +481,118 @@ def _render_event_html(
             f'{f"<div class=kh-verdict-sub>{sub}</div>" if sub else ""}</div></div>'
         )
 
+    if kind == "clip_mask_wipe":
+        kicker = _esc(params.get("kicker", "REVEAL"))
+        headline = _esc(params.get("headline", ""))
+        sub = _esc(params.get("subtitle", ""))
+        fit_cls = "kh-evid-img-contain" if params.get("fit", "contain") == "contain" else "kh-evid-img"
+        for t in (params.get("kicker"), params.get("headline"), params.get("subtitle")):
+            if t:
+                fp_texts.append(str(t))
+        if has_media:
+            img_src = _esc(asset_rel_map[aref])
+            clean_frame = bool(params.get("clean_frame", False))
+            bar_html = (
+                f'<div class="kh-evid-bar"><span class="kh-kicker">{kicker}</span><span class="kh-evid-sub">{sub}</span></div>'
+                if clean_frame else
+                f'<div class="kh-evid-bar"><span class="kh-dot"></span><span class="kh-kicker">{kicker}</span><span class="kh-evid-sub">{sub}</span></div>'
+            )
+            body = (
+                f'{bar_html}'
+                f'<div class="kh-evid-media"><img src="{img_src}" alt="{headline}" class="{fit_cls}" /></div>'
+                f'{f"<div class=kh-evid-foot>{headline}</div>" if headline else ""}'
+            )
+            cls = "kh-el kh-evid-frame kh-clip-wipe"
+        else:
+            body = (
+                f'<div class="kh-kicker-dark">{kicker}</div>'
+                f'<div class="kh-title-dark">{headline}</div>'
+                f'{f"<div class=kh-sub-dark>{sub}</div>" if sub else ""}'
+            )
+            cls = "kh-el kh-card-light kh-clip-wipe"
+        return (
+            f'  <div id="{dom_id}" class="{cls}" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">{body}</div>'
+        )
+
+    if kind == "spotlight_focus":
+        kicker = _esc(params.get("kicker", "SPOTLIGHT"))
+        headline = _esc(params.get("headline", ""))
+        sub = _esc(params.get("subtitle", ""))
+        badge = _esc(params.get("badge", "FOCUS"))
+        for t in (params.get("kicker"), params.get("headline"), params.get("subtitle"), params.get("badge")):
+            if t:
+                fp_texts.append(str(t))
+        media_block = ""
+        if has_media:
+            img_src = _esc(asset_rel_map[aref])
+            media_block = f'<div class="kh-spot-media"><img src="{img_src}" alt="{headline}" class="kh-evid-img-contain" /></div>'
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-spot-wrap" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div id="{dom_id}_scrim" class="kh-spot-scrim"></div>'
+            f'<div class="kh-spot-card">'
+            f'<div class="kh-card-top"><span class="kh-kicker-accent">{kicker}</span><span class="kh-pill">{badge}</span></div>'
+            f'{media_block}'
+            f'<div class="kh-spot-title">{headline}</div>'
+            f'{f"<div class=kh-sub-light>{sub}</div>" if sub else ""}</div></div>'
+        )
+
+    if kind == "kinetic_phrase_mask":
+        kicker = _esc(params.get("kicker", ""))
+        lines_raw = params.get("lines") or ([params.get("headline", "")] if params.get("headline") else [])
+        sub = _esc(params.get("subtitle", ""))
+        if kicker:
+            fp_texts.append(str(params.get("kicker")))
+        if sub:
+            fp_texts.append(str(params.get("subtitle")))
+        line_divs = []
+        for idx_l, ln in enumerate(lines_raw[:3]):
+            fp_texts.append(str(ln))
+            line_divs.append(
+                f'<div class="kh-km-mask"><span id="{dom_id}_line_{idx_l + 1}" class="kh-km-line">{_esc(ln)}</span></div>'
+            )
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-km-card" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'{f"<div class=kh-kicker-accent>{kicker}</div>" if kicker else ""}'
+            f'<div class="kh-km-lines">{"".join(line_divs)}</div>'
+            f'{f"<div class=kh-sub-light>{sub}</div>" if sub else ""}</div>'
+        )
+
+    if kind == "light_sweep_badge":
+        kicker = _esc(params.get("kicker", "RESULT"))
+        headline = _esc(params.get("headline", ""))
+        sub = _esc(params.get("subtitle", ""))
+        for t in (params.get("kicker"), params.get("headline"), params.get("subtitle")):
+            if t:
+                fp_texts.append(str(t))
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-sweep-badge" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-verdict-accent"></div>'
+            f'<div id="{dom_id}_sheen" class="kh-sweep-sheen"></div>'
+            f'<div class="kh-verdict-copy"><div class="kh-kicker-accent">{kicker}</div>'
+            f'<div class="kh-verdict-title">{headline}</div>'
+            f'{f"<div class=kh-verdict-sub>{sub}</div>" if sub else ""}</div></div>'
+        )
+
+    if kind == "freeze_callout":
+        kicker = _esc(params.get("kicker", "KEY DETAIL"))
+        headline = _esc(params.get("headline", ""))
+        sub = _esc(params.get("subtitle", ""))
+        badge = _esc(params.get("badge", "DETAIL HOLD"))
+        for t in (params.get("kicker"), params.get("headline"), params.get("subtitle"), params.get("badge")):
+            if t:
+                fp_texts.append(str(t))
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-freeze-card" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-card-top"><span class="kh-kicker-dark">{kicker}</span><span class="kh-freeze-tag">{badge}</span></div>'
+            f'<div class="kh-title-dark">{headline}</div>'
+            f'{f"<div class=kh-sub-dark>{sub}</div>" if sub else ""}</div>'
+        )
+
     if kind == "split_callout_light":
         kicker = _esc(params.get("kicker", "DETAIL"))
         headline = _esc(params.get("headline", ""))
@@ -859,6 +971,50 @@ def compile_shotbook(
     background: rgba(15,15,15,0.62); border-radius: 12px; padding: 8px 14px;
   }}
   .kh-hand-wrap {{ pointer-events: none; }}
+  .kh-clip-wipe {{ clip-path: inset(0% 100% 0% 0%); }}
+  .kh-spot-wrap {{ overflow: visible; }}
+  .kh-spot-scrim {{
+    position: absolute; inset: -16px; border-radius: 26px;
+    background: radial-gradient(circle at 50% 50%, rgba(0,0,0,0.08), rgba(15,12,10,0.52));
+    pointer-events: none; opacity: 0; z-index: 0;
+  }}
+  .kh-spot-card {{
+    position: relative; z-index: 1; width: 100%; height: 100%;
+    background: {th['card_bg']}; color: {th['card_fg']};
+    border: 3px solid {th['accent_soft']}; border-radius: 20px; padding: 16px 20px;
+    box-shadow: 0 22px 48px rgba(0,0,0,0.44); display: flex; flex-direction: column; justify-content: center; gap: 8px;
+  }}
+  .kh-spot-media {{ flex: 1; overflow: hidden; border-radius: 12px; background: #FFF; }}
+  .kh-spot-title {{ font-size: 30px; font-weight: 900; line-height: 1.15; color: {th['card_fg']}; }}
+  .kh-km-card {{
+    background: {th['card_bg']}; color: {th['card_fg']};
+    border: 2.5px solid {th['card_border']}; border-left: 9px solid {th['accent_soft']};
+    border-radius: 18px; padding: 16px 22px; box-shadow: {th['shadow']};
+    display: flex; flex-direction: column; justify-content: center; gap: 6px;
+  }}
+  .kh-km-lines {{ display: flex; flex-direction: column; gap: 2px; }}
+  .kh-km-mask {{ overflow: hidden; display: block; }}
+  .kh-km-line {{ display: inline-block; font-size: 36px; font-weight: 900; line-height: 1.14; color: {th['card_fg']}; }}
+  .kh-sweep-badge {{
+    position: relative; overflow: hidden;
+    background: {th['card_bg']}; color: {th['card_fg']};
+    border: 2.5px solid {th['accent_soft']}; border-radius: 18px;
+    box-shadow: {th['shadow']}; display: flex; align-items: stretch;
+  }}
+  .kh-sweep-sheen {{
+    position: absolute; top: -20%; left: -45%; width: 32%; height: 140%;
+    background: linear-gradient(105deg, transparent 0%, rgba(255,255,255,0.34) 50%, transparent 100%);
+    transform: skewX(-18deg); pointer-events: none; z-index: 2;
+  }}
+  .kh-freeze-card {{
+    background: {th['light_card_bg']}; color: {th['light_card_fg']};
+    border: 3px solid {th['accent']}; border-radius: 18px; padding: 16px 20px;
+    box-shadow: {th['shadow']}; display: flex; flex-direction: column; justify-content: center; gap: 6px;
+  }}
+  .kh-freeze-tag {{
+    font-size: 13px; font-weight: 900; padding: 4px 10px; border-radius: 6px;
+    background: {th['accent']}; color: #FFFFFF; letter-spacing: 0.08em;
+  }}
 </style>
 </head>
 <body>
@@ -888,12 +1044,15 @@ def compile_shotbook(
       const dur = Math.max(0.15, c.end - c.start);
       const reframeDur = Math.min(0.24, dur * 0.35);
       if (i > 0) {{
+        const prevOp = CAMS[i - 1].opacity;
+        const opDur = (prevOp !== c.opacity) ? 0.08 : reframeDur;
         tl.to(pw, {{
-          left: c.left, top: c.top, width: c.width, height: c.height, opacity: c.opacity,
+          left: c.left, top: c.top, width: c.width, height: c.height,
           borderRadius: c.radius,
           border: c.border ? c.border + 'px solid {th["card_bg"]}' : '0px solid transparent',
           duration: reframeDur, ease: c.easing
         }}, c.start);
+        tl.to(pw, {{ opacity: c.opacity, duration: opDur, ease: 'power1.inOut' }}, c.start);
       }}
       tl.to(pi, {{
         scale: c.scale_to, x: c.pos_to[0], y: c.pos_to[1],
@@ -952,6 +1111,37 @@ def compile_shotbook(
       const bsel = sel + '_brush';
       tl.set(bsel, {{ width: '0%' }}, 0);
       tl.to(bsel, {{ width: '100%', duration: 0.42, ease: 'power2.out' }}, tw.start + 0.16);
+    }}
+    if (tw.kind === 'clip_mask_wipe') {{
+      tl.set(sel, {{ clipPath: 'inset(0% 100% 0% 0%)', opacity: 0 }}, 0);
+      tl.set(sel, {{ clipPath: 'inset(0% 100% 0% 0%)', opacity: tw.opacity }}, tw.start);
+      tl.to(sel, {{ clipPath: 'inset(0% 0% 0% 0%)', duration: Math.min(0.45, Math.max(0.18, tw.entry)), ease: 'power2.inOut' }}, tw.start);
+    }}
+    if (tw.kind === 'spotlight_focus') {{
+      const scSel = sel + '_scrim';
+      tl.set(scSel, {{ opacity: 0 }}, 0);
+      tl.to(scSel, {{ opacity: 1, duration: 0.28, ease: 'power2.out' }}, tw.start + 0.04);
+    }}
+    if (tw.kind === 'kinetic_phrase_mask') {{
+      for (let ln = 1; ln <= 3; ln++) {{
+        const lEl = document.getElementById(tw.id + '_line_' + ln);
+        if (!lEl) continue;
+        const st = tw.start + (ln - 1) * 0.09;
+        tl.set(lEl, {{ yPercent: 115, opacity: 0 }}, 0);
+        tl.set(lEl, {{ yPercent: 115, opacity: 0 }}, st);
+        tl.to(lEl, {{ yPercent: 0, opacity: 1, duration: 0.30, ease: 'power3.out' }}, st);
+      }}
+    }}
+    if (tw.kind === 'light_sweep_badge') {{
+      const shSel = sel + '_sheen';
+      tl.set(shSel, {{ left: '-45%', opacity: 0 }}, 0);
+      tl.set(shSel, {{ left: '-45%', opacity: 1 }}, tw.start + 0.22);
+      tl.to(shSel, {{ left: '125%', duration: 0.55, ease: 'power2.inOut' }}, tw.start + 0.22);
+      tl.set(shSel, {{ opacity: 0 }}, tw.start + 0.80);
+    }}
+    if (tw.kind === 'freeze_callout') {{
+      tl.set(sel, {{ scale: 0.92, opacity: 0 }}, 0);
+      tl.to(sel, {{ scale: 1.0, opacity: tw.opacity, duration: 0.18, ease: 'power2.out' }}, tw.start);
     }}
     if (tw.kind === 'hand_underline' || tw.kind === 'hand_arrow' || tw.kind === 'hand_circle') {{
       const pEl = document.getElementById(tw.id + '_path');

@@ -1,17 +1,76 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh02/sfx_cues.schema.json",
-  "title": "KH-02 Sound & SFX Cues Plan",
+  "title": "KH-02.R1 Multi-Layer Sound & SFX Cues Plan",
   "type": "object",
   "required": ["schema_version", "voice_policy", "sfx_status", "bgm_status", "cues", "warnings"],
   "properties": {
-    "schema_version": { "type": "string", "const": "kh02.sfx_cues.v1" },
-    "voice_policy": { "type": "string", "enum": ["LOCK_VOICE", "TRIM_APPROVED", "SILENT_BY_DESIGN"] },
-    "sfx_status": { "type": "string", "enum": ["PLANNED_LICENSED", "SFX_NOT_AVAILABLE", "OFF_BY_BRIEF", "BLOCKED_UNLICENSED"] },
-    "bgm_status": { "type": "string", "enum": ["PLANNED_LICENSED", "BGM_NOT_AVAILABLE", "OFF_BY_BRIEF", "BLOCKED_UNLICENSED"] },
+    "schema_version": { "type": "string", "enum": ["kh02.sfx_cues.v1", "kh02r1.sfx_cues.v2"] },
+    "plan_sha256": { "type": ["string", "null"] },
+    "voice_policy": {
+      "type": "string",
+      "enum": ["LOCK_VOICE", "TRIM_APPROVED", "PRESERVE_SCRIPT_TRIM", "EDITORIAL_CUT", "SILENT_BY_DESIGN"]
+    },
+    "sfx_status": {
+      "type": "string",
+      "enum": ["PLANNED_LICENSED", "SFX_NOT_AVAILABLE", "OFF_BY_BRIEF", "BLOCKED_UNLICENSED", "BLOCKED_SFX_ASSETS", "PARTIAL_MISSING_CUES"]
+    },
+    "bgm_status": {
+      "type": "string",
+      "enum": ["PLANNED_LICENSED", "BGM_NOT_AVAILABLE", "OFF_BY_BRIEF", "BLOCKED_UNLICENSED", "BLOCKED_BGM_ASSETS"]
+    },
     "voice_peak_db": { "type": ["number", "null"] },
     "voice_lufs": { "type": ["number", "null"] },
-    "cues": { "type": "array" },
+    "density_policy": { "type": "object" },
+    "event_coverage": { "type": "array" },
+    "stems": { "type": "object" },
+    "cues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["cue_id", "kind", "frame_start", "frame_end", "gain_db", "license_ref", "role", "reason"],
+        "properties": {
+          "cue_id": { "type": "string", "minLength": 1 },
+          "beat_id": { "type": ["string", "null"] },
+          "visual_event_id": { "type": ["string", "null"] },
+          "kind": { "type": "string", "minLength": 1 },
+          "role": { "type": "string", "minLength": 1 },
+          "asset_ref": { "type": ["string", "null"] },
+          "asset_id": { "type": ["string", "null"] },
+          "source_sha256": { "type": ["string", "null"] },
+          "evidence_ref": { "type": ["string", "null"] },
+          "trigger_type": { "type": "string", "enum": ["onset", "settle", "cross_seam", "anticipation", "loop", "hold", "continuous"] },
+          "visual_trigger_frame": { "type": ["integer", "null"], "minimum": 0 },
+          "frame_start": { "type": "integer", "minimum": 0 },
+          "frame_end": { "type": "integer", "minimum": 1 },
+          "sample_start": { "type": "integer", "minimum": 0 },
+          "intended_onset_sample": { "type": "integer", "minimum": 0 },
+          "actual_source_onset_sample": { "type": ["integer", "null"], "minimum": 0 },
+          "measured_onset_sample": { "type": ["integer", "null"], "minimum": 0 },
+          "trim_start_sec": { "type": "number", "minimum": 0 },
+          "trim_end_sec": { "type": ["number", "null"], "minimum": 0 },
+          "target_duration_samples": { "type": ["integer", "null"], "minimum": 1 },
+          "gain_db": { "type": "number", "minimum": -60, "maximum": 12 },
+          "local_voice_window": { "type": ["array", "null"] },
+          "fade_in_ms": { "type": "number", "minimum": 0 },
+          "fade_out_ms": { "type": "number", "minimum": 0 },
+          "ducking_db": { "type": "number", "minimum": -36, "maximum": 0 },
+          "ducking_group": { "type": ["string", "null"] },
+          "pan": { "type": "number", "minimum": -1, "maximum": 1 },
+          "layer_priority": { "type": "integer", "minimum": 1, "maximum": 10 },
+          "license_ref": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string" },
+          "justification": { "type": "string" },
+          "allow_overlap_reason": { "type": ["string", "null"] },
+          "intentionally_early": { "type": "boolean" },
+          "intentionally_late": { "type": "boolean" },
+          "status": {
+            "type": "string",
+            "enum": ["PLANNED", "VERIFIED_ASSET", "APPLIED", "ONSET_VERIFIED", "UNAVAILABLE", "REJECTED"]
+          }
+        }
+      }
+    },
     "warnings": { "type": "array", "items": { "type": "string" } }
   }
 }

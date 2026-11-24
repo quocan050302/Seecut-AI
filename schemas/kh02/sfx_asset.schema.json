@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh02/sfx_asset.schema.json",
+  "title": "KH-02.R1 Licensed SFX Asset Index",
+  "type": "object",
+  "required": ["schema_version", "generated_at_utc", "assets"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh02r1.sfx_asset_index.v1" },
+    "generated_at_utc": { "type": "string" },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "asset_id", "provider", "provider_asset_id", "license_name", "license_status",
+          "approved_purpose", "sha256", "byte_size", "codec", "sample_rate", "channels",
+          "duration_sec", "onset_sec", "first_hit_len_sec", "peak_db", "rms_db", "category",
+          "test_only"
+        ],
+        "properties": {
+          "asset_id": { "type": "string", "minLength": 1 },
+          "provider": { "type": "string", "minLength": 1 },
+          "provider_asset_id": { "type": "string", "minLength": 1 },
+          "source_url": { "type": ["string", "null"] },
+          "license_name": { "type": "string", "minLength": 1 },
+          "license_version": { "type": ["string", "null"] },
+          "license_url": { "type": ["string", "null"] },
+          "license_evidence": { "type": ["string", "null"] },
+          "provider_terms_note": { "type": ["string", "null"] },
+          "author": { "type": ["string", "null"] },
+          "attribution_required": { "type": "boolean" },
+          "attribution_text": { "type": ["string", "null"] },
+          "download_permitted": { "type": "boolean" },
+          "retrieved_at_utc": { "type": ["string", "null"] },
+          "request_id": { "type": ["string", "null"] },
+          "approved_purpose": {
+            "type": "string",
+            "enum": ["NONCOMMERCIAL_ONLY", "COMMERCIAL_AND_NONCOMMERCIAL", "TEST_ONLY", "BLOCKED"]
+          },
+          "license_status": {
+            "type": "string",
+            "enum": ["APPROVED_CC0", "APPROVED_CC_BY", "APPROVED_OWNER_LOCAL", "TEST_ONLY_FIXTURE", "REJECTED_UNKNOWN_LICENSE", "REJECTED_NC_INCOMPATIBLE", "REJECTED_ND_INCOMPATIBLE", "REJECTED_PROVIDER_TERMS", "REJECTED_MISSING_ATTRIBUTION"]
+          },
+          "relative_cache_path": { "type": ["string", "null"] },
+          "sha256": { "type": "string", "minLength": 8 },
+          "normalized_wav_sha256": { "type": ["string", "null"] },
+          "byte_size": { "type": "integer", "minimum": 1 },
+          "codec": { "type": "string" },
+          "container": { "type": ["string", "null"] },
+          "sample_rate": { "type": "integer", "minimum": 8000 },
+          "channels": { "type": "integer", "minimum": 1 },
+          "duration_sec": { "type": "number", "minimum": 0.01 },
+          "onset_sec": { "type": "number", "minimum": 0 },
+          "time_to_peak_sec": { "type": "number", "minimum": 0 },
+          "first_hit_len_sec": { "type": "number", "minimum": 0 },
+          "peak_db": { "type": "number" },
+          "rms_db": { "type": "number" },
+          "category": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "restrictions": { "type": "array", "items": { "type": "string" } },
+          "test_only": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
+

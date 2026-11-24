@@ -1,16 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh02/edl.schema.json",
-  "title": "KH-02 Edit Decision List & Rational Time Map",
+  "title": "KH-02.R1 Edit Decision List & Rational Time Map",
   "type": "object",
   "required": ["schema_version", "voice_policy", "fps_num", "fps_den", "audio_sample_rate", "segments", "total_output_frames"],
   "properties": {
-    "schema_version": { "type": "string", "const": "kh02.edl.v1" },
-    "voice_policy": { "type": "string", "enum": ["LOCK_VOICE", "TRIM_APPROVED", "SILENT_BY_DESIGN"] },
+    "schema_version": { "type": "string", "enum": ["kh02.edl.v1", "kh02r1.edl.v2"] },
+    "voice_policy": {
+      "type": "string",
+      "enum": ["LOCK_VOICE", "TRIM_APPROVED", "PRESERVE_SCRIPT_TRIM", "EDITORIAL_CUT", "SILENT_BY_DESIGN"]
+    },
+    "approval_scope": { "type": ["string", "null"] },
     "fps_num": { "type": "integer", "minimum": 1 },
     "fps_den": { "type": "integer", "minimum": 1 },
     "audio_sample_rate": { "type": "integer", "minimum": 8000 },
     "total_output_frames": { "type": "integer", "minimum": 1 },
+    "total_output_samples": { "type": "integer", "minimum": 1 },
     "cut_candidates": {
       "type": "array",
       "items": {
@@ -21,8 +26,19 @@
           "source_asset_id": { "type": "string" },
           "start_sec": { "type": "number", "minimum": 0 },
           "end_sec": { "type": "number", "minimum": 0 },
-          "kind": { "type": "string", "enum": ["silence_long", "silence_caution", "retake", "intentional_showcase"] },
-          "decision": { "type": "string", "enum": ["KEEP", "CUT_APPROVED", "CAUTION_KEEP"] },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "silence_long", "silence_caution", "retake", "intentional_showcase",
+              "DEAD_AIR", "LEAD_TAIL_PADDING", "WAITING_FOR_UI", "REPEATED_TAKE",
+              "FALSE_START", "FILLER", "STUMBLE", "OFF_TOPIC", "VISUAL_STALL",
+              "REACTION", "DELIBERATE_PAUSE", "CONTEXT_REQUIRED", "TECHNICAL_DROPOUT"
+            ]
+          },
+          "decision": {
+            "type": "string",
+            "enum": ["KEEP", "CUT_APPROVED", "CAUTION_KEEP", "SHORTEN", "REMOVE", "REPLACE_VISUAL", "REVIEW"]
+          },
           "reason": { "type": "string" }
         }
       }
@@ -39,12 +55,23 @@
         "properties": {
           "segment_id": { "type": "string", "minLength": 1 },
           "source_asset_id": { "type": "string", "minLength": 1 },
+          "source_sha256": { "type": ["string", "null"] },
           "src_start_frame": { "type": "integer", "minimum": 0 },
           "src_end_frame": { "type": "integer", "minimum": 1 },
           "out_start_frame": { "type": "integer", "minimum": 0 },
           "out_end_frame": { "type": "integer", "minimum": 1 },
+          "source_in_pts_rational": { "type": "string" },
+          "source_out_pts_rational": { "type": "string" },
+          "src_start_sample": { "type": "integer", "minimum": 0 },
+          "src_end_sample": { "type": "integer", "minimum": 1 },
+          "out_start_sample": { "type": "integer", "minimum": 0 },
+          "out_end_sample": { "type": "integer", "minimum": 1 },
+          "protected_word_ids": { "type": "array", "items": { "type": "string" } },
+          "boundary_pad_ms": { "type": "number", "minimum": 0 },
           "audio_fade_in_ms": { "type": "number", "minimum": 0, "maximum": 500 },
           "audio_fade_out_ms": { "type": "number", "minimum": 0, "maximum": 500 },
+          "boundary_visual_coverage": { "type": "string" },
+          "approval_scope": { "type": ["string", "null"] },
           "reason": { "type": "string" }
         }
       }

@@ -331,3 +331,20 @@ def resolve_mix_profile(
         "core_blocked": blocked,
         **t,
     }
+
+
+# Re-export KH-02.R1 Multi-Layer Soundscape & Stem Mixing contract symbols
+from .audio_mix import (  # noqa: E402,F401
+    align_cue_to_event,
+    choose_cue_sound,
+    compare_dry_and_mix,
+    measure_stems,
+    mix_audio_checked,
+    plan_music_bed,
+    plan_soundscape,
+    render_stems,
+    resolve_density_policy,
+    schedule_ducking,
+    validate_audio_graph,
+    verify_mix_sync,
+)

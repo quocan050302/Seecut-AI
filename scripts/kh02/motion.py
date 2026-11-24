@@ -211,3 +211,73 @@ def validate_motion_curves(
                     break
             prev_pose = pose
     return issues
+
+
+# KH-02.R1 (R1.05) contract helpers
+def emit_effect_event(
+    *,
+    event_id: str,
+    beat_id: str,
+    capability_id: str,
+    kind: str,
+    start_frame: int,
+    end_frame: int,
+    normalized_bbox: list[float],
+    layer_id: str | None = None,
+    layer_cat: str = "card",
+    track_id: str = "track_info_primary",
+    z_order: int = 30,
+    asset_ref: str | None = None,
+    anchor_word_id: str | None = None,
+    anchor_mode: str = "beat_start",
+    easing: str = "power2.out",
+    transform: dict[str, Any] | None = None,
+    mask: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+    semantic_reason: str = "Purposeful visual emphasis",
+    expected_visual_evidence: str = "Visible settled graphic in safe zone",
+    fps: float = 24.0,
+    profile: str = "editorial_pro",
+) -> dict[str, Any]:
+    """Emit a validated, planned R1 visual effect event bound to the single frame clock."""
+    raw = {
+        "event_id": event_id,
+        "beat_id": beat_id,
+        "track_id": track_id,
+        "layer_id": layer_id or f"layer_{event_id}",
+        "layer_cat": layer_cat,
+        "z_order": int(z_order),
+        "asset_ref": asset_ref,
+        "capability_id": capability_id,
+        "start_frame": int(start_frame),
+        "end_frame": int(end_frame),
+        "anchor_word_id": anchor_word_id,
+        "anchor_mode": anchor_mode,
+        "normalized_bbox": list(normalized_bbox),
+        "opacity": 1.0,
+        "transform": dict(transform or {"scale_from": 0.94, "scale_to": 1.0, "y_offset_px": 14}),
+        "mask": mask,
+        "blend": "normal",
+        "easing": easing,
+        "params": {"kind": kind, **(params or {})},
+        "safe_zone": True,
+        "face_exclusion": True,
+        "semantic_reason": semantic_reason,
+        "expected_visual_evidence": expected_visual_evidence,
+    }
+    return plan_motion([raw], fps=fps, profile=profile)[0]
+
+
+def sample_effect_pose(event: dict[str, Any], frame: int) -> dict[str, float]:
+    """Deterministic R1 alias for evaluating exact effect pose (opacity, scale, y_offset, clip_progress) at integer frame."""
+    pose = evaluate_pose(event, frame)
+    s, e = int(event["start_frame"]), int(event["end_frame"])
+    entry = max(1, int(event.get("entry_frames", 6)))
+    if frame < s or frame >= e:
+        clip_prog = 0.0
+    elif frame - s < entry:
+        clip_prog = round(min(1.0, (frame - s + 1) / float(entry)), 4)
+    else:
+        clip_prog = 1.0
+    pose["clip_progress"] = clip_prog
+    return pose

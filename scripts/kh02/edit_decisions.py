@@ -337,3 +337,19 @@ def apply_approved_cut_map(
     if proc.returncode != 0:
         raise RuntimeError(f"apply_approved_cut_map failed (rc={proc.returncode}): {proc.stderr[-300:]}")
     return {"applied": True, "path": str(dst), "segments": len(segs), "total_output_frames": time_map["total_output_frames"]}
+
+
+# Re-export KH-02.R1 Intelligent Rough Cut contract symbols from rough_cut.py
+from .rough_cut import (  # noqa: E402,F401
+    CANDIDATE_TYPES,
+    apply_r1_cut_map,
+    build_r1_time_map,
+    classify_pause,
+    detect_take_candidates,
+    emit_rough_cut_artifacts,
+    evaluate_cut_safety,
+    propose_r1_cut_candidates,
+    rank_cut_candidates,
+    resolve_cut_policy,
+    verify_cut_result,
+)
