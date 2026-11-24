@@ -1,0 +1,89 @@
+{
+  "_comment": "NEGATIVE EXAMPLE (INTENTIONALLY INVALID): Demonstrates violations rejected by contracts.py (dangling beat_id, zero/negative frame range, ANALYSIS_ONLY asset ref, and missing required beats coverage).",
+  "schema_version": "kh02.shotbook.v2",
+  "run_id": "negative_case_001",
+  "mode": "talking_head",
+  "profile": "editorial_pro",
+  "status": "TEST_ONLY",
+  "source_sha_set": {
+    "ref_only": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "output_spec": {
+    "width": 720,
+    "height": 1280,
+    "fps_num": 24,
+    "fps_den": 1,
+    "total_frames": 48,
+    "audio_sample_rate": 48000,
+    "orientation": "portrait",
+    "platform_safe_zone": { "top": 0.1, "bottom": 0.14, "left": 0.05, "right": 0.05 }
+  },
+  "input_brief_sha": "cccccccc",
+  "rights_ledger_sha": "dddddddd",
+  "transcript_sha": null,
+  "edit_decision_map": {},
+  "story_arc": {
+    "creative_direction_id": "invalid_dir",
+    "theme": "none",
+    "archetype": "none",
+    "summary": "Broken negative example.",
+    "alternatives_considered": []
+  },
+  "beats": [
+    {
+      "beat_id": "beat_01",
+      "start_frame": 20,
+      "end_frame": 10,
+      "source_word_ids": [],
+      "semantic_function": "hook",
+      "viewer_goal": "Invalid reversed frame range",
+      "emotion_intensity": 0.5,
+      "priority": 1,
+      "content_refs": ["nonexistent_asset"],
+      "proof_status": "OPINION_NO_EVIDENCE",
+      "visual_mode": "invalid",
+      "focus_subject": "none",
+      "continuity_in": "none",
+      "continuity_out": "none",
+      "planned_information_change": "none",
+      "why": "Negative contract test",
+      "read_time_frames": 10
+    }
+  ],
+  "visual_events": [
+    {
+      "event_id": "ev_bad",
+      "beat_id": "beat_missing",
+      "track_id": "t1",
+      "layer_id": "../escape",
+      "z_order": 1,
+      "asset_ref": "nonexistent_asset",
+      "capability_id": "unknown.cap",
+      "start_frame": 0,
+      "end_frame": 0,
+      "anchor_word_id": null,
+      "anchor_mode": "beat_start",
+      "normalized_bbox": [0.9, 0.9, 0.5, 0.5],
+      "opacity": 1.0,
+      "transform": {},
+      "easing": "linear",
+      "safe_zone": true,
+      "face_exclusion": true,
+      "semantic_reason": "Should fail validation",
+      "expected_visual_evidence": "None"
+    }
+  ],
+  "camera_events": [],
+  "transitions": [],
+  "text_events": [],
+  "audio_cues": [],
+  "claim_evidence": [],
+  "approved_exceptions": [],
+  "provenance": {
+    "planner_version": "kh02.1.0",
+    "generated_at_utc": "2026-11-24T00:00:00Z",
+    "engine": "SeeCut-v3.4-HyperFrames-HTML-GSAP",
+    "base_git_sha": "ae51ccd4127c95a456e96c66d46a77fb65142b80",
+    "upstream_seecut_sha": "b05d7ed27404a064060e0d370402f562b0c0c02e"
+  }
+}

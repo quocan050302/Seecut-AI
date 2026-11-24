@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh02/qa_report.schema.json",
+  "title": "KH-02 Independent QA Report",
+  "type": "object",
+  "required": [
+    "schema_version", "run_id", "overall_status", "statuses",
+    "evidence_records", "original_19_gates", "kh02_subgates"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh02.qa_report.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "overall_status": {
+      "type": "string",
+      "enum": [
+        "READY_FOR_PRODUCTION", "PREVIEW_PENDING_APPROVAL", "CODE_READY_ONLY",
+        "BLOCKED_LICENSE", "BLOCKED_INPUT", "BLOCKED_ENV", "FAIL"
+      ]
+    },
+    "statuses": {
+      "type": "object",
+      "required": [
+        "CODE_QA_PASS", "OLIVIA_RENDER_VERIFIED", "AUTO_EDITORIAL_QA",
+        "OWNER_VISUAL", "OWNER_AUDIO", "COMMERCIAL_RELEASE", "CROSS_NICHE_VALIDATED"
+      ]
+    },
+    "evidence_records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["gate", "check_id", "status", "expected", "actual", "reason", "reviewer_type"],
+        "properties": {
+          "gate": { "type": "string" },
+          "check_id": { "type": "string" },
+          "status": { "type": "string", "enum": ["PASS", "FAIL", "BLOCKED_ENV", "BLOCKED_LICENSE", "BLOCKED_INPUT", "PENDING", "NOT_APPLICABLE", "TEST_ONLY"] },
+          "expected": { "type": "string" },
+          "actual": { "type": "string" },
+          "source_sha": { "type": ["string", "null"] },
+          "output_sha": { "type": ["string", "null"] },
+          "frame_or_time": { "type": ["string", "number", "null"] },
+          "command": { "type": ["string", "null"] },
+          "log_path": { "type": ["string", "null"] },
+          "reason": { "type": "string" },
+          "reviewer_type": { "type": "string", "enum": ["deterministic_code", "h1_geom_browser", "h2_agy_model", "pairwise_agy_model", "human_owner"] }
+        }
+      }
+    },
+    "original_19_gates": { "type": "object" },
+    "kh02_subgates": { "type": "object" }
+  }
+}

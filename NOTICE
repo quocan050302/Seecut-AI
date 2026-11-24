@@ -5,6 +5,13 @@ SeeCut — third-party notices
   Copyright HeyGen, licensed under the Apache License 2.0. Modified: self-preview code removed.
 - skill/seecut/assets/hf-hw/fonts/Caveat-700-latin.woff2: Caveat font, SIL Open Font License 1.1.
 
+Selective MIT Helper Attribution (KH-02 — analysis/diagnostic adapters only; does NOT re-license SeeCut):
+- browser-use/video-use (https://github.com/browser-use/video-use, pinned SHA 43cfc566833548093455c9d4a46bd69913b7e552),
+  Copyright (c) 2026 Browser Use, licensed under the MIT License (full text in references/kh02-video-use-attribution.md).
+  Selectively adapted for local faster-whisper phrase packing (scripts/kh02/transcript.py), bounded boundary
+  filmstrip/waveform QA diagnostics (scripts/kh02/qa.py), opt-in SRT chunking (scripts/kh02/typography.py),
+  and loudness measurement helpers (scripts/kh02/sound.py). video-use/helpers/render.py is NOT used as a video renderer.
+
 Not distributed here (install yourself under their own licenses):
 - HyperFrames CLI / runtime (Apache-2.0), GSAP (GreenSock standard license), playwright-core (Apache-2.0),
   faster-whisper (MIT), ffmpeg.

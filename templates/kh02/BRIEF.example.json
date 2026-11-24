@@ -1,0 +1,56 @@
+{
+  "schema_version": "kh02.brief.v1",
+  "brief_id": "example_demo_brief_01",
+  "title": "Sample Product Evidence Walkthrough",
+  "mode": "talking_head",
+  "profile": "editorial_pro",
+  "objective": "Show real storefront layout details clearly while preserving untouched presenter voice.",
+  "audience": "Creators evaluating digital storefront presentation",
+  "platform": "reels",
+  "aspect_ratio": "9:16",
+  "duration_policy": {
+    "kind": "match_source",
+    "min_sec": 6.0,
+    "max_sec": 30.0
+  },
+  "language": "en",
+  "tone": "warm, editorial, proof-first",
+  "key_message": "Real visual evidence and clean structure communicate value faster than filler graphics.",
+  "proof_points": [
+    "Real verified page capture with source badges masked",
+    "Progressive 3-step visual breakdown synced to footage"
+  ],
+  "sensitive_claims": [],
+  "voice_policy": "LOCK_VOICE",
+  "caption_policy": "OFF",
+  "music_policy": "OFF",
+  "sfx_policy": "OPTIONAL_LICENSED",
+  "license_decision": "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED",
+  "creative_theme": "editorial_obsidian_ivory",
+  "cta_copy": null,
+  "approved_exceptions": [],
+  "sources": [
+    {
+      "asset_id": "src_a_roll",
+      "root_id": "workspace",
+      "path": "sample_a_roll.mp4",
+      "kind": "a_roll",
+      "rights": "OWNER_SUPPLIED_NONCOMMERCIAL",
+      "label": "Primary presenter clip",
+      "face_rect": [0.25, 0.18, 0.76, 0.59]
+    },
+    {
+      "asset_id": "evid_masked_01",
+      "root_id": "evidence",
+      "path": "sample_evidence_masked.png",
+      "kind": "real_ui",
+      "rights": "CAPTURED_REAL_EVIDENCE_MASKED",
+      "label": "Masked real web capture"
+    }
+  ],
+  "budget": {
+    "max_versions": 3,
+    "allow_live_agy": false,
+    "max_disk_gib": 4.0
+  }
+}

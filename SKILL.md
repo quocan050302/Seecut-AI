@@ -1,98 +1,113 @@
 ---
 name: seecut-ai
 description: >-
-  Run the original YeJe-cpu/SeeCut v3.4 Core motion-graphics talking-head editing
-  pipeline (HyperFrames + HTML/GSAP + render.mjs + H1 geom-check + H2 agy Gemini
-  review + order-swapped pairwise iteration up to 3 versions + layered JianYing
-  package + independent QA) with strict PolyForm Noncommercial 1.0.0 license gating,
-  non-bypass agy security checks, isolated workspaces, and honest human-approval gates.
-  Use when the user asks to edit a talking-head or pre-voiced AI-avatar video using
-  SeeCut, seecut-ai, HyperFrames/GSAP motion graphics, or AI self-review loops.
-  Does NOT generate avatars/TTS or silently substitute other editors (Concat/Remotion).
+  Run the KH-02 autonomous professional video editor built strictly on YeJe-cpu/SeeCut
+  v3.4 Core (unified SHOTBOOK V2, editorial/camera/motion/transition/typography/audio
+  direction, HyperFrames + HTML/CSS/GSAP + guarded render.mjs + H1 geom-check + hardened
+  H2 agy review + order-swapped pairwise iteration up to 3 versions + layered JianYing
+  package + boundary filmstrip/waveform & EBU R128 QA) with strict PolyForm Noncommercial
+  1.0.0 license gating, non-bypass agy security checks, isolated workspaces, and honest
+  human-approval gates. Use when the user asks to edit a talking-head, product/software
+  demo, tutorial, explainer, or pre-voiced AI-avatar video using SeeCut, seecut-ai,
+  SHOTBOOK V2, or HyperFrames/GSAP motion graphics. Does NOT generate avatars/TTS or
+  silently substitute other video rendering engines (Concat/Remotion/video-use render.py).
 ---
 
-# seecut-ai — Safe-Gated YeJe-cpu/SeeCut v3.4 Core Pipeline
+# seecut-ai — KH-02 Autonomous Professional Editor on YeJe-cpu/SeeCut v3.4 Core
 
-> **Required Notice**: Copyright (c) 2026 YeJe-cpu (https://github.com/YeJe-cpu)  
-> **Upstream License**: PolyForm Noncommercial License 1.0.0 (`https://polyformproject.org/licenses/noncommercial/1.0.0`). See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).  
+> **Required Notice**: Copyright (c) 2026 YeJe-cpu (https://github.com/YeJe-cpu)
+> **Upstream License**: PolyForm Noncommercial License 1.0.0 (`https://polyformproject.org/licenses/noncommercial/1.0.0`). See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
 > **Commercial Licensing Contact**: `aiesecxuanli@gmail.com`.
+> **Selective MIT Helper Attribution**: Analysis/diagnostic helpers adapted from `browser-use/video-use` (`@43cfc566`, MIT) in `transcript.py`, `qa.py`, `typography.py`, and `sound.py` — see [references/kh02-video-use-attribution.md](./references/kh02-video-use-attribution.md). Does NOT alter SeeCut's PolyForm Noncommercial license or rendering engine.
 
-This skill orchestrates the **original `YeJe-cpu/SeeCut` v3.4 Core** edit workflow in a strictly isolated workspace with fail-closed gates for licensing, security permissions, source integrity, evidence truthfulness, geometry/video QA, and human visual/audio approval.
+This skill orchestrates the **KH-02 Autonomous Professional Editor** directly atop the unmodified **YeJe-cpu/SeeCut v3.4 Core** rendering engine in a strictly isolated workspace with fail-closed gates for licensing, security permissions, path/cache safety, source integrity, evidence truthfulness, deterministic + browser + model QA, and human visual/audio sign-off.
 
 ## Non-Negotiable Guardrails
 
 1. **Hard License Gate (Run First)**:
    - Audit upstream `LICENSE` and `NOTICE` before executing any edit/render.
    - `YeJe-cpu/SeeCut` is licensed under **PolyForm Noncommercial 1.0.0**, NOT MIT.
-   - If the intended use includes monetized social media, ads, client services, resale, or any anticipated commercial application, **STOP** with `BLOCKED_COMMERCIAL_LICENSE`, cite `aiesecxuanli@gmail.com`, and do not run an unlicensed commercial production.
-   - Only execute SeeCut after confirming strictly noncommercial personal/research/educational use (with no anticipated commercial application) OR logging explicit written commercial permission from the author.
-2. **Hard Security / Permission Gate**:
-   - Upstream `skill/seecut/scripts/preflight.sh`, `agy_read.sh`, and `agy_judge.py` pass `--dangerously-skip-permissions` to `agy`.
-   - **Never** run `--dangerously-skip-permissions` silently or modify upstream scripts to fake a security PASS.
-   - Always run [scripts/safe_preflight.sh](./scripts/safe_preflight.sh) first (`SKIP_AGY_PING=1` + safe non-bypass `agy` check). When authorized by the owner, use the audited no-bypass wrappers [scripts/agy_read_safe.sh](./scripts/agy_read_safe.sh) and [scripts/agy_judge_safe.py](./scripts/agy_judge_safe.py) (verified `exit 0` on Antigravity CLI `1.5.15`, preserving 100% of upstream prompts, schemas, 540p transcode, tmp isolation, fingerprint/duration checks, and order-swapped pairwise logic without `--dangerously-skip-permissions`). If any upstream script requiring `--dangerously-skip-permissions` must be executed directly, stop at `PENDING_OWNER_SECURITY_APPROVAL` with the exact command and security consequences.
+   - If the intended use includes monetized social media, ads, client services, resale, or any anticipated commercial application without written permission from `aiesecxuanli@gmail.com`, **STOP** with `BLOCKED_COMMERCIAL_LICENSE` and do not run SeeCut or render deliverables.
+2. **Hard Security & P0 Safety Gate**:
+   - **Never** run `--dangerously-skip-permissions` or `npx hyperframes@latest`.
+   - Use only hardened local wrappers:
+     - [scripts/safe_preflight.sh](./scripts/safe_preflight.sh) (`--offline` or `--live`, pinned executables, exact normalized `OK` check, JSON output, strict exit `0/1/2`).
+     - [scripts/agy_read_safe.sh](./scripts/agy_read_safe.sh) (symlink/allowlist rejection, ownership-marked `trap` cleanup, transmission gate).
+     - [scripts/agy_judge_safe.py](./scripts/agy_judge_safe.py) (exit-code-before-parse, strict schema/bool checks, complete H2 rubric `{C1,C3,C4,C5,C6,C7}`, distinct SHA-bound fingerprint hits, calibrated duration tolerance, strict `X`/`Y` winner mapping, sanitized `grab_fail_frames`).
+   - Always invoke upstream `render.mjs` through [scripts/kh02/render_guard.py](./scripts/kh02/render_guard.py) (canonical run-owned `person_dir`, `.kh02_run_owned` marker, composite cache key, `>= 5 GiB` disk floor, atomic staging+rename, full decode QA).
 3. **Strict Engine & Workspace Isolation**:
-   - Create a fresh timestamped run directory per job; never overwrite prior runs or touch unrelated repositories, branches, CapCut/JianYing user profiles, or unrelated global skills.
-   - **Only** use SeeCut's native stack: HyperFrames + HTML/GSAP + `scripts/render.mjs` + `ffmpeg` audio mux + `scripts/geom-check.mjs` + `agy` (`check`/`pair`) + `scripts/jianying_layers.mjs` + `scripts/jianying_plan.py`.
-   - Never substitute Concat, Remotion, mimic-mcp, Chase Animations, video-use, or cloud renderers.
-   - When editing an already-voiced talking-head / AI-avatar clip, keep avatar/TTS generation **DISABLED** (no HeyGen, Doubao TTS, voice cloning, or lip-sync synthesis).
+   - Sole rendering engine: **YeJe-cpu/SeeCut v3.4 Core** (`HyperFrames + HTML/CSS/GSAP + Playwright/Chromium + render.mjs + FFmpeg mux`).
+   - Selective `video-use` helpers are permitted ONLY for read-only transcript phrase packing, boundary filmstrip/waveform QA diagnostics, opt-in SRT chunking, and loudness measurement — **NEVER** execute `video-use/helpers/render.py`, ElevenLabs API, Concat, Remotion, Manim, or CapCut as a rendering engine.
+   - Keep avatar/TTS generation **DISABLED** for already-voiced clips (`LOCK_VOICE` default). Never touch unrelated repositories, global skills, or CapCut/JianYing user profiles.
 4. **Input & Evidence Truthfulness**:
-   - Require the real absolute local path to the primary talking-head video. Never substitute a competitor or reference video; if absent, stop with `BLOCKED_INPUT` and complete only safe Phase 00 preparation.
-   - Any optional reference video is strictly `ANALYSIS_ONLY` (never imported into renders or packages).
-   - Never fabricate product UIs, mock Mac/App windows, fake metrics, or unverified screenshots (`00-总纲.md` §4–5). Mask source identifiers (logos/handles/avatars) on real screenshots and log visible text to `build/fp-manifest.txt`.
-5. **No Fake PASS / Mandatory Human Approval**:
-   - Every PASS/FAIL/BLOCKED/PENDING status must point to real generated files and logs.
-   - Keep `OWNER_VISUAL_APPROVAL=PENDING` and `OWNER_AUDIO_APPROVAL=PENDING` until the owner actually watches and hears the verified exported MP4 SHA-256.
+   - Require verified raw source inputs; never substitute `ANALYSIS_ONLY` reference reels or prior flattened adopted MP4s as source footage (`validate_references()` blocks any `ANALYSIS_ONLY` asset).
+   - Never fabricate UI mockups, fake screenshots, or unverified claims (`claim_evidence[]` enforced). Mask source identifiers on real captures and record all visible text in `build/fp-manifest.txt`.
+5. **No Fake PASS / Mandatory Human Sign-Off**:
+   - Report all **19 original gates + 10 KH-02 subgates** truthfully and keep `CODE_QA_PASS`, `OLIVIA_RENDER_VERIFIED`, `AUTO_EDITORIAL_QA`, `OWNER_VISUAL` (`PENDING`), `OWNER_AUDIO` (`PENDING`), `COMMERCIAL_RELEASE` (`BLOCKED`), and `CROSS_NICHE_VALIDATED` strictly separated.
 
 ---
 
-## Authoritative Upstream & References
+## Single-Entry CLI (`scripts/kh02/run.py`)
 
-- **Pinned Upstream Clone**: `~/Projects/SeeCut-Olivia-Standalone/third_party/SeeCut` (or `$SEECUT_UPSTREAM_ROOT`; Git SHA `b05d7ed27404a064060e0d370402f562b0c0c02e`, SeeCut `v3.4`, unmodified).
-- **Pinned Workspace Tools**: `~/Projects/SeeCut-Olivia-Standalone/tools/` (`hyperframes@0.9.86`, `playwright-core@1.65.1`, Apache-2.0, plus isolated `.venv` with `faster-whisper`).
-- Read [references/upstream-index.md](./references/upstream-index.md) for the exact reference reading hierarchy (`00-总纲.md` highest priority) and logged upstream documentation conflicts.
-- Read [references/gates-and-compliance.md](./references/gates-and-compliance.md) for all 19 mandatory reporting gates and fail-closed criteria.
+```bash
+# Dry-run contract, editorial planning, and resource budget check (no writes/renders/model calls):
+python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode plan --dry-run
+
+# Plan + emit authoritative SHOTBOOK_V2.json & SHOTBOOK_V2.md:
+python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode plan --workers 2
+
+# Preview (0.5x) or Full native render + structural/audio/integrity QA:
+python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode full --workers 2 --max-disk 4.0
+```
+
+Options: `--dry-run`, `--workers 1..4` (default `2`, heavy browser/ffmpeg concurrency locked to `1`), `--max-disk <GiB>`, `--profile seecut_core|editorial_pro|minimal_documentary|silent_visual`, `--license-decision <status>`, `--transcript <faster_whisper.json>`, `--catalog <hyperframes_catalog.json>`.
 
 ---
 
-## Execution Workflow (Phases 00–07)
+## Authoritative References & Schemas
 
-### Phase 00 — Environment, License & Security Audit
-1. Create a fresh unique run directory `<project_root>/runs/<YYYYMMDD_HHMMSS>_<RUN_TAG>/` with subdirectories `build/`, `qc/`, `exports/`, `jianying/layers/`, `logs/`, `evidence/`, `probe/`.
-2. Verify upstream repo remote HEAD vs pinned SHA (`b05d7ed27404a064060e0d370402f562b0c0c02e`); write `UPSTREAM_SHA.txt` and `LICENSE_AUDIT.md`. Enforce the **Hard License Gate**.
-3. Probe primary talking-head input via `ffprobe` (duration, resolution, native fps, audio stream, full decode QA) and compute streaming `SHA-256` (`SOURCE_SHA256.json`). If missing, stop at `BLOCKED_INPUT` after safe preparation.
-4. Run [scripts/safe_preflight.sh](./scripts/safe_preflight.sh) and log `PRE_FLIGHT.log` + `ENV_REPORT.json`. Confirm:
-   - `node >= 22`, `ffmpeg`/`ffprobe`, `python3`, workspace-local `faster-whisper` (inside `.venv`, no global/sudo), pinned `hyperframes` CLI + live `hyperframes catalog --json`, `playwright-core` + local headless Chromium cache, and authorized `agy` CLI (`agy models` + safe non-bypass ping).
-   - Check free disk space and memory/swap pressure; default heavy render concurrency to `1`.
+- **Upstream Index & Conflict Log**: [references/upstream-index.md](./references/upstream-index.md)
+- **Gates & Compliance (19 + 10 KH-02)**: [references/gates-and-compliance.md](./references/gates-and-compliance.md)
+- **KH-02 Doctrine**: [references/kh02-editorial-doctrine.md](./references/kh02-editorial-doctrine.md)
+- **Motion, Camera, Transitions, Typography**: [references/kh02-motion-and-camera.md](./references/kh02-motion-and-camera.md)
+- **Sound & Audio QA**: [references/kh02-audio.md](./references/kh02-audio.md)
+- **Independent QA & Adoption**: [references/kh02-qa.md](./references/kh02-qa.md)
+- **Cross-Niche Matrix**: [references/kh02-cross-niche.md](./references/kh02-cross-niche.md)
+- **MIT Attribution (`video-use`)**: [references/kh02-video-use-attribution.md](./references/kh02-video-use-attribution.md)
+- **JSON Schemas**: `schemas/kh02/{brief,source_inventory,transcript,edl,shotbook_v2,timeline,capability_registry,sfx_cues,qa_report}.schema.json`
+- **Examples**: `templates/kh02/{BRIEF,SHOTBOOK_V2,SHOTBOOK_V2.negative,EDIT_PLAN,QA_REPORT}.example.json`
 
-### Phase 01 — Source Understanding & ASR
-1. Understand the real talking-head video via `agy` video understanding (honoring the Security Gate — no silent `--dangerously-skip-permissions`) and inspect timestamped frames. Save `素材台账.md` and `REFERENCE_STYLE_NOTES.md` (if an `ANALYSIS_ONLY` reference exists).
-2. Run `faster-whisper` once locally on the source audio to generate word-level `seg_words.json`. Verify every key phrase/number against actual speech.
-3. Classify A-roll framing per `02-设计令牌Design-Reference.md` §6.5 (full half-body / corner PIP / decorative), measure exact normalized `face_rect = [x0, y0, x1, y1]`, and classify every spoken sentence as evidence-backed (`有据`) or opinion/concept (`无据`).
-4. Collect real user-approved evidence or capture real pages via `grab_evidence.mjs`; inspect every image for sensitive text, mask source identifiers, record `EVIDENCE_LEDGER.md`, `EVIDENCE_GAPS.md`, and `build/fp-manifest.txt`.
+---
 
-### Phase 02 — Creative Strategy & SHOTBOOK
-1. Read upstream references in strict priority order: `00-总纲.md` → `08-避坑SOP.md` → `01-方法论.md` + `03-编排层决策表.md` → `02-设计令牌Design-Reference.md` → `04-SHOTBOOK施工规格.md` → `05-视觉质量地板.md` (+ `11-无据段画法参考.md` for opinion beats).
-2. Keep the original spoken audio uninterrupted as the timeline backbone. Map 2–4 meaningful visual beats for ~15s clips (never force extra beats to mimic a longer reference).
-3. Inspect the live pinned `hyperframes catalog --json` first, plus bundled `assets/hf-hw/` (`hw-callout-circle`, `hw-underline`, `hw-arrow`). Every shot must name a real registry component or state why none applies.
-4. Anchor every payoff reveal to the exact spoken **keyword** frame from `seg_words.json` (never early / never sentence-start). Write `DESIGN_REFERENCE.md`, `SHOTBOOK.md`, `SHOTBOOK.json`, `BEAT_SYNC.md`, `HF_COMPONENT_SELECTION.md`.
+## Execution Workflow (KH-02 Phases 00–07)
 
-### Phase 03 — HyperFrames / HTML / GSAP Build & Render
-1. Author `build/project.json` matching `07-几何规则自检spec.md` (`source`, native `fps`, `width`, `height`, `duration`, `output_scale`, `face_rect`, `steady`, `spring`) and `build/master.html` exposing `window.__timelines.master`.
-2. Let `scripts/render.mjs` extract person JPG frames automatically from `source` at native `fps` (`<img>` frame swap — never `<video>` seek). Start delayed elements at CSS `opacity: 0` with GSAP `.set` + `.to` (never `.from`).
-3. Tag all elements with `data-check="box"|"bg"` (`bg` ONLY on verified screenshot/recording media, never paper/solid backgrounds), `data-anchor`, `data-word` + `data-t`, and `data-layer` + `data-layer-cat`.
-4. Run `node scripts/render.mjs build probe` and visually inspect probe frames before full render. Use `RENDER_SCALE=0.5` for intermediate iterations (`v1`/`v2`) and full native scale (no `RENDER_SCALE` override) for the adopted final render; mux untouched original audio with `ffmpeg` and verify AV sync (`< 0.1s` drift).
+### Phase 00 — Preflight, License & Run Isolation
+1. Create a unique timestamped run folder `runs/<UTC_TS>_KH02_<shortsha>_<nonce>/` with `README.md`, `build/`, `qc/`, `exports/`, `jianying/layers/`, `logs/`, `evidence/`, `probe/`, `tests/`, `cache/`, `manifests/`.
+2. Enforce the **Hard License Gate** (`LICENSE_AUDIT.md`, `REUSE_DECISIONS.md`) and run `zsh scripts/safe_preflight.sh --live --json-out <run>/logs/preflight.json` (or `--offline` for code-only checks).
 
-### Phase 04 — Self-Review Loop (H1 + H2 + Pairwise, Max 3 Versions)
-1. **H1 Geometry Gate**: Run `node scripts/geom-check.mjs build`; capture logs to `qc/vN-geom.log`. Fix every real collision, face occlusion, empty beat, early reveal, missing avatar, or spring failure (never strip `data-check` tags).
-2. **H2 Video Hard-Defect Gate**: Run `agy` check (`check.json` schema + `硬伤清单.txt`, isolated tmp dir, 540p transcode, fingerprint >= 2 hits, duration delta <= 3s, respecting the Security Gate). Inspect extracted fail-frames at the exact flagged timestamp before dismissing any false positive.
-3. **Pairwise Adoption (`v2`, `v3`)**: Compare candidate vs currently adopted winner with order-swapped runs (`X=A/Y=B` and `X=B/Y=A`). Adopt ONLY when both orders agree AND H1/H2 pass. Treat `invalid` as "comparison did not occur" (never as tie or pass). Stop at max `v3` or no win. Save `qc/`, `CRITIC_REPORT.md`, `REVIEW_DECISION.json`.
+### Phase 01 — Read-Only Source Analysis & ASR
+1. Run `source_analysis.py::build_inventory()` (multi-root unique IDs, chunked SHA-256, `ffprobe` streams/fps/VFR/rotation/SAR, silence & scene-cut detection, rights validation).
+2. Run local `faster-whisper` via `transcript.py::run_local_faster_whisper()` (16kHz PCM pipe immune to PyAV 19 `metadata_errors`) and normalize via `normalize_faster_whisper()` + `build_packed_transcript()` (`TAKES_PACKED.md` + `TRANSCRIPT_NORMALIZED.json`).
+3. Measure raw audio loudness/peaks via `sound.py::analyze_audio()` and capture/mask real web evidence when required (`EVIDENCE_LEDGER.md`, `EVIDENCE_GAPS.md`).
 
-### Phase 05 — Optional Licensed SFX & Core Layered Package
-1. Preserve the original voice track untouched. Run `sfx_ledger.py` + `sfx.py plan` (+ `sfx.py mix` when no JianYing draft engine is installed) ONLY if a verified licensed SFX library exists; otherwise record `SFX_NOT_AVAILABLE` (never fabricate placeholder SFX).
-2. Run `node scripts/jianying_layers.mjs build <run>/jianying/layers` and `python3 scripts/jianying_plan.py <run>/jianying/layers/manifest.json --name "<title>" --out <run>/jianying/plan.json` (plus optional `--preview`). Verify transparent PNGs, person-state MP4s, original audio, events, and manifest.
-3. Do NOT invent or force a JianYing draft unless a verified, licensed draft engine (`Easy JianYing`) is explicitly installed and authorized. Never touch existing CapCut/JianYing profiles.
+### Phase 02 — Master Editorial Planner (`SHOTBOOK_V2`)
+1. Evaluate 2–3 distinct creative directions (`planner.py::propose_directions()`), record alternatives & rejection reasons (`CREATIVE_DIRECTIONS.md`).
+2. Build audio-first cut candidates & rational piecewise time map (`edit_decisions.py`; default `LOCK_VOICE` identity map, `TRIM_APPROVED` only on explicit brief approval).
+3. Resolve unified `SHOTBOOK_V2.json` (`planner.py::resolve_editorial_plan()`), integrating `registry.py`, `motion.py`, `camera.py`, `transition.py`, `typography.py`, and `sound.py` (with `SHOTBOOK_V2.md` generated strictly from JSON). Validate via `qa.py::evaluate_editorial()`.
 
-### Phase 06 & 07 — Independent Export QA, Manifest & Human Sign-Off
-1. Verify full `ffmpeg` decode, `ffprobe` streams/fps/duration, SHA-256 of exported MP4, source-vs-export before/after SHA-256 integrity (`SOURCE_INTEGRITY.json`), mouth-sync stills (start/mid/end + beat boundaries), and person-region crop freeze check.
-2. Generate `FINAL_QA.json`, `QUALITY_DIFF.md`, `RIGHTS_LEDGER.csv`, `PROVENANCE.md`, `OWNER_REVIEW.md`, `DELIVERY_REPORT.md`, `README.md`, and `MANIFEST.json` (SHA-256 for all outputs and evidence).
-3. Report all 19 status gates truthfully with exact file paths, keeping `OWNER_VISUAL=PENDING` and `OWNER_AUDIO=PENDING` until owner playback sign-off.
+### Phase 03 — Canonical Compile & Guarded Render
+1. Compile `SHOTBOOK_V2.json` via `compile_plan.py::compile_shotbook()` → `build/master.html`, `build/project.json`, `build/fp-manifest.txt`, `COMPILE_MAP.json`.
+2. Render probe frames first via `render_guard.py::run_render_checked(..., mode="probe")` and visually inspect before full render. Use `RENDER_SCALE=0.5` for intermediate iterations (`v1`/`v2`), and full native scale for the final adopted render with untouched original audio (`-c:a copy`, no premature `-shortest` truncation).
+
+### Phase 04 — Self-Review Loop (H1 + H2 + Order-Swapped Pairwise, Max 3 Versions)
+1. **H1 Geometry Gate**: Run unmodified `node third_party/SeeCut/skill/seecut/scripts/geom-check.mjs <build>` (`FAIL 0` required).
+2. **H2 Hard-Defect Gate**: Run hardened `python3 scripts/agy_judge_safe.py check --video <mp4> --html <build>/master.html --out qc/vN-check.json`. Inspect extracted fail-frames before acting on any flag.
+3. **Order-Swapped Pairwise**: Run `python3 scripts/agy_judge_safe.py pair --a <cand> --b <base> --html-a <cand_html> --html-b <base_html> --out qc/vN-vs-base.json`. Adopt ONLY via `qa.py::decide_adoption()` (H1 + H2 + objective QA PASS + dual-order consensus). Cap at max 3 versions (`v1`–`v3`).
+
+### Phase 05 — Optional Licensed SFX & Layered JianYing Package
+1. Apply verified licensed SFX ONLY when present (`sound.py` + guarded `sfx.py`); otherwise record `SFX_NOT_AVAILABLE`.
+2. Export layered package via unmodified `jianying_layers.mjs` + `jianying_plan.py` (`jianying/layers/manifest.json`, `jianying/plan.json`, optional `--preview`). Distinguish `LAYERED_PACKAGE_VERIFIED` from `NATIVE_EDITOR_PROJECT_NOT_CREATED`.
+
+### Phase 06 & 07 — Independent Export QA, Diagnostics & Human Sign-Off
+1. Run `qa.py::validate_structural()`, `qa.py::inspect_audio()`, `source_analysis.py::verify_source_integrity()`, person-crop freeze & mouth-sync checks, and `qa.py::render_timeline_diagnostics()` (boundary filmstrips + PCM waveform + output-clock word labels + `frame_diagnostics.csv`).
+2. Emit `FINAL_QA.json`, `QUALITY_DIFF.md`, `DELIVERY_REPORT.md`, `OWNER_REVIEW.md`, `RUN_MANIFEST.json` / `SHA256SUMS`, keeping `OWNER_VISUAL=PENDING`, `OWNER_AUDIO=PENDING`, and `COMMERCIAL_RELEASE=BLOCKED`.

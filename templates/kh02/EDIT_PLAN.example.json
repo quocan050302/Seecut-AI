@@ -1,0 +1,32 @@
+{
+  "schema_version": "kh02.edl.v1",
+  "voice_policy": "LOCK_VOICE",
+  "fps_num": 24,
+  "fps_den": 1,
+  "audio_sample_rate": 48000,
+  "total_output_frames": 144,
+  "cut_candidates": [
+    {
+      "candidate_id": "cand_01",
+      "source_asset_id": "src_a_roll",
+      "start_sec": 2.4,
+      "end_sec": 3.0,
+      "kind": "intentional_showcase",
+      "decision": "KEEP",
+      "reason": "LOCK_VOICE default preserves original pacing and intentional visual beat."
+    }
+  ],
+  "segments": [
+    {
+      "segment_id": "seg_001",
+      "source_asset_id": "src_a_roll",
+      "src_start_frame": 0,
+      "src_end_frame": 144,
+      "out_start_frame": 0,
+      "out_end_frame": 144,
+      "audio_fade_in_ms": 0,
+      "audio_fade_out_ms": 0,
+      "reason": "LOCK_VOICE identity mapping"
+    }
+  ]
+}

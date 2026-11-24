@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh02/capability_registry.schema.json",
+  "title": "KH-02 Capability Registry",
+  "type": "object",
+  "required": ["schema_version", "hyperframes_version", "catalog_sha256", "capabilities"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh02.capability_registry.v1" },
+    "hyperframes_version": { "type": "string" },
+    "catalog_sha256": { "type": ["string", "null"] },
+    "catalog_total_items": { "type": "integer", "minimum": 0 },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "capability_id", "purpose", "engine_support", "availability",
+          "license", "aspect_constraints", "fps_compatible",
+          "min_duration_sec", "max_duration_sec", "fallback_id"
+        ],
+        "properties": {
+          "capability_id": { "type": "string", "minLength": 1 },
+          "catalog_name": { "type": ["string", "null"] },
+          "purpose": { "type": "string" },
+          "engine_support": { "type": "string", "enum": ["hyperframes_gsap_dom", "hf_hw_svg", "local_css_gsap", "unsupported"] },
+          "availability": { "type": "string", "enum": ["AVAILABLE_VERIFIED", "CATALOG_LISTED", "LOCAL_VERIFIED", "UNAVAILABLE"] },
+          "asset_requirements": { "type": "array", "items": { "type": "string" } },
+          "license": { "type": "string" },
+          "aspect_constraints": { "type": "array", "items": { "type": "string" } },
+          "params_schema": { "type": "object" },
+          "fps_compatible": { "type": "boolean" },
+          "min_duration_sec": { "type": "number", "minimum": 0 },
+          "max_duration_sec": { "type": "number", "minimum": 0 },
+          "forbidden_combinations": { "type": "array", "items": { "type": "string" } },
+          "alpha_supported": { "type": "boolean" },
+          "diagnostic_test": { "type": "string" },
+          "fallback_id": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

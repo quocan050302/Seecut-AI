@@ -4,3 +4,11 @@ __pycache__/
 *.pyo
 .venv/
 node_modules/
+*.mp4
+*.mov
+*.m4a
+*.wav
+*.mp3
+runs/
+.pytest_cache/
+*.tmp

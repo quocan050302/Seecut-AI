@@ -1,0 +1,291 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh02/shotbook_v2.schema.json",
+  "title": "KH-02 Unified SHOTBOOK V2 Contract",
+  "type": "object",
+  "required": [
+    "schema_version", "run_id", "mode", "profile", "status",
+    "source_sha_set", "output_spec", "input_brief_sha",
+    "rights_ledger_sha", "transcript_sha", "edit_decision_map",
+    "story_arc", "beats", "visual_events", "camera_events",
+    "transitions", "text_events", "audio_cues", "claim_evidence",
+    "approved_exceptions", "provenance"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh02.shotbook.v2" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "talking_head", "software_demo", "product_demo", "tutorial",
+        "education", "documentary", "narrative", "faceless",
+        "montage", "interview", "custom"
+      ]
+    },
+    "profile": { "type": "string", "enum": ["seecut_core", "editorial_pro", "minimal_documentary", "silent_visual"] },
+    "status": { "type": "string", "enum": ["PLANNED", "COMPILED", "RENDERED", "VERIFIED", "TEST_ONLY"] },
+    "source_sha_set": { "type": "object", "additionalProperties": { "type": "string" } },
+    "output_spec": {
+      "type": "object",
+      "required": ["width", "height", "fps_num", "fps_den", "total_frames", "audio_sample_rate", "orientation", "platform_safe_zone"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 64 },
+        "height": { "type": "integer", "minimum": 64 },
+        "output_scale": { "type": "number", "minimum": 0.25, "maximum": 4.0 },
+        "fps_num": { "type": "integer", "minimum": 1 },
+        "fps_den": { "type": "integer", "minimum": 1 },
+        "total_frames": { "type": "integer", "minimum": 1 },
+        "audio_sample_rate": { "type": "integer", "minimum": 8000 },
+        "orientation": { "type": "string", "enum": ["portrait", "landscape", "square"] },
+        "platform_safe_zone": {
+          "type": "object",
+          "required": ["top", "bottom", "left", "right"],
+          "properties": {
+            "top": { "type": "number", "minimum": 0, "maximum": 0.4 },
+            "bottom": { "type": "number", "minimum": 0, "maximum": 0.45 },
+            "left": { "type": "number", "minimum": 0, "maximum": 0.25 },
+            "right": { "type": "number", "minimum": 0, "maximum": 0.25 }
+          }
+        }
+      }
+    },
+    "input_brief_sha": { "type": "string", "minLength": 8 },
+    "rights_ledger_sha": { "type": "string", "minLength": 8 },
+    "transcript_sha": { "type": ["string", "null"] },
+    "edit_decision_map": { "type": "object" },
+    "story_arc": {
+      "type": "object",
+      "required": ["creative_direction_id", "theme", "archetype", "summary", "alternatives_considered"],
+      "properties": {
+        "creative_direction_id": { "type": "string", "minLength": 1 },
+        "theme": { "type": "string", "minLength": 1 },
+        "archetype": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "alternatives_considered": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "beats": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "beat_id", "start_frame", "end_frame", "source_word_ids", "semantic_function",
+          "viewer_goal", "emotion_intensity", "priority", "content_refs", "proof_status",
+          "visual_mode", "focus_subject", "continuity_in", "continuity_out",
+          "planned_information_change", "why", "read_time_frames"
+        ],
+        "properties": {
+          "beat_id": { "type": "string", "minLength": 1 },
+          "start_frame": { "type": "integer", "minimum": 0 },
+          "end_frame": { "type": "integer", "minimum": 1 },
+          "source_word_ids": { "type": "array", "items": { "type": "string" } },
+          "semantic_function": {
+            "type": "string",
+            "enum": ["hook", "problem", "tension", "mechanism", "evidence", "comparison", "step", "reveal", "payoff", "cta", "breath"]
+          },
+          "viewer_goal": { "type": "string", "minLength": 1 },
+          "emotion_intensity": { "type": "number", "minimum": 0, "maximum": 1 },
+          "priority": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "content_refs": { "type": "array", "items": { "type": "string" } },
+          "proof_status": { "type": "string", "enum": ["VERIFIED_REAL_EVIDENCE", "SOURCE_FOOTAGE_DIRECT", "CONCEPT_ILLUSTRATION", "OPINION_NO_EVIDENCE"] },
+          "visual_mode": { "type": "string" },
+          "focus_subject": { "type": "string", "minLength": 1 },
+          "continuity_in": { "type": "string" },
+          "continuity_out": { "type": "string" },
+          "planned_information_change": { "type": "string", "minLength": 1 },
+          "why": { "type": "string", "minLength": 1 },
+          "read_time_frames": { "type": "integer", "minimum": 0 },
+          "intentional_hold": { "type": "boolean" }
+        }
+      }
+    },
+    "visual_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "event_id", "beat_id", "track_id", "layer_id", "z_order", "asset_ref",
+          "capability_id", "start_frame", "end_frame", "anchor_word_id", "anchor_mode",
+          "normalized_bbox", "opacity", "transform", "easing", "safe_zone",
+          "face_exclusion", "semantic_reason", "expected_visual_evidence"
+        ],
+        "properties": {
+          "event_id": { "type": "string", "minLength": 1 },
+          "beat_id": { "type": "string", "minLength": 1 },
+          "track_id": { "type": "string", "minLength": 1 },
+          "layer_id": { "type": "string", "minLength": 1 },
+          "layer_cat": { "type": "string", "enum": ["evbg", "card", "cardimg", "hl", "title", "hand", "person", "caption"] },
+          "z_order": { "type": "integer" },
+          "asset_ref": { "type": ["string", "null"] },
+          "capability_id": { "type": "string", "minLength": 1 },
+          "start_frame": { "type": "integer", "minimum": 0 },
+          "end_frame": { "type": "integer", "minimum": 1 },
+          "anchor_word_id": { "type": ["string", "null"] },
+          "anchor_mode": { "type": "string", "enum": ["keyword_exact", "preparatory_lead", "beat_start", "visual_action", "hold"] },
+          "entry_frames": { "type": "integer", "minimum": 0 },
+          "hold_frames": { "type": "integer", "minimum": 0 },
+          "exit_frames": { "type": "integer", "minimum": 0 },
+          "normalized_bbox": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": { "type": "number", "minimum": -0.2, "maximum": 1.2 }
+          },
+          "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+          "transform": { "type": "object" },
+          "mask": { "type": ["object", "null"] },
+          "blend": { "type": "string" },
+          "easing": { "type": "string", "minLength": 1 },
+          "params": { "type": "object" },
+          "safe_zone": { "type": "boolean" },
+          "face_exclusion": { "type": "boolean" },
+          "semantic_reason": { "type": "string", "minLength": 1 },
+          "expected_visual_evidence": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "camera_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "camera_id", "beat_id", "start_frame", "end_frame", "target_region",
+          "framing_from", "framing_to", "scale_from", "scale_to",
+          "anchor", "velocity_limit", "acceleration_limit",
+          "continuity_group", "reason", "source_resolution_limit"
+        ],
+        "properties": {
+          "camera_id": { "type": "string", "minLength": 1 },
+          "beat_id": { "type": "string", "minLength": 1 },
+          "start_frame": { "type": "integer", "minimum": 0 },
+          "end_frame": { "type": "integer", "minimum": 1 },
+          "target_region": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number" } },
+          "framing_from": { "type": "string" },
+          "framing_to": { "type": "string" },
+          "scale_from": { "type": "number", "minimum": 0.25, "maximum": 3.0 },
+          "scale_to": { "type": "number", "minimum": 0.25, "maximum": 3.0 },
+          "pos_from": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+          "pos_to": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+          "anchor": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+          "easing": { "type": "string" },
+          "velocity_limit": { "type": "number", "minimum": 0 },
+          "acceleration_limit": { "type": "number", "minimum": 0 },
+          "continuity_group": { "type": "string" },
+          "reason": { "type": "string" },
+          "source_resolution_limit": { "type": "number", "minimum": 1.0 }
+        }
+      }
+    },
+    "transitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "transition_id", "from_beat", "to_beat", "boundary_frame",
+          "overlap_range", "technique", "easing", "reason"
+        ],
+        "properties": {
+          "transition_id": { "type": "string", "minLength": 1 },
+          "from_beat": { "type": "string", "minLength": 1 },
+          "to_beat": { "type": "string", "minLength": 1 },
+          "boundary_frame": { "type": "integer", "minimum": 0 },
+          "overlap_range": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 0 } },
+          "technique": { "type": "string", "enum": ["match_anchor", "motion_bridge", "mask_wipe", "reframe", "crossfade", "intentional_cut"] },
+          "match_anchor": { "type": ["string", "null"] },
+          "direction": { "type": "string" },
+          "easing": { "type": "string" },
+          "reason": { "type": "string" },
+          "audio_bridge": { "type": "string" },
+          "cue_id": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "text_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "text_id", "beat_id", "text", "word_ids", "role", "hierarchy",
+          "start_frame", "end_frame", "minimum_read_frames", "position", "caption_policy", "contrast_intent"
+        ],
+        "properties": {
+          "text_id": { "type": "string", "minLength": 1 },
+          "beat_id": { "type": "string", "minLength": 1 },
+          "text": { "type": "string", "minLength": 1 },
+          "word_ids": { "type": "array", "items": { "type": "string" } },
+          "role": { "type": "string", "enum": ["hero", "key_phrase", "label", "supporting", "cta", "caption"] },
+          "hierarchy": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "style": { "type": "object" },
+          "font_ref": { "type": "string" },
+          "start_frame": { "type": "integer", "minimum": 0 },
+          "end_frame": { "type": "integer", "minimum": 1 },
+          "minimum_read_frames": { "type": "integer", "minimum": 1 },
+          "position": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number" } },
+          "caption_policy": { "type": "string", "enum": ["OFF", "ON_REQUESTED", "KEYWORDS_ONLY"] },
+          "emphasis": { "type": "array", "items": { "type": "string" } },
+          "contrast_intent": { "type": "string" }
+        }
+      }
+    },
+    "audio_cues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "cue_id", "kind", "asset_ref", "frame_start", "frame_end",
+          "gain_db", "fade_in_ms", "fade_out_ms", "license_ref", "role", "reason", "optional_flag"
+        ],
+        "properties": {
+          "cue_id": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "enum": ["voice", "sfx_hook", "sfx_pop", "sfx_whoosh", "sfx_impact", "sfx_ding", "sfx_click", "bgm", "ambience"] },
+          "asset_ref": { "type": ["string", "null"] },
+          "frame_start": { "type": "integer", "minimum": 0 },
+          "frame_end": { "type": "integer", "minimum": 1 },
+          "sample_start": { "type": "integer", "minimum": 0 },
+          "anchor_event": { "type": ["string", "null"] },
+          "trim_start_sec": { "type": "number", "minimum": 0 },
+          "gain_db": { "type": "number", "minimum": -60, "maximum": 12 },
+          "fade_in_ms": { "type": "number", "minimum": 0 },
+          "fade_out_ms": { "type": "number", "minimum": 0 },
+          "ducking_db": { "type": "number", "minimum": -36, "maximum": 0 },
+          "license_ref": { "type": "string" },
+          "role": { "type": "string" },
+          "reason": { "type": "string" },
+          "expected_peak_db": { "type": ["number", "null"] },
+          "optional_flag": { "type": "boolean" }
+        }
+      }
+    },
+    "claim_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["claim_id", "exact_text", "source_asset_id", "verification_status", "allowed_display"],
+        "properties": {
+          "claim_id": { "type": "string", "minLength": 1 },
+          "exact_text": { "type": "string" },
+          "source_asset_id": { "type": ["string", "null"] },
+          "source_path": { "type": ["string", "null"] },
+          "source_sha256": { "type": ["string", "null"] },
+          "reference_span": { "type": ["string", "null"] },
+          "verification_status": { "type": "string", "enum": ["VERIFIED_REAL_CAPTURE", "VERIFIED_RAW_FOOTAGE", "CONCEPT_ILLUSTRATION", "UNVERIFIED_BLOCKED"] },
+          "allowed_display": { "type": "boolean" }
+        }
+      }
+    },
+    "approved_exceptions": { "type": "array", "items": { "type": "object" } },
+    "provenance": {
+      "type": "object",
+      "required": ["planner_version", "generated_at_utc", "engine", "base_git_sha", "upstream_seecut_sha"],
+      "properties": {
+        "planner_version": { "type": "string" },
+        "generated_at_utc": { "type": "string" },
+        "engine": { "type": "string", "const": "SeeCut-v3.4-HyperFrames-HTML-GSAP" },
+        "base_git_sha": { "type": "string" },
+        "upstream_seecut_sha": { "type": "string" },
+        "video_use_ref_sha": { "type": "string" }
+      }
+    }
+  }
+}

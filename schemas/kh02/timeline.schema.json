@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh02/timeline.schema.json",
+  "title": "KH-02 Compiled Master Timeline Map",
+  "type": "object",
+  "required": ["schema_version", "plan_sha256", "fps_num", "fps_den", "total_frames", "html_file", "project_json_file", "compiled_events"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh02.timeline.v1" },
+    "plan_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "fps_num": { "type": "integer", "minimum": 1 },
+    "fps_den": { "type": "integer", "minimum": 1 },
+    "total_frames": { "type": "integer", "minimum": 1 },
+    "html_file": { "type": "string" },
+    "project_json_file": { "type": "string" },
+    "steady_times_sec": { "type": "array", "items": { "type": "number", "minimum": 0 } },
+    "spring_targets": { "type": "array" },
+    "compiled_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["event_id", "selector", "layer_id", "start_frame", "end_frame", "start_sec", "end_sec", "capability_id"],
+        "properties": {
+          "event_id": { "type": "string" },
+          "selector": { "type": "string" },
+          "layer_id": { "type": "string" },
+          "start_frame": { "type": "integer", "minimum": 0 },
+          "end_frame": { "type": "integer", "minimum": 1 },
+          "start_sec": { "type": "number", "minimum": 0 },
+          "end_sec": { "type": "number", "minimum": 0 },
+          "capability_id": { "type": "string" },
+          "expected_transform": { "type": "object" }
+        }
+      }
+    }
+  }
+}

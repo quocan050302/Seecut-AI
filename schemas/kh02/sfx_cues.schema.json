@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh02/sfx_cues.schema.json",
+  "title": "KH-02 Sound & SFX Cues Plan",
+  "type": "object",
+  "required": ["schema_version", "voice_policy", "sfx_status", "bgm_status", "cues", "warnings"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh02.sfx_cues.v1" },
+    "voice_policy": { "type": "string", "enum": ["LOCK_VOICE", "TRIM_APPROVED", "SILENT_BY_DESIGN"] },
+    "sfx_status": { "type": "string", "enum": ["PLANNED_LICENSED", "SFX_NOT_AVAILABLE", "OFF_BY_BRIEF", "BLOCKED_UNLICENSED"] },
+    "bgm_status": { "type": "string", "enum": ["PLANNED_LICENSED", "BGM_NOT_AVAILABLE", "OFF_BY_BRIEF", "BLOCKED_UNLICENSED"] },
+    "voice_peak_db": { "type": ["number", "null"] },
+    "voice_lufs": { "type": ["number", "null"] },
+    "cues": { "type": "array" },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  }
+}

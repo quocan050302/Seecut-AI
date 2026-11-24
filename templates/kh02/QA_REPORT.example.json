@@ -1,0 +1,47 @@
+{
+  "schema_version": "kh02.qa_report.v1",
+  "run_id": "example_run_20261124_001",
+  "overall_status": "PREVIEW_PENDING_APPROVAL",
+  "statuses": {
+    "CODE_QA_PASS": "PASS",
+    "OLIVIA_RENDER_VERIFIED": "PENDING",
+    "AUTO_EDITORIAL_QA": "PENDING",
+    "OWNER_VISUAL": "PENDING",
+    "OWNER_AUDIO": "PENDING",
+    "COMMERCIAL_RELEASE": "BLOCKED",
+    "CROSS_NICHE_VALIDATED": "TEST_ONLY"
+  },
+  "evidence_records": [
+    {
+      "gate": "KH02_CONTRACT",
+      "check_id": "schema_validation",
+      "status": "PASS",
+      "expected": "0 contract errors",
+      "actual": "0 contract errors",
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "output_sha": null,
+      "frame_or_time": "0-144",
+      "command": "python3 -m scripts.kh02.run --dry-run",
+      "log_path": "logs/contract_check.log",
+      "reason": "All schema, reference, and frame-clock invariants satisfied.",
+      "reviewer_type": "deterministic_code"
+    }
+  ],
+  "original_19_gates": {
+    "OWNER_VISUAL": "PENDING",
+    "OWNER_AUDIO": "PENDING",
+    "COMMERCIAL_RELEASE": "BLOCKED"
+  },
+  "kh02_subgates": {
+    "KH02_CONTRACT": "PASS",
+    "KH02_EDITORIAL": "PENDING",
+    "KH02_MOTION": "PENDING",
+    "KH02_CAMERA": "PENDING",
+    "KH02_TRANSITION": "PENDING",
+    "KH02_TYPO": "PENDING",
+    "KH02_AUDIO": "PENDING",
+    "KH02_REGRESSION": "PENDING",
+    "KH02_OLIVIA": "PENDING",
+    "KH02_GENERALIZATION": "PENDING"
+  }
+}
