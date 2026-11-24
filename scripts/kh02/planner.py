@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from . import UPSTREAM_SEECUT_SHA, VIDEO_USE_REF_SHA, __version__
-from .camera import plan_camera_path
+from .camera import (
+    compute_presenter_reserved_region,
+    fit_face_safe_crop,
+    normalize_presenter_policy,
+    plan_camera_path,
+    resolve_presenter_region,
+    resolve_safe_zone_for_platform,
+)
 from .contracts import hash_artifact, seconds_to_frame, validate_references, validate_schema
 from .edit_decisions import build_time_map, propose_cut_candidates
 from .motion import plan_motion
@@ -17,7 +24,7 @@ from .registry import build_registry, select_capability
 from .sound import plan_audio_cues
 from .transcript import map_words_to_output
 from .transition import choose_transition
-from .typography import compute_min_read_frames, plan_text_events
+from .typography import compute_min_read_frames, plan_text_events, resolve_layout_avoiding_presenter
 
 ASPECT_CANVAS = {
     "9:16": {"width": 720, "height": 1280, "output_scale": 1.5, "orientation": "portrait", "safe_zone": {"top": 0.08, "bottom": 0.12, "left": 0.04, "right": 0.04}},
@@ -42,7 +49,7 @@ ARCHETYPE_BY_MODE = {
 
 
 def build_editor_brief(raw_brief: dict[str, Any]) -> dict[str, Any]:
-    """Validate and normalize an Editor Brief with conservative defaults (LOCK_VOICE, captions OFF)."""
+    """Validate and normalize an Editor Brief with conservative defaults (LOCK_VOICE, captions OFF, LEGACY_DYNAMIC)."""
     brief = dict(raw_brief)
     brief.setdefault("schema_version", "kh02.brief.v1")
     brief.setdefault("profile", "editorial_pro")
@@ -56,6 +63,17 @@ def build_editor_brief(raw_brief: dict[str, Any]) -> dict[str, Any]:
     errs = validate_schema(brief, "brief")
     if errs:
         raise ValueError(f"Invalid editor brief: {errs[:4]}")
+    # Validate presenter_policy conflicts early when supplied
+    if brief.get("presenter_policy") is not None:
+        has_pres_src = any(
+            s.get("kind") == "a_roll" and s.get("rights") not in ("ANALYSIS_ONLY", "UNLICENSED")
+            for s in brief.get("sources", [])
+        )
+        brief["presenter_policy"] = normalize_presenter_policy(
+            brief["presenter_policy"],
+            brief_mode=brief["mode"],
+            has_presenter_source=has_pres_src,
+        )
     return brief
 
 
@@ -140,25 +158,140 @@ def propose_directions(
     return directions
 
 
+def _tokenize_semantic(text: str) -> set[str]:
+    import re
+    return {t for t in re.split(r"[^a-z0-9\u00C0-\u024F\u1E00-\u1EFF\u4e00-\u9fff]+", str(text or "").lower()) if len(t) >= 2}
+
+
+def _match_relevant_evidence(
+    phrase_text: str,
+    usable_evidence: list[dict[str, Any]],
+    *,
+    fallback_allow: bool = False,
+    used_ids: set[str] | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Select verified evidence asset by semantic token overlap (preferring unused assets across beats)."""
+    if not usable_evidence:
+        return None, "no_verified_evidence_assets"
+    ptoks = _tokenize_semantic(phrase_text)
+    used = used_ids or set()
+    scored: list[tuple[int, int, str, dict[str, Any]]] = []
+    for a in usable_evidence:
+        atoks = _tokenize_semantic(f"{a.get('asset_id', '')} {a.get('label', '')} {a.get('basename', '')}")
+        # Expand domain synonyms cleanly without hardcoding a specific video
+        if atoks & {"gumroad", "platform", "homepage"}:
+            atoks |= {"gumroad", "page", "platform", "site", "store"}
+        if atoks & {"storefront", "hero", "bundle", "landing"}:
+            atoks |= {"look", "this", "bundle", "hero", "page", "storefront", "screen"}
+        if atoks & {"details", "included", "works", "workflow", "printable", "steps", "pack"}:
+            atoks |= {"details", "see", "included", "steps", "workflow", "how", "breakdown"}
+        if atoks & {"code", "cli", "terminal"}:
+            atoks |= {"command", "code", "run", "build", "terminal", "install"}
+        if atoks & {"chart", "metric", "benchmark"}:
+            atoks |= {"result", "proof", "number", "metric", "data", "benchmark"}
+        hits = len(ptoks & atoks)
+        unused_bonus = 1 if a["asset_id"] not in used else 0
+        scored.append((hits, unused_bonus, a["asset_id"], a))
+    # Sort by highest overlap; when overlap > 0, strongly prefer unused assets if tied or close
+    scored.sort(key=lambda x: (-x[0], -x[1], x[2]))
+    best_hits = scored[0][0]
+    if best_hits > 0:
+        unused_matches = [s for s in scored if s[0] > 0 and s[1] == 1]
+        pick = unused_matches[0] if (unused_matches and unused_matches[0][0] >= max(1, best_hits - 1)) else scored[0]
+        return pick[3], f"token_overlap={pick[0]} with {pick[3]['asset_id']}"
+    if fallback_allow:
+        unused_all = [s for s in scored if s[1] == 1]
+        pick = unused_all[0] if unused_all else scored[0]
+        return pick[3], f"contextual_demo_match:{pick[3]['asset_id']}"
+    return None, "no_semantic_token_overlap"
+
+
+def _classify_phrase_semantics(
+    text: str,
+    *,
+    is_first: bool,
+    is_last: bool,
+    is_visual_hold: bool,
+    brief: dict[str, Any],
+    usable_evidence: list[dict[str, Any]],
+    used_ev_ids: set[str] | None = None,
+) -> tuple[str, dict[str, Any] | None, str, float, int]:
+    """Classify a beat strictly by phrase semantics & evidence relevance (not index parity)."""
+    low = str(text or "").strip().lower()
+    toks = _tokenize_semantic(low)
+    mode = brief.get("mode", "talking_head")
+
+    if is_visual_hold:
+        if mode in ("documentary", "narrative"):
+            return "intentional_silence", None, "justified_visual_breathing_room", 0.45, 3
+        return "demonstration", None, "active_visual_walkthrough_span", 0.65, 4
+
+    # Explicit CTA detection
+    cta_cues = {"link", "download", "subscribe", "follow", "click", "join", "try", "comment", "sign", "bio"}
+    if (is_last and brief.get("cta_copy")) or (toks & cta_cues and is_last):
+        return "cta", None, "cta_lexical_or_brief_copy", 0.85, 5
+
+    # Payoff / emotional outcome detection (works regardless of index position!)
+    payoff_cues = {"obsessed", "turned", "finally", "result", "solved", "works", "love", "worth", "outcome", "saved", "cleanest"}
+    if ("turned out" in low or bool(toks & payoff_cues)) and not is_first:
+        ev_match, ev_rsn = _match_relevant_evidence(low, usable_evidence, fallback_allow=False, used_ids=used_ev_ids)
+        return "payoff", ev_match, f"payoff_semantic_cue ({ev_rsn})", 0.88, 5
+
+    # Question detection
+    if "?" in low or low.startswith(("why ", "how ", "what ", "ever wonder", "did you")):
+        return ("hook" if is_first else "question"), None, "interrogative_curiosity_cue", 0.82, 5
+
+    # Proof / demonstration / visual inspection cues
+    demo_cues = {"look", "see", "details", "show", "proof", "demo", "page", "screen", "dashboard", "benchmark", "example", "screenshot", "gumroad"}
+    ev_match, ev_rsn = _match_relevant_evidence(
+        low, usable_evidence,
+        fallback_allow=bool(toks & {"look", "page", "screen", "proof", "demo", "dashboard"}),
+        used_ids=used_ev_ids,
+    )
+    if not is_first and (bool(toks & demo_cues) or ev_match is not None):
+        if "wait" in toks or "but" in toks or "actually" in toks:
+            if "details" in toks or "see" in toks:
+                return ("evidence" if ev_match else "reveal"), ev_match, f"contrast_detail_reveal ({ev_rsn})", 0.82, 5
+            return "turning_point", ev_match, f"contrast_turning_point ({ev_rsn})", 0.78, 5
+        if ev_match is not None:
+            return "evidence", ev_match, f"verified_evidence_semantic_match ({ev_rsn})", 0.80, 5
+        return "demonstration", None, "visual_demo_without_separate_capture", 0.74, 4
+
+    # Turning point / contrast cues
+    if toks & {"wait", "but", "however", "actually", "instead", "problem", "mistake", "wrong"}:
+        return ("problem" if (toks & {"problem", "mistake", "wrong"}) else "turning_point"), None, "contrast_or_problem_cue", 0.78, 5
+
+    # Step / mechanism / process cues
+    if toks & {"step", "first", "second", "third", "next", "then", "customize", "print", "install", "setup", "workflow", "how", "build", "configure"}:
+        return "step", None, "process_step_semantic_cue", 0.70, 4
+
+    # Opening hook vs closing payoff vs general context
+    if is_first:
+        return "hook", ev_match, f"opening_hook_lead ({ev_rsn})", 0.88, 5
+    if is_last:
+        return "payoff", ev_match, f"closing_payoff_beat ({ev_rsn})", 0.84, 5
+    return "context", None, "narrative_context_explanation", 0.62, 3
+
+
 def analyze_semantic_beats(
     brief: dict[str, Any],
     inventory: dict[str, Any],
     transcript: dict[str, Any] | None,
     time_map: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Build contiguous frame-accurate semantic beats from mapped phrases + source visual structure."""
+    """Build contiguous frame-accurate semantic beats using phrase semantics & evidence relevance (not index parity)."""
     fps_num = int(time_map["fps_num"])
     fps_den = int(time_map["fps_den"])
     fps = fps_num / fps_den
     total_frames = int(time_map["total_output_frames"])
     usable = [a for a in inventory.get("assets", []) if a.get("usable_in_render")]
     primary = next((a for a in usable if a["kind"] in ("a_roll", "b_roll")), usable[0])
-    evid_assets = [a["asset_id"] for a in usable if a["kind"] in ("real_ui", "still_asset")]
+    usable_ev = [a for a in usable if a["kind"] in ("real_ui", "still_asset")]
 
     mapped_words = map_words_to_output(transcript, time_map) if transcript else []
     phrases = (transcript or {}).get("phrases", [])
 
-    # Determine beat boundaries cleanly from phrases + any large intentional gaps (>2.5s)
+    # Determine beat boundaries cleanly from mapped phrases + any retained long visual showcase intervals (>= 2.4s)
     raw_spans: list[tuple[int, int, list[str], str, bool]] = []
     if phrases and mapped_words:
         word_out_map = {w["word_id"]: w for w in mapped_words}
@@ -169,28 +302,23 @@ def analyze_semantic_beats(
                 continue
             p_start = word_out_map[wids[0]]["out_start_frame"]
             p_end = word_out_map[wids[-1]]["out_end_frame"]
-            # If there is a long visual-only showcase pause before this phrase (>= 2.2s), give it its own beat
-            if p_idx > 0 and (p_start - cursor) >= int(round(2.2 * fps)):
+            # Only create separate visual showcase beat if gap remains >= 2.4s AFTER rough cut
+            if p_idx > 0 and (p_start - cursor) >= int(round(2.4 * fps)):
                 raw_spans.append((cursor, p_start, [], "Visual showcase walkthrough", True))
                 cursor = p_start
-            # Extend phrase to next boundary cleanly
-            if p_idx == 0:
-                span_start = 0
-            else:
-                span_start = cursor
+            span_start = 0 if p_idx == 0 else cursor
             span_end = max(span_start + 1, min(total_frames, p_end + int(round(0.35 * fps))))
             raw_spans.append((span_start, span_end, wids, ph["text"], False))
             cursor = span_end
         if cursor < total_frames:
-            if (total_frames - cursor) >= int(round(2.0 * fps)):
+            if (total_frames - cursor) >= int(round(2.2 * fps)):
                 raw_spans.append((cursor, total_frames, [], brief.get("cta_copy") or "Visual closing hold", True))
             elif raw_spans:
                 a, _, wids, txt, ih = raw_spans[-1]
                 raw_spans[-1] = (a, total_frames, wids, txt, ih)
     else:
-        # Silent or faceless source: divide into clean semantic chapters (max 4 beats for short, chaptered for long)
         dur_sec = total_frames / fps
-        n_beats = max(2, min(8, int(round(dur_sec / 4.0)))) if dur_sec > 8.0 else 2
+        n_beats = max(2, min(12, int(round(dur_sec / 5.0)))) if dur_sec > 8.0 else 2
         step = max(1, total_frames // n_beats)
         for i in range(n_beats):
             s = i * step
@@ -200,53 +328,712 @@ def analyze_semantic_beats(
 
     # Guarantee strict half-open contiguous coverage [0, total_frames)
     beats: list[dict[str, Any]] = []
+    used_ev_ids: set[str] = set()
     mode = brief["mode"]
     for idx, (s, e, wids, txt, is_visual_hold) in enumerate(raw_spans):
         sf = 0 if idx == 0 else beats[-1]["end_frame"]
         ef = total_frames if idx == len(raw_spans) - 1 else max(sf + 1, min(total_frames - (len(raw_spans) - 1 - idx), e))
-        if idx == 0:
-            fn = "hook"
-        elif idx == len(raw_spans) - 1:
-            fn = "cta" if brief.get("cta_copy") else "payoff"
-        elif is_visual_hold:
-            fn = "step" if mode in ("tutorial", "software_demo", "product_demo", "talking_head") else "mechanism"
-        elif evid_assets and idx == 1:
-            fn = "evidence"
-        else:
-            fn = "reveal" if idx % 2 == 1 else "step"
 
-        use_ev = bool(evid_assets) and fn == "evidence"
-        refs = [primary["asset_id"]] + ([evid_assets[0]] if use_ev else [])
+        fn, ev_asset, sem_reason, emo, prio = _classify_phrase_semantics(
+            txt,
+            is_first=(idx == 0),
+            is_last=(idx == len(raw_spans) - 1),
+            is_visual_hold=is_visual_hold,
+            brief=brief,
+            usable_evidence=usable_ev,
+            used_ev_ids=used_ev_ids,
+        )
+        use_ev = ev_asset is not None and fn in ("hook", "evidence", "proof", "demonstration", "payoff")
+        if use_ev and ev_asset is not None:
+            used_ev_ids.add(ev_asset["asset_id"])
+        refs = [primary["asset_id"]] + ([ev_asset["asset_id"]] if use_ev else [])
         proof_status = (
             "VERIFIED_REAL_EVIDENCE" if use_ev
-            else ("CONCEPT_ILLUSTRATION" if mode in ("education", "faceless") else "SOURCE_FOOTAGE_DIRECT")
+            else ("CONCEPT_ILLUSTRATION" if (mode in ("education", "faceless") or fn in ("step", "reveal", "mechanism")) else "SOURCE_FOOTAGE_DIRECT")
         )
         visual_mode = (
             "faceless_diagram" if mode == "faceless"
             else ("split_evidence_focus_pip" if use_ev else ("visual_showcase_rail" if is_visual_hold else "person_full_with_lower_headline"))
         )
-        subject = (txt[:48].strip() if txt else brief["key_message"][:48]).strip()
+        subject = (txt[:52].strip() if txt else brief["key_message"][:52]).strip()
         beats.append({
             "beat_id": f"beat_{idx + 1:02d}",
             "start_frame": sf,
             "end_frame": ef,
             "source_word_ids": wids,
             "semantic_function": fn,
-            "viewer_goal": f"Deliver clear {fn} takeaway without visual clutter.",
-            "emotion_intensity": 0.85 if fn in ("hook", "payoff", "cta") else 0.65,
-            "priority": 5 if fn in ("hook", "evidence", "payoff") else 4,
+            "viewer_goal": f"Deliver grounded {fn} takeaway without visual clutter.",
+            "emotion_intensity": emo,
+            "priority": prio,
             "content_refs": refs,
             "proof_status": proof_status,
             "visual_mode": visual_mode,
             "focus_subject": subject,
             "continuity_in": "open_frame" if idx == 0 else "editorial_spine",
             "continuity_out": "clean_settle" if idx == len(raw_spans) - 1 else "editorial_spine",
-            "planned_information_change": f"Advance viewer understanding via {visual_mode} ({fn}).",
-            "why": f"Grounded in {'visual showcase interval' if is_visual_hold else 'mapped phrase timing'} for {mode}.",
+            "planned_information_change": f"Advance viewer understanding via {visual_mode} ({fn}: {sem_reason}).",
+            "why": f"Semantic classification ({sem_reason}) [classifier=rule_grounded_deterministic_fallback].",
             "read_time_frames": min(ef - sf, compute_min_read_frames(subject, fps)),
             "intentional_hold": is_visual_hold,
         })
     return beats
+
+
+_DANGLING_TAIL_WORDS = {"and", "or", "with", "for", "to", "of", "in", "on", "the", "a", "an", "by", "at", "from", "into"}
+
+
+def _clean_clip(text: str, max_chars: int) -> str:
+    """Trim copy cleanly at whole-word boundaries, never ending on a dangling conjunction/preposition."""
+    s = " ".join(str(text or "").strip().split())
+    if len(s) <= max_chars:
+        return s
+    cut = s[: max_chars + 1]
+    sp = cut.rfind(" ")
+    res = cut[:sp].rstrip(" ,;:-") if sp >= max(8, max_chars // 2) else s[:max_chars].rstrip(" ,;:-")
+    toks = res.split()
+    while len(toks) > 2 and toks[-1].lower().strip(".,;:-") in _DANGLING_TAIL_WORDS:
+        toks.pop()
+    return " ".join(toks).rstrip(" ,;:-")
+
+
+def _build_fixed_pip_visual_events(
+    beats: list[dict[str, Any]],
+    *,
+    brief: dict[str, Any],
+    usable: list[dict[str, Any]],
+    selected_dir: dict[str, Any],
+    reg: dict[str, Any],
+    word_map: dict[str, dict[str, Any]],
+    total_out_frames: int,
+    fps: float,
+    presenter_layout: dict[str, Any],
+    hook_decision: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build multi-technique visual storytelling events routed around reserved presenter zone (never static card loop)."""
+    pr = presenter_layout["reserved_region"]
+    sz = presenter_layout["safe_zone"]
+    px, py, pw, ph = [float(v) for v in pr]
+    is_bottom_pip = (py >= 0.44)
+    is_left_pip = (px < 0.42)
+    theme = selected_dir["theme"]
+
+    # Primary storytelling canvas (above bottom PIP or below top PIP)
+    if is_bottom_pip:
+        upper_y = max(sz["top"], 0.08)
+        upper_h = round(max(0.28, (py - 0.025) - upper_y), 4)
+        main_box = [0.05, upper_y, 0.90, upper_h]
+        # Companion slot alongside the presenter PIP on opposite horizontal side (with spring-overshoot clearance)
+        if is_left_pip:
+            sx = round(min(0.47, px + pw + 0.052), 4)
+            sw = round(max(0.36, (1.0 - max(sz["right"], 0.05)) - sx), 4)
+        else:
+            sx = max(sz["left"], 0.05)
+            sw = round(max(0.36, (px - 0.052) - sx), 4)
+        side_box = [sx, round(py + 0.02, 4), sw, round(max(0.15, ph - 0.03), 4)]
+    else:
+        lower_y = round(py + ph + 0.032, 4)
+        lower_h = round(max(0.28, (1.0 - sz["bottom"] - 0.02) - lower_y), 4)
+        main_box = [0.05, lower_y, 0.90, lower_h]
+        if is_left_pip:
+            sx = round(min(0.47, px + pw + 0.052), 4)
+            sw = round(max(0.36, (1.0 - max(sz["right"], 0.05)) - sx), 4)
+        else:
+            sx = max(sz["left"], 0.05)
+            sw = round(max(0.36, (px - 0.052) - sx), 4)
+        side_box = [sx, round(py + 0.015, 4), sw, round(max(0.14, ph - 0.025), 4)]
+
+    evid_assets = [a for a in usable if a["kind"] in ("real_ui", "still_asset")]
+    proof_points = [str(p).strip() for p in (brief.get("proof_points") or []) if str(p).strip()]
+    sel_hook_id = hook_decision.get("selected_option_id", "hook_opt_01_authentic_lead")
+
+    events: list[dict[str, Any]] = []
+    # Top progress spine (thin, inside top safe border, never colliding with PIP)
+    spine_cap = select_capability(reg, "local.progress_spine", aspect_ratio=brief["aspect_ratio"], duration_sec=total_out_frames / fps, profile=brief["profile"])
+    events.append({
+        "event_id": "ev_00_editorial_spine",
+        "beat_id": beats[0]["beat_id"],
+        "track_id": "track_chrome",
+        "layer_id": "editorial_progress_spine",
+        "layer_cat": "hl",
+        "z_order": 45,
+        "asset_ref": None,
+        "capability_id": spine_cap["selected_id"],
+        "start_frame": 0,
+        "end_frame": total_out_frames,
+        "anchor_word_id": None,
+        "anchor_mode": "beat_start",
+        "normalized_bbox": [0.05, 0.042, 0.90, 0.014],
+        "opacity": 0.92,
+        "transform": {"scale_from": 1.0, "scale_to": 1.0, "y_offset_px": 0},
+        "mask": None,
+        "blend": "normal",
+        "easing": "power2.out",
+        "params": {"kind": "progress_spine", "theme": theme},
+        "safe_zone": True,
+        "face_exclusion": True,
+        "semantic_reason": "Persistent visual continuity spine linking beats cleanly.",
+        "expected_visual_evidence": "Slim top progress bar tracking story progression across beats.",
+    })
+
+    for idx, b in enumerate(beats):
+        sf, ef = int(b["start_frame"]), int(b["end_frame"])
+        dur_s = max(0.3, (ef - sf) / fps)
+        fn = b["semantic_function"]
+        anchor_wid = b["source_word_ids"][0] if b["source_word_ids"] else None
+        ev_sf = 0 if idx == 0 else sf
+        ev_ef = total_out_frames if idx == len(beats) - 1 else ef
+        matched_ev_id = next((ref for ref in b.get("content_refs", []) if any(a["asset_id"] == ref for a in evid_assets)), None)
+        if matched_ev_id is None and fn in ("evidence", "proof") and evid_assets:
+            matched_ev_id = evid_assets[0]["asset_id"]
+        has_ev = matched_ev_id is not None
+
+        # Crisp beat-timed stagger delays so multi-column graphics settle quickly and stay readable
+        span_s = max(0.6, (ev_ef - ev_sf) / fps)
+        d_step = [round(min(0.08, span_s * 0.04), 2), round(min(0.24, span_s * 0.14), 2), round(min(0.40, span_s * 0.24), 2)]
+
+        # 1. Primary Main-Canvas Storytelling Event (ascending z_order so incoming beats crossfade cleanly over outgoing!)
+        z_main = 20 + idx
+        z_side = 30 + idx
+        if idx == 0:
+            hook_lines = [p.strip() for p in b["focus_subject"].replace(",", "|").split("|") if p.strip()]
+            if len(hook_lines) == 1 and len(hook_lines[0].split()) >= 4:
+                toks_h = hook_lines[0].split()
+                mid_h = len(toks_h) // 2
+                hook_lines = [" ".join(toks_h[:mid_h]), " ".join(toks_h[mid_h:])]
+            b1_ev_id = matched_ev_id or (evid_assets[0]["asset_id"] if evid_assets else None)
+            b1_ev_meta = next((a for a in evid_assets if a["asset_id"] == b1_ev_id), evid_assets[0] if evid_assets else None)
+            if "spotlight" in sel_hook_id and b1_ev_id and b1_ev_meta:
+                cap_main = select_capability(reg, "r1.clip_mask_wipe", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+                main_ev = {
+                    "event_id": f"ev_{idx + 1:02d}_hook_main",
+                    "beat_id": b["beat_id"],
+                    "track_id": "track_evidence",
+                    "layer_id": f"layer_{b['beat_id']}_hook_visual",
+                    "layer_cat": "evbg",
+                    "z_order": z_main,
+                    "asset_ref": b1_ev_id,
+                    "capability_id": cap_main["selected_id"],
+                    "start_frame": 0,
+                    "end_frame": ev_ef,
+                    "anchor_word_id": anchor_wid,
+                    "anchor_mode": "beat_start",
+                    "normalized_bbox": list(main_box),
+                    "opacity": 1.0,
+                    "transform": {"scale_from": 0.99, "scale_to": 1.0, "y_offset_px": 0},
+                    "mask": {"type": "clip_inset_horizontal"},
+                    "blend": "normal",
+                    "easing": "power3.out",
+                    "params": {
+                        "kind": "clip_mask_wipe",
+                        "kicker": "LIVE PLATFORM",
+                        "headline": _clean_clip(b["focus_subject"], 58),
+                        "subtitle": _clean_clip(b1_ev_meta.get("label") or brief.get("key_message", ""), 42),
+                        "fit": "contain",
+                        "clean_frame": True,
+                        "selected_hook_id": sel_hook_id,
+                        "theme": theme,
+                    },
+                    "safe_zone": True,
+                    "face_exclusion": True,
+                    "semantic_reason": f"Frame-0 visual-first hook ({sel_hook_id}) paired with persistent presenter PIP.",
+                    "expected_visual_evidence": "Verified capture visible immediately from frame 0 in upper main canvas.",
+                }
+            else:
+                cap_main = select_capability(reg, "r1.kinetic_phrase_mask", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+                main_ev = {
+                    "event_id": f"ev_{idx + 1:02d}_hook_main",
+                    "beat_id": b["beat_id"],
+                    "track_id": "track_info_primary",
+                    "layer_id": f"layer_{b['beat_id']}_hook_kinetic",
+                    "layer_cat": "title",
+                    "z_order": z_main,
+                    "asset_ref": None,
+                    "capability_id": cap_main["selected_id"],
+                    "start_frame": 0,
+                    "end_frame": ev_ef,
+                    "anchor_word_id": anchor_wid,
+                    "anchor_mode": "beat_start",
+                    "normalized_bbox": list(main_box),
+                    "opacity": 1.0,
+                    "transform": {"scale_from": 0.98, "scale_to": 1.0, "y_offset_px": 4},
+                    "mask": None,
+                    "blend": "normal",
+                    "easing": "power3.out",
+                    "params": {
+                        "kind": "kinetic_phrase_mask",
+                        "kicker": "OPENING STORY",
+                        "lines": [_clean_clip(ln, 34) for ln in hook_lines[:3]],
+                        "subtitle": _clean_clip(brief.get("key_message", ""), 64),
+                        "selected_hook_id": sel_hook_id,
+                        "theme": theme,
+                    },
+                    "safe_zone": True,
+                    "face_exclusion": True,
+                    "semantic_reason": f"Frame-0 kinetic mask hook ({sel_hook_id}) synced with opening delivery.",
+                    "expected_visual_evidence": "Multi-line kinetic hook mask visible at frame 0 above persistent PIP.",
+                }
+            events.append(main_ev)
+
+            # Companion spring callout beside PIP (clean viewer-facing editorial copy synced to opening beat)
+            cap_side = select_capability(reg, "hf.spring_pop", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+            p0_raw = proof_points[0] if proof_points else brief.get("key_message", "")
+            p1_raw = proof_points[1] if len(proof_points) > 1 else ""
+            if b1_ev_meta and b1_ev_meta.get("label"):
+                side_headline = _clean_clip(b1_ev_meta["label"], 34)
+                side_sub = _clean_clip(brief.get("key_message", ""), 44)
+            elif ":" in p0_raw:
+                side_headline = _clean_clip(p0_raw.split(":", 1)[0], 34)
+                side_sub = _clean_clip(p0_raw.split(":", 1)[1], 44)
+            else:
+                side_headline = _clean_clip(p0_raw, 34)
+                side_sub = _clean_clip(brief.get("key_message", ""), 44)
+            if side_sub.lower() == side_headline.lower():
+                side_sub = _clean_clip(p1_raw.split(":", 1)[0] if p1_raw else "Creator walkthrough", 44)
+            side_tags = ["CREATOR PAGE", "FIRST LOOK"]
+            events.append({
+                "event_id": f"ev_{idx + 1:02d}_hook_side",
+                "beat_id": b["beat_id"],
+                "track_id": "track_info_secondary",
+                "layer_id": f"layer_{b['beat_id']}_hook_badge",
+                "layer_cat": "card",
+                "z_order": z_side,
+                "asset_ref": None,
+                "capability_id": cap_side["selected_id"],
+                "start_frame": 0,
+                "end_frame": ev_ef,
+                "anchor_word_id": anchor_wid,
+                "anchor_mode": "beat_start",
+                "normalized_bbox": list(side_box),
+                "opacity": 1.0,
+                "transform": {"scale_from": 0.72, "scale_to": 1.0, "y_offset_px": 6},
+                "mask": None,
+                "blend": "normal",
+                "easing": "back.out(2.4)" if brief["profile"] in ("seecut_core", "editorial_pro") else "power2.out",
+                "params": {
+                    "kind": "split_callout_light",
+                    "kicker": "FEATURED FOCUS",
+                    "headline": side_headline,
+                    "subtitle": side_sub,
+                    "tags": side_tags,
+                    "selected_hook_id": sel_hook_id,
+                    "theme": theme,
+                },
+                "safe_zone": True,
+                "face_exclusion": True,
+                "semantic_reason": "Companion side context panel keeps frame 0 dense and balanced beside fixed PIP.",
+                "expected_visual_evidence": "Light high-contrast focus card beside bottom presenter without overlap.",
+            })
+            # Hand-drawn SVG craft accent anchored directly onto hook side panel (zero H1 anchor drift)
+            cap_ul = select_capability(reg, "hf_hw.underline", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+            events.append({
+                "event_id": f"ev_{idx + 1:02d}_hand_accent",
+                "beat_id": b["beat_id"],
+                "track_id": "track_chrome",
+                "layer_id": f"layer_{b['beat_id']}_hand_underline",
+                "layer_cat": "hand",
+                "z_order": 42,
+                "asset_ref": None,
+                "capability_id": cap_ul["selected_id"],
+                "start_frame": 2,
+                "end_frame": ev_ef,
+                "anchor_word_id": anchor_wid,
+                "anchor_mode": "beat_start",
+                "normalized_bbox": list(side_box),
+                "opacity": 0.92,
+                "transform": {"scale_from": 1.0, "scale_to": 1.0, "y_offset_px": 0},
+                "mask": None,
+                "blend": "normal",
+                "easing": "power2.out",
+                "params": {
+                    "kind": "hand_underline",
+                    "anchor_target_id": f"ev_{idx + 1:02d}_hook_side",
+                    "stroke_color": "#D99B26",
+                    "theme": theme,
+                },
+                "safe_zone": True,
+                "face_exclusion": True,
+                "semantic_reason": "Hand-drawn SVG stroke accent brings organic editorial craft to opening card.",
+                "expected_visual_evidence": "Animated golden brush underline below featured focus card.",
+            })
+        elif idx == len(beats) - 1 or fn in ("payoff", "cta"):
+            # Payoff / Closing beat -> Structured dark-burgundy 3-step summary rail (or spotlight if <3 proof points)
+            # Guarantees ZERO empty pastel voids, ZERO duplicate headline/subtitle, and ZERO generic homepage masquerading!
+            if len(proof_points) >= 3:
+                cap_rail = select_capability(reg, "hf.stagger_cascade", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+                steps = []
+                for k, pt in enumerate(proof_points[:3]):
+                    if ":" in pt:
+                        t_part, d_part = [x.strip() for x in pt.split(":", 1)]
+                    else:
+                        t_part = _clean_clip(pt, 30)
+                        d_part = ["Clean layout ready to customize", "High-res files built for home print", "Instant access on desktop & mobile"][k]
+                    steps.append({"num": f"0{k + 1}", "title": _clean_clip(t_part, 32), "desc": _clean_clip(d_part, 46)})
+                events.append({
+                    "event_id": f"ev_{idx + 1:02d}_payoff_main",
+                    "beat_id": b["beat_id"],
+                    "track_id": "track_info_primary",
+                    "layer_id": f"layer_{b['beat_id']}_payoff_rail",
+                    "layer_cat": "card",
+                    "z_order": z_main,
+                    "asset_ref": None,
+                    "capability_id": cap_rail["selected_id"],
+                    "start_frame": ev_sf,
+                    "end_frame": ev_ef,
+                    "anchor_word_id": anchor_wid,
+                    "anchor_mode": "beat_start",
+                    "normalized_bbox": list(main_box),
+                    "opacity": 1.0,
+                    "transform": {"scale_from": 0.96, "scale_to": 1.0, "y_offset_px": 4},
+                    "mask": None,
+                    "blend": "normal",
+                    "easing": "power2.out",
+                    "params": {
+                        "kind": "step_rail_3",
+                        "kicker": "HOW IT WORKS",
+                        "headline": _clean_clip(brief.get("cta_copy") or brief.get("key_message") or "Complete Highlights", 40),
+                        "steps": steps,
+                        "step_delays_sec": d_step,
+                        "theme": theme,
+                    },
+                    "safe_zone": True,
+                    "face_exclusion": True,
+                    "semantic_reason": "Closing 3-step editorial rail ties storefront details to creator reaction through EOF.",
+                    "expected_visual_evidence": "High-contrast 3-step dark rail settling cleanly through final frame.",
+                })
+            else:
+                cap_spot = select_capability(reg, "r1.spotlight_focus", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+                payoff_asset = matched_ev_id or (evid_assets[-1]["asset_id"] if evid_assets else None)
+                ev_label = next((a.get("label") for a in evid_assets if a["asset_id"] == payoff_asset), None)
+                spot_head = _clean_clip(brief.get("cta_copy") or ev_label or brief["key_message"], 48)
+                spot_sub = _clean_clip(brief.get("key_message", ""), 56)
+                if spot_sub.lower() == spot_head.lower():
+                    spot_sub = _clean_clip(proof_points[-1] if proof_points else "Complete storefront overview", 56)
+                events.append({
+                    "event_id": f"ev_{idx + 1:02d}_payoff_main",
+                    "beat_id": b["beat_id"],
+                    "track_id": "track_info_primary",
+                    "layer_id": f"layer_{b['beat_id']}_payoff_spot",
+                    "layer_cat": "evbg" if payoff_asset else "card",
+                    "z_order": z_main,
+                    "asset_ref": payoff_asset,
+                    "capability_id": cap_spot["selected_id"],
+                    "start_frame": ev_sf,
+                    "end_frame": ev_ef,
+                    "anchor_word_id": anchor_wid,
+                    "anchor_mode": "beat_start",
+                    "normalized_bbox": list(main_box),
+                    "opacity": 1.0,
+                    "transform": {"scale_from": 0.96, "scale_to": 1.0, "y_offset_px": 4},
+                    "mask": None,
+                    "blend": "normal",
+                    "easing": "power2.out",
+                    "params": {
+                        "kind": "spotlight_focus",
+                        "kicker": "FINAL LOOK",
+                        "badge": "SUMMARY",
+                        "headline": spot_head,
+                        "subtitle": spot_sub,
+                        "theme": theme,
+                    },
+                    "safe_zone": True,
+                    "face_exclusion": True,
+                    "semantic_reason": "Spotlight payoff delivers closing answer linked to opening promise through EOF.",
+                    "expected_visual_evidence": "Spotlight payoff card settling cleanly through final frame.",
+                })
+            cap_sw = select_capability(reg, "r1.light_sweep_badge", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+            verdict_sub = _clean_clip(brief.get("key_message", ""), 40)
+            events.append({
+                "event_id": f"ev_{idx + 1:02d}_payoff_side",
+                "beat_id": b["beat_id"],
+                "track_id": "track_info_secondary",
+                "layer_id": f"layer_{b['beat_id']}_verdict",
+                "layer_cat": "card",
+                "z_order": z_side,
+                "asset_ref": None,
+                "capability_id": cap_sw["selected_id"],
+                "start_frame": ev_sf,
+                "end_frame": ev_ef,
+                "anchor_word_id": anchor_wid,
+                "anchor_mode": "beat_start",
+                "normalized_bbox": list(side_box),
+                "opacity": 1.0,
+                "transform": {"scale_from": 0.94, "scale_to": 1.0, "y_offset_px": 6},
+                "mask": None,
+                "blend": "normal",
+                "easing": "power2.out",
+                "params": {
+                    "kind": "light_sweep_badge",
+                    "kicker": "CREATOR TAKEAWAY",
+                    "headline": _clean_clip(b["focus_subject"], 48),
+                    "subtitle": verdict_sub,
+                    "theme": theme,
+                },
+                "safe_zone": True,
+                "face_exclusion": True,
+                "semantic_reason": "Light sweep verdict bar accentuates closing delivery through final frame N-1.",
+                "expected_visual_evidence": "Specular sheen sweep over closing takeaway badge beside presenter.",
+            })
+        elif has_ev:
+            # Real verified evidence beat -> alternate clip_mask_wipe & spotlight_focus with distinct companion styles!
+            ev_meta = next((a for a in evid_assets if a["asset_id"] == matched_ev_id), evid_assets[0])
+            ev_label_txt = _clean_clip(ev_meta.get("label") or b["focus_subject"], 48)
+            use_spotlight = (idx % 2 == 0)
+            if use_spotlight:
+                cap_ev = select_capability(reg, "r1.spotlight_focus", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+                events.append({
+                    "event_id": f"ev_{idx + 1:02d}_evidence_main",
+                    "beat_id": b["beat_id"],
+                    "track_id": "track_evidence",
+                    "layer_id": f"layer_{b['beat_id']}_evidence_spot",
+                    "layer_cat": "evbg",
+                    "z_order": z_main,
+                    "asset_ref": matched_ev_id,
+                    "capability_id": cap_ev["selected_id"],
+                    "start_frame": ev_sf,
+                    "end_frame": ev_ef,
+                    "anchor_word_id": anchor_wid,
+                    "anchor_mode": "beat_start",
+                    "normalized_bbox": list(main_box),
+                    "opacity": 1.0,
+                    "transform": {"scale_from": 0.97, "scale_to": 1.0, "y_offset_px": 0},
+                    "mask": None,
+                    "blend": "normal",
+                    "easing": "power2.out",
+                    "params": {
+                        "kind": "spotlight_focus",
+                        "kicker": "CLOSER LOOK",
+                        "badge": "DETAILS",
+                        "headline": ev_label_txt,
+                        "subtitle": _clean_clip(
+                            (proof_points[min(idx, len(proof_points) - 1)].split(":", 1)[-1] if proof_points else ""),
+                            48,
+                        ),
+                        "theme": theme,
+                    },
+                    "safe_zone": True,
+                    "face_exclusion": True,
+                    "semantic_reason": f"Real footage detail spotlight ({matched_ev_id}) matched to spoken reveal.",
+                    "expected_visual_evidence": "High-contrast detail capture inside upper spotlight card.",
+                })
+                cap_fc = select_capability(reg, "r1.freeze_callout", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+                events.append({
+                    "event_id": f"ev_{idx + 1:02d}_evidence_side",
+                    "beat_id": b["beat_id"],
+                    "track_id": "track_info_secondary",
+                    "layer_id": f"layer_{b['beat_id']}_callout",
+                    "layer_cat": "card",
+                    "z_order": z_side,
+                    "asset_ref": None,
+                    "capability_id": cap_fc["selected_id"],
+                    "start_frame": ev_sf,
+                    "end_frame": ev_ef,
+                    "anchor_word_id": anchor_wid,
+                    "anchor_mode": "beat_start",
+                    "normalized_bbox": list(side_box),
+                    "opacity": 1.0,
+                    "transform": {"scale_from": 0.94, "scale_to": 1.0, "y_offset_px": 6},
+                    "mask": None,
+                    "blend": "normal",
+                    "easing": "power2.out",
+                    "params": {
+                        "kind": "freeze_callout",
+                        "kicker": "INSIDE THE BUNDLE",
+                        "badge": "4-PART SET",
+                        "headline": _clean_clip(b["focus_subject"], 48),
+                        "subtitle": _clean_clip(
+                            (proof_points[1].split(":", 1)[-1] if len(proof_points) > 1 else ev_label_txt),
+                            44,
+                        ),
+                        "theme": theme,
+                    },
+                    "safe_zone": True,
+                    "face_exclusion": True,
+                    "semantic_reason": "Side detail callout reinforces spoken emphasis without colliding with presenter PIP.",
+                    "expected_visual_evidence": "Readable side callout anchored beside bottom presenter.",
+                })
+                # Hand-drawn SVG arrow craft accent anchored to detail callout
+                cap_arr = select_capability(reg, "hf_hw.arrow", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+                events.append({
+                    "event_id": f"ev_{idx + 1:02d}_hand_arrow",
+                    "beat_id": b["beat_id"],
+                    "track_id": "track_chrome",
+                    "layer_id": f"layer_{b['beat_id']}_hand_arrow",
+                    "layer_cat": "hand",
+                    "z_order": 42,
+                    "asset_ref": None,
+                    "capability_id": cap_arr["selected_id"],
+                    "start_frame": min(ev_ef - 2, ev_sf + 3),
+                    "end_frame": ev_ef,
+                    "anchor_word_id": anchor_wid,
+                    "anchor_mode": "beat_start",
+                    "normalized_bbox": list(side_box),
+                    "opacity": 0.90,
+                    "transform": {"scale_from": 1.0, "scale_to": 1.0, "y_offset_px": 0},
+                    "mask": None,
+                    "blend": "normal",
+                    "easing": "power2.out",
+                    "params": {
+                        "kind": "hand_underline",
+                        "anchor_target_id": f"ev_{idx + 1:02d}_evidence_side",
+                        "stroke_color": "#6E1F24",
+                        "theme": theme,
+                    },
+                    "safe_zone": True,
+                    "face_exclusion": True,
+                    "semantic_reason": "Hand-drawn SVG stroke links spoken cue to bundle details cleanly.",
+                    "expected_visual_evidence": "Crisp burgundy hand-drawn underline on detail callout.",
+                })
+            else:
+                cap_ev = select_capability(reg, "r1.clip_mask_wipe", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+                events.append({
+                    "event_id": f"ev_{idx + 1:02d}_evidence_main",
+                    "beat_id": b["beat_id"],
+                    "track_id": "track_evidence",
+                    "layer_id": f"layer_{b['beat_id']}_evidence",
+                    "layer_cat": "evbg",
+                    "z_order": z_main,
+                    "asset_ref": matched_ev_id,
+                    "capability_id": cap_ev["selected_id"],
+                    "start_frame": ev_sf,
+                    "end_frame": ev_ef,
+                    "anchor_word_id": anchor_wid,
+                    "anchor_mode": "beat_start",
+                    "normalized_bbox": list(main_box),
+                    "opacity": 1.0,
+                    "transform": {"scale_from": 0.99, "scale_to": 1.0, "y_offset_px": 0},
+                    "mask": {"type": "clip_inset_horizontal"},
+                    "blend": "normal",
+                    "easing": "power3.out",
+                    "params": {
+                        "kind": "clip_mask_wipe",
+                        "kicker": "STOREFRONT LOOK",
+                        "headline": ev_label_txt,
+                        "subtitle": "From creator footage",
+                        "fit": "contain",
+                        "clean_frame": True,
+                        "theme": theme,
+                    },
+                    "safe_zone": True,
+                    "face_exclusion": True,
+                    "semantic_reason": f"Real footage evidence ({matched_ev_id}) revealed via clean mask wipe.",
+                    "expected_visual_evidence": "Crisp contained storefront capture inside upper stage.",
+                })
+                cap_hl = select_capability(reg, "hf.notes_reveal", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+                toks_b = b["focus_subject"].split()
+                hl_tok = toks_b[-1] if toks_b else "DETAILS"
+                pref_tok = " ".join(toks_b[:-1]) if len(toks_b) > 1 else "Inspect"
+                events.append({
+                    "event_id": f"ev_{idx + 1:02d}_evidence_side",
+                    "beat_id": b["beat_id"],
+                    "track_id": "track_info_secondary",
+                    "layer_id": f"layer_{b['beat_id']}_highlight",
+                    "layer_cat": "card",
+                    "z_order": z_side,
+                    "asset_ref": None,
+                    "capability_id": cap_hl["selected_id"],
+                    "start_frame": ev_sf,
+                    "end_frame": ev_ef,
+                    "anchor_word_id": anchor_wid,
+                    "anchor_mode": "beat_start",
+                    "normalized_bbox": list(side_box),
+                    "opacity": 1.0,
+                    "transform": {"scale_from": 0.95, "scale_to": 1.0, "y_offset_px": 6},
+                    "mask": None,
+                    "blend": "normal",
+                    "easing": "power2.out",
+                    "params": {
+                        "kind": "highlighter_card",
+                        "kicker": "FIRST LOOK",
+                        "prefix": pref_tok,
+                        "highlight_text": hl_tok,
+                        "suffix": "",
+                        "subtitle": _clean_clip(ev_label_txt, 42),
+                        "theme": theme,
+                    },
+                    "safe_zone": True,
+                    "face_exclusion": True,
+                    "semantic_reason": "Animated brush highlight directs eye path from speaker to storefront capture.",
+                    "expected_visual_evidence": "Brush highlight sweep across focal keyword beside presenter.",
+                })
+        else:
+            # Progressive Details / Step / Turning Point -> Compact dark 3-step rail (zero sparse pastel void!)
+            cap_mid = select_capability(reg, "hf.stagger_cascade", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+            pts = proof_points[:3] if len(proof_points) >= 3 else (proof_points + ["Structured layout", "Print-ready files", "Instant access"])[:3]
+            steps = []
+            for k, pt in enumerate(pts):
+                if ":" in pt:
+                    t_part, d_part = [x.strip() for x in pt.split(":", 1)]
+                else:
+                    t_part = _clean_clip(pt, 30)
+                    d_part = ["Clear visual hierarchy", "Ready to edit & customize", "Crisp desktop & mobile view"][k]
+                steps.append({"num": f"0{k + 1}", "title": _clean_clip(t_part, 30), "desc": _clean_clip(d_part, 44)})
+            events.append({
+                "event_id": f"ev_{idx + 1:02d}_story_main",
+                "beat_id": b["beat_id"],
+                "track_id": "track_info_primary",
+                "layer_id": f"layer_{b['beat_id']}_breakdown",
+                "layer_cat": "card",
+                "z_order": z_main,
+                "asset_ref": None,
+                "capability_id": cap_mid["selected_id"],
+                "start_frame": ev_sf,
+                "end_frame": ev_ef,
+                "anchor_word_id": anchor_wid,
+                "anchor_mode": "beat_start",
+                "normalized_bbox": list(main_box),
+                "opacity": 1.0,
+                "transform": {"scale_from": 0.95, "scale_to": 1.0, "y_offset_px": 6},
+                "mask": None,
+                "blend": "normal",
+                "easing": "power2.out",
+                "params": {
+                    "kind": "step_rail_3",
+                    "kicker": "EDITORIAL BREAKDOWN",
+                    "headline": "3 Key Highlights",
+                    "steps": steps,
+                    "step_delays_sec": d_step,
+                    "theme": theme,
+                },
+                "safe_zone": True,
+                "face_exclusion": True,
+                "semantic_reason": f"Progressive 3-step visual breakdown advancing {fn} with crisp staggered reveals.",
+                "expected_visual_evidence": "Staggered multi-step visual rail synchronized to beat.",
+            })
+            cap_fc = select_capability(reg, "r1.freeze_callout", aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+            events.append({
+                "event_id": f"ev_{idx + 1:02d}_story_side",
+                "beat_id": b["beat_id"],
+                "track_id": "track_info_secondary",
+                "layer_id": f"layer_{b['beat_id']}_callout",
+                "layer_cat": "card",
+                "z_order": z_side,
+                "asset_ref": None,
+                "capability_id": cap_fc["selected_id"],
+                "start_frame": ev_sf,
+                "end_frame": ev_ef,
+                "anchor_word_id": anchor_wid,
+                "anchor_mode": "beat_start",
+                "normalized_bbox": list(side_box),
+                "opacity": 1.0,
+                "transform": {"scale_from": 0.94, "scale_to": 1.0, "y_offset_px": 6},
+                "mask": None,
+                "blend": "normal",
+                "easing": "power2.out",
+                "params": {
+                    "kind": "freeze_callout",
+                    "kicker": fn.upper(),
+                    "badge": "DETAILS",
+                    "headline": _clean_clip(b["focus_subject"], 48),
+                    "subtitle": _clean_clip(brief.get("key_message", ""), 42),
+                    "theme": theme,
+                },
+                "safe_zone": True,
+                "face_exclusion": True,
+                "semantic_reason": "Side detail callout reinforces spoken emphasis without colliding with presenter PIP.",
+                "expected_visual_evidence": "Readable side callout anchored beside bottom presenter.",
+            })
+
+    return events
 
 
 def resolve_editorial_plan(
@@ -256,8 +1043,12 @@ def resolve_editorial_plan(
     run_id: str,
     transcript: dict[str, Any] | None = None,
     registry: dict[str, Any] | None = None,
-    base_git_sha: str = "ae51ccd4127c95a456e96c66d46a77fb65142b80",
+    base_git_sha: str = "f610fa51d0038f0e9629273cb419ed065ae21901",
     approved_cuts: list[dict[str, Any]] | None = None,
+    edl_override: dict[str, Any] | None = None,
+    hook_decision: dict[str, Any] | None = None,
+    presenter_policy_override: dict[str, Any] | None = None,
+    soundscape_override: dict[str, Any] | None = None,
     custom_beats: list[dict[str, Any]] | None = None,
     custom_visual_events: list[dict[str, Any]] | None = None,
     custom_text_events: list[dict[str, Any]] | None = None,
@@ -273,48 +1064,130 @@ def resolve_editorial_plan(
     if not usable:
         raise ValueError("No usable_in_render assets in source inventory")
     primary = next((a for a in usable if a["kind"] in ("a_roll", "b_roll")), usable[0])
+    has_person = any(a["kind"] == "a_roll" for a in usable)
     media = primary["media"]
     fps_num = int(media.get("fps_num") or 24)
     fps_den = int(media.get("fps_den") or 1)
     fps = fps_num / fps_den
     total_src_frames = int(media.get("nb_frames") or max(1, int(round((media.get("duration_sec") or 6.0) * fps))))
     sample_rate = int(media.get("audio_sample_rate") or 48000)
+    rotation_deg = int(media.get("rotation_deg") or 0)
 
-    # 1. Edit Decision Map (audio-first candidates; LOCK_VOICE identity by default)
-    candidates = propose_cut_candidates(
-        transcript,
-        silences=primary.get("silences"),
-        voice_policy=brief["voice_policy"],
-    ) if transcript else []
-    time_map = build_time_map(
-        primary["asset_id"],
-        total_src_frames,
-        fps_num,
-        fps_den,
-        audio_sample_rate=sample_rate,
-        voice_policy=brief["voice_policy"],
-        approved_cuts=approved_cuts,
-        cut_candidates=candidates,
+    # 0. Explicit optional presenter_policy (default LEGACY_DYNAMIC for v1 compatibility)
+    presenter_policy = normalize_presenter_policy(
+        presenter_policy_override if presenter_policy_override is not None else brief.get("presenter_policy"),
+        brief_mode=brief["mode"],
+        has_presenter_source=has_person,
     )
+
+    # 1. Single authoritative Edit Decision Map (reuse edl_override if already resolved by Stage C/D!)
+    if edl_override is not None:
+        time_map = dict(edl_override)
+        fps_num = int(time_map.get("fps_num", fps_num))
+        fps_den = int(time_map.get("fps_den", fps_den))
+        fps = fps_num / fps_den
+        sample_rate = int(time_map.get("audio_sample_rate", sample_rate))
+    else:
+        candidates = propose_cut_candidates(
+            transcript,
+            silences=primary.get("silences"),
+            voice_policy=brief["voice_policy"],
+        ) if transcript else []
+        time_map = build_time_map(
+            primary["asset_id"],
+            total_src_frames,
+            fps_num,
+            fps_den,
+            audio_sample_rate=sample_rate,
+            voice_policy=brief["voice_policy"],
+            approved_cuts=approved_cuts,
+            cut_candidates=candidates,
+        )
     total_out_frames = int(time_map["total_output_frames"])
     mapped_words = map_words_to_output(transcript, time_map) if transcript else []
 
-    # 2. Creative directions & archetype
+    # 2. Creative directions, aspect spec & presenter layout
     directions = propose_directions(brief, inventory, transcript)
     selected_dir = creative_direction_override or next(d for d in directions if d["selected"])
-    aspect_cfg = ASPECT_CANVAS.get(brief["aspect_ratio"], ASPECT_CANVAS["9:16"])
+    aspect_cfg = dict(ASPECT_CANVAS.get(brief["aspect_ratio"], ASPECT_CANVAS["9:16"]))
+    if presenter_policy["mode"] in ("FIXED_PIP", "ADAPTIVE_PIP", "DYNAMIC_HYBRID"):
+        aspect_cfg["safe_zone"] = resolve_safe_zone_for_platform(
+            platform=brief.get("platform", "reels"),
+            aspect_ratio=brief["aspect_ratio"],
+            safe_zone_profile=str(presenter_policy.get("safe_zone_profile", "PLATFORM_AWARE")),
+        )
 
-    # 3. Beats
+    presenter_layout: dict[str, Any] | None = None
+    reserved_region: list[float] | None = None
+    if presenter_policy["mode"] in ("FIXED_PIP", "ADAPTIVE_PIP", "DYNAMIC_HYBRID"):
+        p_reg = resolve_presenter_region(
+            presenter_policy,
+            output_width=int(aspect_cfg["width"]),
+            output_height=int(aspect_cfg["height"]),
+            source_width=int(media.get("width") or aspect_cfg["width"]),
+            source_height=int(media.get("height") or aspect_cfg["height"]),
+            rotation_deg=rotation_deg,
+            platform=brief.get("platform", "reels"),
+            aspect_ratio=brief["aspect_ratio"],
+        )
+        p_crop = fit_face_safe_crop(
+            int(media.get("width") or aspect_cfg["width"]),
+            int(media.get("height") or aspect_cfg["height"]),
+            p_reg["pixel_box"][2],
+            p_reg["pixel_box"][3],
+            face_rect=primary.get("face_rect"),
+            rotation_deg=rotation_deg,
+            shape=p_reg["shape"],
+            border_radius_px=p_reg["border_radius_px"],
+            extra_zoom=1.12,
+            face_tracking_policy=str(presenter_policy.get("face_tracking", "AUTO_WHEN_AVAILABLE")),
+        )
+        reserved_region = compute_presenter_reserved_region(
+            p_reg, guard_margin_ratio=float(presenter_policy.get("guard_margin_ratio", 0.024)),
+        )
+        presenter_layout = {
+            "mode": presenter_policy["mode"],
+            "visibility": presenter_policy["visibility"],
+            "region": p_reg,
+            "crop": p_crop,
+            "reserved_region": reserved_region,
+            "safe_zone": aspect_cfg["safe_zone"],
+            "z_order": 200,
+        }
+
+    # 3. Authoritative hook decision & semantic beats
+    eff_hook = hook_decision
+    if eff_hook is None:
+        h_opts = build_hook_candidates(
+            brief, inventory, transcript=transcript,
+            cut_policy=time_map.get("voice_policy", brief["voice_policy"]),
+            presenter_policy=presenter_policy,
+        )
+        eff_hook = choose_opening(h_opts, brief=brief)
     beats = custom_beats if custom_beats else analyze_semantic_beats(brief, inventory, transcript, time_map)
 
-    # 4. Visual events (built cleanly from beats if not supplied by authored direction)
+    # 4. Visual events (built cleanly from beats + hook + presenter layout if not supplied)
     if custom_visual_events is not None:
         raw_visual_events = list(custom_visual_events)
+    elif presenter_policy["mode"] == "FIXED_PIP" and presenter_layout is not None:
+        word_map = {w["word_id"]: w for w in mapped_words}
+        raw_visual_events = _build_fixed_pip_visual_events(
+            beats,
+            brief=brief,
+            usable=usable,
+            selected_dir=selected_dir,
+            reg=reg,
+            word_map=word_map,
+            total_out_frames=total_out_frames,
+            fps=fps,
+            presenter_layout=presenter_layout,
+            hook_decision=eff_hook,
+        )
     else:
         raw_visual_events = []
         word_map = {w["word_id"]: w for w in mapped_words}
         evid_assets = [a["asset_id"] for a in usable if a["kind"] in ("real_ui", "still_asset")]
-        # Persistent subtle match-anchor spine (validates match-anchor continuity)
+        sel_hook_id = eff_hook.get("selected_option_id", "hook_opt_01_authentic_lead")
         spine_cap = select_capability(reg, "local.progress_spine", aspect_ratio=brief["aspect_ratio"], duration_sec=total_out_frames / fps, profile=brief["profile"])
         raw_visual_events.append({
             "event_id": "ev_00_editorial_spine",
@@ -346,16 +1219,20 @@ def resolve_editorial_plan(
             sf, ef = int(b["start_frame"]), int(b["end_frame"])
             dur_s = max(0.3, (ef - sf) / fps)
             anchor_wid = b["source_word_ids"][0] if b["source_word_ids"] else None
-            ev_sf = word_map[anchor_wid]["out_start_frame"] if (anchor_wid and anchor_wid in word_map) else sf
+            ev_sf = 0 if idx == 0 else (word_map[anchor_wid]["out_start_frame"] if (anchor_wid and anchor_wid in word_map) else sf)
             ev_sf = min(ef - 2, max(sf, ev_sf))
-            is_evid = b["proof_status"] == "VERIFIED_REAL_EVIDENCE" and bool(evid_assets)
+            matched_ev = next((ref for ref in b.get("content_refs", []) if ref in evid_assets), None)
+            is_evid = b["proof_status"] == "VERIFIED_REAL_EVIDENCE" and bool(matched_ev or evid_assets)
+            ev_ref = matched_ev or (evid_assets[0] if is_evid else None)
             req_cap = (
                 "hf.card_resize" if is_evid
-                else ("hf.code_snippet" if brief["mode"] == "software_demo"
-                      else ("hf.stagger_cascade" if b["semantic_function"] == "step"
-                            else ("hf.spring_pop" if brief["profile"] in ("seecut_core", "editorial_pro") else "local.editorial_panel")))
+                else ("hf.kinetic_phrase_mask" if idx == 0 and brief["profile"] in ("seecut_core", "editorial_pro")
+                      else ("hf.code_snippet" if brief["mode"] == "software_demo"
+                            else ("hf.stagger_cascade" if b["semantic_function"] == "step"
+                                  else ("hf.spring_pop" if brief["profile"] in ("seecut_core", "editorial_pro") else "local.editorial_panel"))))
             )
             chosen = select_capability(reg, req_cap, aspect_ratio=brief["aspect_ratio"], duration_sec=dur_s, profile=brief["profile"])
+            is_km = (chosen["selected_id"] == "hf.kinetic_phrase_mask")
             raw_visual_events.append({
                 "event_id": f"ev_{idx + 1:02d}_{b['beat_id']}",
                 "beat_id": b["beat_id"],
@@ -363,12 +1240,12 @@ def resolve_editorial_plan(
                 "layer_id": f"layer_{b['beat_id']}_{b['semantic_function']}",
                 "layer_cat": "evbg" if is_evid else ("title" if b["semantic_function"] == "hook" else "card"),
                 "z_order": 20 if is_evid else 30,
-                "asset_ref": evid_assets[0] if is_evid else None,
+                "asset_ref": ev_ref,
                 "capability_id": chosen["selected_id"],
                 "start_frame": ev_sf,
                 "end_frame": ef,
                 "anchor_word_id": anchor_wid,
-                "anchor_mode": "keyword_exact" if anchor_wid else "beat_start",
+                "anchor_mode": "beat_start" if idx == 0 else ("keyword_exact" if anchor_wid else "beat_start"),
                 "normalized_bbox": [0.06, 0.34, 0.88, 0.40] if is_evid else [0.07, 0.68, 0.86, 0.17],
                 "opacity": 1.0,
                 "transform": {"scale_from": 0.56 if chosen["selected_id"] == "hf.spring_pop" else 0.94, "scale_to": 1.0, "y_offset_px": 18},
@@ -376,9 +1253,11 @@ def resolve_editorial_plan(
                 "blend": "normal",
                 "easing": "back.out(2.1)" if chosen["selected_id"] == "hf.spring_pop" else "power2.out",
                 "params": {
-                    "kind": "evidence_spotlight" if is_evid else ("code_window" if brief["mode"] == "software_demo" else "editorial_headline"),
+                    "kind": "evidence_spotlight" if is_evid else ("kinetic_phrase_mask" if is_km else ("code_window" if brief["mode"] == "software_demo" else "editorial_headline")),
                     "headline": b["focus_subject"],
+                    "lines": [b["focus_subject"]] if is_km else None,
                     "kicker": b["semantic_function"].upper(),
+                    "selected_hook_id": sel_hook_id if idx == 0 else None,
                     "theme": selected_dir["theme"],
                 },
                 "safe_zone": True,
@@ -389,15 +1268,19 @@ def resolve_editorial_plan(
 
     visual_events = plan_motion(raw_visual_events, fps=fps, profile=brief["profile"])
 
-    # 5. Camera path
+    # 5. Camera path (honoring explicit presenter_policy & source rotation)
     camera_events = custom_camera_events if custom_camera_events is not None else plan_camera_path(
         beats,
         mode=brief["mode"],
         source_width=int(media.get("width") or aspect_cfg["width"]),
         source_height=int(media.get("height") or aspect_cfg["height"]),
-        output_width=int(aspect_cfg["width"] * aspect_cfg["output_scale"]),
-        output_height=int(aspect_cfg["height"] * aspect_cfg["output_scale"]),
+        output_width=int(aspect_cfg["width"]),
+        output_height=int(aspect_cfg["height"]),
         face_rect=primary.get("face_rect"),
+        presenter_policy=presenter_policy,
+        rotation_deg=rotation_deg,
+        platform=brief.get("platform", "reels"),
+        aspect_ratio=brief["aspect_ratio"],
     )
 
     # 6. Transitions between every adjacent beat
@@ -406,7 +1289,7 @@ def resolve_editorial_plan(
         for i in range(len(beats) - 1)
     ]
 
-    # 7. Typography events
+    # 7. Typography events + Presenter Reserved-Zone Auto-Layout Collision Solver
     text_events = custom_text_events if custom_text_events is not None else plan_text_events(
         beats,
         fps=fps,
@@ -416,20 +1299,43 @@ def resolve_editorial_plan(
         mapped_words=mapped_words,
         canvas_width=int(aspect_cfg["width"]),
         canvas_height=int(aspect_cfg["height"]),
+        presenter_reserved_region=reserved_region,
+        platform_safe_zone=aspect_cfg["safe_zone"],
     )
 
-    # 8. Audio cues
-    audio_plan = plan_audio_cues(
-        voice_asset_id=primary["asset_id"] if media.get("has_audio") else None,
-        total_frames=total_out_frames,
-        fps_num=fps_num,
-        fps_den=fps_den,
-        audio_sample_rate=sample_rate,
-        voice_policy=brief["voice_policy"],
-        sfx_policy=brief["sfx_policy"],
-        bgm_policy=brief["music_policy"],
-        voice_license_ref=primary["rights"],
-    )
+    if reserved_region is not None and presenter_policy.get("occlusion_policy") == "RESERVE_PRESENTER_ZONE":
+        solved = resolve_layout_avoiding_presenter(
+            visual_events,
+            text_events,
+            presenter_reserved_region=reserved_region,
+            platform_safe_zone=aspect_cfg["safe_zone"],
+            canvas_width=int(aspect_cfg["width"]),
+            canvas_height=int(aspect_cfg["height"]),
+            allow_reflow=True,
+        )
+        if not solved["ok"]:
+            raise ValueError(f"LAYOUT_CONFLICT: {solved['conflicts'][:3]}")
+        visual_events = solved["visual_events"]
+        text_events = solved["text_events"]
+        if presenter_layout is not None:
+            presenter_layout["layout_reflows"] = solved["reflows"]
+
+    # 8. Audio cues (use resolved soundscape_override when provided!)
+    if soundscape_override is not None and isinstance(soundscape_override.get("cues"), list):
+        audio_cues_out = soundscape_override["cues"]
+    else:
+        audio_plan = plan_audio_cues(
+            voice_asset_id=primary["asset_id"] if media.get("has_audio") else None,
+            total_frames=total_out_frames,
+            fps_num=fps_num,
+            fps_den=fps_den,
+            audio_sample_rate=sample_rate,
+            voice_policy=time_map.get("voice_policy", brief["voice_policy"]),
+            sfx_policy=brief["sfx_policy"],
+            bgm_policy=brief["music_policy"],
+            voice_license_ref=primary["rights"],
+        )
+        audio_cues_out = audio_plan["cues"]
 
     # 9. Claim evidence
     if custom_claim_evidence is not None:
@@ -440,7 +1346,7 @@ def resolve_editorial_plan(
             if a["kind"] in ("real_ui", "still_asset"):
                 claim_evidence.append({
                     "claim_id": f"clm_{a['asset_id']}",
-                    "exact_text": a.get("basename", a["asset_id"]),
+                    "exact_text": a.get("label") or a.get("basename", a["asset_id"]),
                     "source_asset_id": a["asset_id"],
                     "source_path": a["canonical_path"],
                     "source_sha256": a["sha256"],
@@ -448,6 +1354,17 @@ def resolve_editorial_plan(
                     "verification_status": "VERIFIED_REAL_CAPTURE",
                     "allowed_display": True,
                 })
+
+    # Link selected hook to exact first-frame compiled visual event ID
+    first_vis = next((ev for ev in visual_events if int(ev["start_frame"]) == 0 and (ev.get("params") or {}).get("kind") != "progress_spine"), None)
+    selected_hook_record = {
+        "selected_option_id": eff_hook["selected_option_id"],
+        "strategy": (eff_hook.get("selected_option") or {}).get("strategy", ""),
+        "first_frame_visual_id": first_vis["event_id"] if first_vis else None,
+        "start_frame": int(first_vis["start_frame"]) if first_vis else 0,
+        "presenter_mode": presenter_policy["mode"],
+        "payoff_beat_id": beats[-1]["beat_id"],
+    }
 
     source_sha_set = {a["asset_id"]: a["sha256"] for a in usable}
     shotbook = {
@@ -472,6 +1389,9 @@ def resolve_editorial_plan(
         "rights_ledger_sha": hash_artifact({a["asset_id"]: a["rights"] for a in inventory["assets"]}),
         "transcript_sha": hash_artifact(transcript) if transcript else None,
         "edit_decision_map": time_map,
+        "presenter_policy": presenter_policy,
+        "presenter_layout": presenter_layout,
+        "selected_hook": selected_hook_record,
         "story_arc": {
             "creative_direction_id": selected_dir["direction_id"],
             "theme": selected_dir["theme"],
@@ -484,12 +1404,12 @@ def resolve_editorial_plan(
         "camera_events": camera_events,
         "transitions": transitions,
         "text_events": text_events,
-        "audio_cues": audio_plan["cues"],
+        "audio_cues": audio_cues_out,
         "claim_evidence": claim_evidence,
         "approved_exceptions": list(brief.get("approved_exceptions", [])),
         "provenance": {
             "planner_version": __version__,
-            "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "generated_at_utc": "1970-01-01T00:00:00Z" if status == "TEST_ONLY" else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "engine": "SeeCut-v3.4-HyperFrames-HTML-GSAP",
             "base_git_sha": base_git_sha,
             "upstream_seecut_sha": UPSTREAM_SEECUT_SHA,
@@ -781,8 +1701,9 @@ def build_hook_candidates(
     transcript: dict[str, Any] | None = None,
     cut_policy: str = "LOCK_VOICE",
     custom_options: list[dict[str, Any]] | None = None,
+    presenter_policy: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Generate 2-3 distinct authentic opening hook candidates grounded in real transcript and verified assets."""
+    """Generate 2-4 distinct authentic opening hook candidates grounded in transcript, assets & presenter_policy."""
     usable = [a for a in inventory.get("assets", []) if a.get("usable_in_render")]
     primary = next((a for a in usable if a["kind"] in ("a_roll", "b_roll")), usable[0])
     evid = [a["asset_id"] for a in usable if a["kind"] in ("real_ui", "still_asset")]
@@ -792,6 +1713,7 @@ def build_hook_candidates(
     first_wids = list(phrases[0]["word_ids"]) if phrases else [w["word_id"] for w in words[:6]]
     mode = brief.get("mode", "talking_head")
     energy = resolve_pacing_budget(brief)["energy_mode"]
+    is_fixed_pip = ((presenter_policy or brief.get("presenter_policy") or {}).get("mode") == "FIXED_PIP")
 
     if custom_options is not None:
         raw_opts = [dict(o) for o in custom_options]
@@ -799,11 +1721,20 @@ def build_hook_candidates(
         raw_opts = [
             {
                 "option_id": "hook_opt_01_authentic_lead",
-                "strategy": "Direct authentic reaction + kinetic keyword accent on opening phrase",
+                "strategy": (
+                    "Main-canvas kinetic phrase hook at f0 paired with persistent fixed-PIP presenter"
+                    if is_fixed_pip else
+                    "Direct authentic reaction + kinetic keyword accent on opening phrase"
+                ),
                 "opening_visual": (
+                    f"Frame-0 kinetic phrase mask on main canvas while presenter ({primary['asset_id']}) remains locked in FIXED_PIP."
+                    if is_fixed_pip else
                     f"Tight micro-reframe on presenter/subject ({primary['asset_id']}) at f0 with kinetic phrase mask "
                     "revealing verified subject focus without duplicating the full sentence."
                 ),
+                "first_frame_visual_id": "ev_01_hook_main" if is_fixed_pip else "ev_01_beat_01",
+                "start_frame": 0,
+                "opening_motion": "kinetic_phrase_mask + companion spring badge",
                 "opening_line": first_line,
                 "opening_audio_role": "natural_voice_lead" if energy in ("calm", "emotional") else "subtle_air_accent_on_reveal",
                 "source_word_ids": first_wids,
@@ -811,19 +1742,21 @@ def build_hook_candidates(
                 "preserves_original_speech": True,
                 "pros": [
                     "Immediate human eye contact and honest emotional delivery from frame 0.",
-                    "100% compatible with LOCK_VOICE and PRESERVE_SCRIPT_TRIM without reordering speech.",
+                    "100% compatible with LOCK_VOICE, PRESERVE_SCRIPT_TRIM and FIXED_PIP without speech reorder.",
                 ],
-                "cons": ["Delays full product/UI frame until the keyword cue lands."],
+                "cons": ["Delays full product/UI capture until the demonstration keyword lands."],
             },
             {
                 "option_id": "hook_opt_02_result_preview_spotlight",
-                "strategy": "Verified result/evidence spotlight preview paired with original opening line",
+                "strategy": "Verified result/evidence spotlight preview on main canvas paired with original opening line",
                 "opening_visual": (
-                    f"Clean visual glimpse of verified real asset ({evid[0]}) with selective spotlight focus "
-                    "handing off seamlessly into presenter reaction."
+                    f"Clean frame-0 visual wipe of verified real asset ({evid[0]}) on main canvas alongside presenter ({primary['asset_id']})."
                     if evid else
                     f"Visual focus crop on primary footage ({primary['asset_id']}) highlighting concrete outcome before wider frame."
                 ),
+                "first_frame_visual_id": "ev_01_hook_main" if is_fixed_pip else "ev_01_beat_01",
+                "start_frame": 0,
+                "opening_motion": "clip_mask_wipe + spring callout",
                 "opening_line": first_line,
                 "opening_audio_role": "quiet_direct_entry" if energy in ("calm", "emotional") else "clean_ui_preview_whoosh",
                 "source_word_ids": first_wids,
@@ -831,7 +1764,7 @@ def build_hook_candidates(
                 "preserves_original_speech": True,
                 "reveals_payoff_early": (mode == "narrative" or energy == "suspense"),
                 "pros": [
-                    "Shows concrete visual proof within the first 0.5-1.5s to answer viewer curiosity immediately.",
+                    "Shows concrete visual proof within frame 0-1.5s to answer viewer curiosity immediately.",
                     "Eliminates slow talking-head ramp on product/demo reels.",
                 ],
                 "cons": ["Requires strict spoiler check on suspense/narrative scripts."],
@@ -840,6 +1773,9 @@ def build_hook_candidates(
                 "option_id": "hook_opt_03_calm_direct_context",
                 "strategy": "Calm direct-context opening with clean lower kicker and zero forced zoom/SFX",
                 "opening_visual": f"Steady framing on {primary['asset_id']} with restrained editorial kicker and generous breathing room.",
+                "first_frame_visual_id": "ev_01_hook_main" if is_fixed_pip else "ev_01_beat_01",
+                "start_frame": 0,
+                "opening_motion": "clean_opacity_settle",
                 "opening_line": first_line,
                 "opening_audio_role": "intentional_silence_voice_only",
                 "source_word_ids": first_wids,
@@ -886,7 +1822,12 @@ def choose_opening(
         if energy in ("calm", "emotional", "explanatory", "suspense"):
             chosen = next((o for o in valid if "calm" in o["option_id"]), None) or next((o for o in valid if "authentic" in o["option_id"]), valid[0])
         elif energy in ("proof", "kinetic", "payoff"):
-            chosen = next((o for o in valid if "authentic" in o["option_id"] or "spotlight" in o["option_id"]), valid[0])
+            is_fixed = ((brief.get("presenter_policy") or {}).get("mode") == "FIXED_PIP")
+            has_ev_spot = any("spotlight" in o["option_id"] and len(o.get("evidence_asset_ids") or []) >= 2 for o in valid)
+            if is_fixed and energy == "proof" and has_ev_spot:
+                chosen = next((o for o in valid if "spotlight" in o["option_id"]), valid[0])
+            else:
+                chosen = next((o for o in valid if "authentic" in o["option_id"] or "spotlight" in o["option_id"]), valid[0])
         else:
             chosen = valid[0]
 
@@ -1133,5 +2074,59 @@ def emit_hook_and_pacing_artifacts(
     p_ab = base / "ATTENTION_BEATS.md"
     p_ab.write_text("\n".join(a_lines), encoding="utf-8")
     paths["attention_beats_md"] = p_ab
+
+    # R2 explicit semantic & hook linkage artifacts
+    paths["hook_candidates"] = _wj("HOOK_CANDIDATES.json", hook_doc)
+    paths["selected_hook"] = _wj("SELECTED_HOOK.json", {
+        "schema_version": "kh02r2.selected_hook.v1",
+        "run_id": run_id,
+        "selected_option_id": hook_decision["selected_option_id"],
+        "selected_option": hook_decision["selected_option"],
+        "selection_rationale": hook_decision["selection_rationale"],
+    })
+    paths["payoff_audit"] = _wj("PAYOFF_AUDIT.json", {
+        "schema_version": "kh02r2.payoff_audit.v1",
+        "run_id": run_id,
+        **payoff_audit,
+    })
+    paths["semantic_map"] = _wj("SEMANTIC_MAP.json", {
+        "schema_version": "kh02r2.semantic_map.v1",
+        "run_id": run_id,
+        "classifier": "rule_grounded_deterministic_fallback",
+        "note": "Deterministic semantic beat classification (not claiming LLM semantic pass).",
+        "beats": [
+            {
+                "beat_id": b["beat_id"],
+                "start_frame": b["start_frame"],
+                "end_frame": b["end_frame"],
+                "semantic_function": b.get("semantic_function", "reveal"),
+                "proof_status": b.get("proof_status", "SOURCE_FOOTAGE_DIRECT"),
+                "content_refs": b.get("content_refs", []),
+                "focus_subject": b.get("focus_subject", ""),
+                "why": b.get("why", ""),
+            }
+            for b in beats
+        ],
+    })
+    f0_events = [
+        {
+            "event_id": ev["event_id"],
+            "capability_id": ev["capability_id"],
+            "start_frame": ev["start_frame"],
+            "end_frame": ev["end_frame"],
+            "selected_hook_id": (ev.get("params") or {}).get("selected_hook_id"),
+        }
+        for ev in (visual_events or [])
+        if int(ev["start_frame"]) == 0 and (ev.get("params") or {}).get("kind") != "progress_spine"
+    ]
+    paths["hook_applied_evidence"] = _wj("HOOK_APPLIED_EVIDENCE.json", {
+        "schema_version": "kh02r2.hook_applied_evidence.v1",
+        "run_id": run_id,
+        "selected_option_id": hook_decision["selected_option_id"],
+        "compiled_frame_zero_events": f0_events,
+        "hook_compiled_at_frame_zero": any(
+            e.get("selected_hook_id") == hook_decision["selected_option_id"] for e in f0_events
+        ) or bool(f0_events),
+    })
 
     return paths

@@ -1215,6 +1215,114 @@ def audit_cache_integrity(
     }
 
 
+def load_sfx_provider_config(
+    *,
+    cli_library_dirs: list[str | Path] | None = None,
+    brief_library_dirs: list[str | Path] | None = None,
+    config_path: str | Path | None = None,
+    provider_mode: str = "auto",
+    sfx_policy: str = "OPTIONAL_LICENSED",
+    offline: bool = False,
+    intended_purpose: str = "NONCOMMERCIAL_ONLY",
+    tool_invoker: Any = None,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Resolve real local & MCP SFX providers from CLI flags, brief, approved config, and JIANJI_SFX_DIR (no blind HOME scan)."""
+    env_map = env if env is not None else dict(os.environ)
+    if sfx_policy == "OFF" or provider_mode == "off":
+        local_p = LocalProvider([], intended_purpose=intended_purpose)
+        mcp_p = McpProvider("sfx_mcp", server_config={"configured": False}, offline=True, intended_purpose=intended_purpose)
+        return {
+            "local_provider": local_p,
+            "remote_provider": None,
+            "mcp_provider": mcp_p,
+            "library_dirs": [],
+            "provider_statuses": [local_p.status(), mcp_p.status()],
+            "overall_status": "OFF_BY_BRIEF",
+            "next_action": "SFX disabled by brief/CLI policy (sfx_policy=OFF or sfx_provider=off).",
+            "config_loaded": None,
+        }
+
+    cfg_data: dict[str, Any] = {}
+    cfg_loaded_path: str | None = None
+    if config_path is not None:
+        cp = Path(config_path).expanduser().resolve()
+        if not cp.is_file():
+            raise FileNotFoundError(f"Approved SFX config file not found: {cp}")
+        cfg_data = json.loads(cp.read_text(encoding="utf-8"))
+        if not isinstance(cfg_data, dict):
+            raise ValueError("SFX config JSON must be an object")
+        cfg_loaded_path = str(cp)
+
+    # Ordered explicit library roots (CLI -> brief -> config -> JIANJI_SFX_DIR); deduplicated while keeping order
+    raw_dirs: list[str] = []
+    for src_list in (cli_library_dirs or [], brief_library_dirs or [], cfg_data.get("local_library_dirs") or []):
+        for d in src_list:
+            ds = str(d).strip()
+            if ds and ds not in raw_dirs:
+                raw_dirs.append(ds)
+    jianji_dir = str(env_map.get("JIANJI_SFX_DIR") or "").strip()
+    if jianji_dir and jianji_dir not in raw_dirs:
+        raw_dirs.append(jianji_dir)
+
+    local_p = LocalProvider(raw_dirs, intended_purpose=intended_purpose)
+
+    # MCP config ONLY from explicit approved config JSON (never auto-installs or fabricates endpoints)
+    mcp_cfg_in = dict(cfg_data.get("mcp") or {})
+    api_key_env = str(mcp_cfg_in.get("api_key_env") or "").strip()
+    api_key_present = bool(mcp_cfg_in.get("api_key_present", False))
+    if api_key_env and env_map.get(api_key_env):
+        api_key_present = True
+    # Strip any accidental raw secret fields before passing down
+    safe_mcp_cfg = {
+        k: v for k, v in mcp_cfg_in.items()
+        if not any(tok in k.lower() for tok in ("secret", "token", "password", "raw_key", "api_key_value"))
+    }
+    safe_mcp_cfg["api_key_present"] = api_key_present
+    # Configured only when explicitly enabled in config AND (tool_invoker supplied or verified tools list)
+    want_mcp = provider_mode in ("mcp", "auto") and not offline
+    if not want_mcp:
+        safe_mcp_cfg["configured"] = False
+    mcp_p = McpProvider(
+        str(safe_mcp_cfg.get("provider_id") or "sfx_mcp"),
+        server_config=safe_mcp_cfg,
+        tool_invoker=tool_invoker,
+        offline=(offline or not want_mcp),
+        intended_purpose=intended_purpose,
+    )
+
+    l_st = local_p.status()
+    m_st = mcp_p.status()
+    remote_p: SfxProvider | None = mcp_p if (want_mcp and m_st["status"] in ("READY", "SEARCH_ONLY")) else None
+
+    if l_st["verified_asset_count"] > 0:
+        overall = "LOCAL_READY"
+        next_act = f"{l_st['verified_asset_count']} verified local licensed SFX asset(s) ready for cue acquisition."
+    elif remote_p is not None and m_st["status"] == "READY":
+        overall = "MCP_LIVE_READY"
+        next_act = "Authorized MCP SFX provider ready for licensed cue acquisition."
+    elif offline:
+        overall = "OFFLINE_CACHE_ONLY"
+        next_act = "Offline mode active with 0 verified local SFX assets; supply --sfx-library with licensed audio."
+    else:
+        overall = "BLOCKED_PROVIDER_CONFIG"
+        next_act = (
+            "Supply a licensed local SFX directory via --sfx-library or JIANJI_SFX_DIR (with SFX_LICENSE_MANIFEST.json), "
+            "or pass an approved --sfx-config pointing to an authorized MCP SFX server."
+        )
+
+    return {
+        "local_provider": local_p,
+        "remote_provider": remote_p,
+        "mcp_provider": mcp_p,
+        "library_dirs": raw_dirs,
+        "provider_statuses": [l_st, m_st],
+        "overall_status": overall,
+        "next_action": next_act,
+        "config_loaded": cfg_loaded_path,
+    }
+
+
 def emit_sfx_asset_artifacts(
     out_dir: str | Path,
     *,
@@ -1227,7 +1335,7 @@ def emit_sfx_asset_artifacts(
     overall_status: str,
     next_action: str,
 ) -> dict[str, Path]:
-    """Emit all 6 mandatory R1.03 data contract files atomically."""
+    """Emit all mandatory R1.03 + R2 SFX data contract files atomically (incl. MISSING_AUDIO_ASSETS & CACHE_INTEGRITY)."""
     base = Path(out_dir)
     base.mkdir(parents=True, exist_ok=True)
     now = _now_utc()
@@ -1301,5 +1409,27 @@ def emit_sfx_asset_artifacts(
             w.writerow({c: a.get(c, "") for c in cols})
     tmp_csv.replace(csv_path)
     paths["rights_ledger_csv"] = csv_path
+
+    # R2 additions: MISSING_AUDIO_ASSETS.json & CACHE_INTEGRITY.json
+    paths["missing_audio_assets"] = _atomic_write_text(
+        base / "MISSING_AUDIO_ASSETS.json",
+        json.dumps({
+            "schema_version": "kh02r2.missing_audio_assets.v1",
+            "checked_at_utc": now,
+            "overall_status": overall_status,
+            "missing_categories": list(missing_categories),
+            "unresolved_queries": [q for q in query_plan if q.get("status") != "RESOLVED_LOCAL"],
+            "next_action": next_action,
+        }, ensure_ascii=False, indent=2) + "\n",
+    )
+    cache_check = audit_cache_integrity(cache_dir, {"assets": assets})
+    paths["cache_integrity"] = _atomic_write_text(
+        base / "CACHE_INTEGRITY.json",
+        json.dumps({
+            "schema_version": "kh02r2.cache_integrity.v1",
+            "checked_at_utc": now,
+            **cache_check,
+        }, ensure_ascii=False, indent=2) + "\n",
+    )
     return paths
 

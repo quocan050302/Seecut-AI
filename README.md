@@ -1,6 +1,6 @@
-# Seecut-AI (KH-02.R1 Autonomous Professional Editor)
+# Seecut-AI (KH-02.R2 Autonomous Professional Editor)
 
-Antigravity skill (`seecut-ai`) combining the **KH-02.R1 Autonomous Professional Video Editor** (Intelligent Rough Cut, Hook & Pacing Director, Licensed SFX Discovery & MCP Adapter, Multi-Layer Sound Design & Chunked PCM Stem Mixing, Verified Advanced Effects + Deterministic Chromium Effect Gallery, unified `SHOTBOOK_V2`, P0 hardened wrappers, selective MIT `video-use` diagnostic helpers, and independent QA) with the unmodified **YeJe-cpu/SeeCut v3.4 Core** rendering engine (`HyperFrames + HTML/CSS/GSAP + Playwright/Chromium + FFmpeg`).
+Antigravity skill (`seecut-ai`) combining the **KH-02.R2 Autonomous Professional Video Editor** (Single-Path Live Pipeline Orchestration with `STAGE_RECEIPTS/`, Explicit Optional Persistent KOL PIP `presenter_policy` + Decoded Per-Frame PIP QA, Intelligent Rough Cut Application, Frame-0 Hook Compilation & Semantic Storytelling, Configurable Local/MCP Licensed SFX Providers, Streaming Multi-Layer PCM Stem Mixing, Verified Advanced Effects, unified `SHOTBOOK_V2`, P0 hardened wrappers, selective MIT `video-use` diagnostic helpers, and independent QA) with the unmodified **YeJe-cpu/SeeCut v3.4 Core** rendering engine (`HyperFrames + HTML/CSS/GSAP + Playwright/Chromium + FFmpeg`).
 
 > **Required Notice**: Copyright (c) 2026 YeJe-cpu (https://github.com/YeJe-cpu)
 > **License**: [PolyForm Noncommercial License 1.0.0](./LICENSE) (`https://polyformproject.org/licenses/noncommercial/1.0.0`). See [NOTICE](./NOTICE) and [references/kh02-video-use-attribution.md](./references/kh02-video-use-attribution.md) for third-party notices.
@@ -40,8 +40,8 @@ Antigravity skill (`seecut-ai`) combining the **KH-02.R1 Autonomous Professional
 │       ├── render_guard.py              # P0 path/marker/cache-key guard, disk floor, pinned render.mjs launcher & atomic mux
 │       ├── qa.py                        # Structural decode, audio correlation, boundary filmstrip+waveform (MIT adapted), adoption gate
 │       └── run.py                       # Unified CLI (`python3 -m scripts.kh02.run`) with R1 cut/SFX/offline/quota flags
-├── tests/kh02/                          # Full 64-group executable regression suite (`T01`–`T36` + `R1-01`..`R1-28`) via stdlib unittest
-└── reports/                             # Small redacted run summaries & hashes (`KH02/`, `KH02R1/`) — zero media/secrets/user paths
+├── tests/kh02/                          # Full 88-group executable regression suite (`T01`–`T36` + `R1-01`..`R1-28` + `R2-01`..`R2-24`) via stdlib unittest
+└── reports/                             # Small redacted run summaries & hashes (`KH02/`, `KH02R1/`, `KH02R2/`) — zero media/secrets/user paths
 ```
 
 ## Quick Verification & Usage

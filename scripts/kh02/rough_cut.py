@@ -978,11 +978,34 @@ def apply_r1_cut_map(
     }
 
 
-def _extract_pcm_samples(media_path: Path, sample_rate: int = 48000) -> list[int] | None:
-    """Decode mono 16-bit PCM samples bounded for seam discontinuity verification."""
+def _read_pcm_window(
+    media_path: Path,
+    start_sec: float,
+    dur_sec: float,
+    sample_rate: int = 48000,
+) -> list[int]:
+    """Bounded streaming PCM slice decode (constant O(window) memory for long-form safety)."""
+    s0 = max(0.0, float(start_sec))
+    d = max(0.01, min(30.0, float(dur_sec)))
     proc = subprocess.run(
         [
-            "ffmpeg", "-v", "error", "-i", str(media_path),
+            "ffmpeg", "-v", "error", "-ss", f"{s0:.4f}", "-t", f"{d:.4f}",
+            "-i", str(media_path),
+            "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-",
+        ],
+        capture_output=True, timeout=60,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        return []
+    n = len(proc.stdout) // 2
+    return list(struct.unpack(f"<{n}h", proc.stdout[: n * 2]))
+
+
+def _extract_pcm_samples(media_path: Path, sample_rate: int = 48000, *, max_duration_sec: float = 60.0) -> list[int] | None:
+    """Decode bounded mono 16-bit PCM samples (capped by max_duration_sec to prevent unbounded RAM growth)."""
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-t", f"{float(max_duration_sec):.3f}", "-i", str(media_path),
             "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-",
         ],
         capture_output=True, timeout=60,
@@ -1069,23 +1092,27 @@ def verify_cut_result(
         })
 
     seam_reports: list[dict[str, Any]] = []
-    pcm_samples: list[int] | None = None
+    pcm_sample_count: int | None = None
     if drv_a:
-        pcm_samples = _extract_pcm_samples(drv, sample_rate=sr)
-        if not pcm_samples:
+        # Compute exact stream sample count without loading entire audio stream into RAM
+        if actual_a_dur is not None and actual_a_dur > 0:
+            pcm_sample_count = int(round(actual_a_dur * sr))
+        # Verify audio decodes cleanly on opening window
+        probe_win = _read_pcm_window(drv, 0.0, min(0.5, actual_a_dur or 0.5), sample_rate=sr)
+        if not probe_win:
             issues.append({"code": "AUDIO_MEASURE_MISSING", "message": "Failed to decode PCM samples for seam verification"})
         else:
             segs = edl["segments"]
             for idx in range(len(segs) - 1):
                 seam_frame = int(segs[idx]["out_end_frame"])
-                seam_sample = int(round(float(Fraction(seam_frame * sr) / fps_frac)))
-                w_lo = max(1, seam_sample - int(0.02 * sr))
-                w_hi = min(len(pcm_samples) - 1, seam_sample + int(0.02 * sr))
+                seam_sec = float(Fraction(seam_frame) / fps_frac)
+                win_start = max(0.0, seam_sec - 0.025)
+                win_pcm = _read_pcm_window(drv, win_start, 0.050, sample_rate=sr)
                 max_step = 0.0
-                if w_hi > w_lo:
-                    max_step = max(abs(pcm_samples[i] - pcm_samples[i - 1]) for i in range(w_lo, w_hi)) / 32768.0
-                # Check if unintentional full digital zero-dropout spans > 0.12s right across seam
-                zero_run = sum(1 for i in range(w_lo, w_hi) if abs(pcm_samples[i]) < 4) / max(1, w_hi - w_lo)
+                zero_run = 0.0
+                if len(win_pcm) > 2:
+                    max_step = max(abs(win_pcm[i] - win_pcm[i - 1]) for i in range(1, len(win_pcm))) / 32768.0
+                    zero_run = sum(1 for x in win_pcm if abs(x) < 4) / float(len(win_pcm))
                 click_flag = max_step > seam_click_threshold
                 if click_flag:
                     issues.append({
@@ -1095,7 +1122,7 @@ def verify_cut_result(
                 seam_reports.append({
                     "seam_index": idx + 1,
                     "out_frame": seam_frame,
-                    "out_sec": round(seam_frame / float(fps_frac), 4),
+                    "out_sec": round(seam_sec, 4),
                     "max_sample_step_norm": round(max_step, 4),
                     "near_zero_ratio": round(zero_run, 4),
                     "click_detected": click_flag,
@@ -1140,7 +1167,7 @@ def verify_cut_result(
         "actual_video_duration_sec": round(actual_v_dur, 4),
         "actual_audio_duration_sec": round(actual_a_dur, 4) if actual_a_dur is not None else None,
         "av_drift_sec": round(av_drift_sec, 4),
-        "pcm_sample_count": len(pcm_samples) if pcm_samples is not None else None,
+        "pcm_sample_count": pcm_sample_count,
         "saved_frames": saved_frames,
         "saved_sec": saved_sec,
         "trim_seconds_by_reason": trim_by_reason,

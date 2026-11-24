@@ -46,6 +46,10 @@
       }
     },
     "original_19_gates": { "type": "object" },
-    "kh02_subgates": { "type": "object" }
+    "kh02_subgates": { "type": "object" },
+    "r1_subgates": { "type": "object" },
+    "r2_subgates": { "type": "object" },
+    "presenter_frame_qa": { "type": ["object", "null"] },
+    "stage_receipts_verified": { "type": "boolean" }
   }
 }

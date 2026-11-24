@@ -15,3 +15,8 @@ Sound direction is authored in **Phase 02** inside `SHOTBOOK_V2.json` (`audio_cu
 - Under `LOCK_VOICE`, discrepancies against profile targets (e.g., `-16 ± 2 LUFS` social voice-forward target) are measured and reported with an actionable recommendation rather than silently altering the voice track.
 - `inspect_audio()` computes dry-vs-final PCM Pearson correlation (`>= 0.995` required under `LOCK_VOICE`).
 - Waveform/LUFS checks never substitute for human listening: `OWNER_AUDIO=PENDING` and `AUTO_PERCEPTUAL=PENDING` remain explicit until owner playback signoff.
+
+## 4. KH-02.R2 Live Provider Configuration & Streaming PCM Checks
+- `sfx_assets.py::load_sfx_provider_config()` connects real local libraries (`--sfx-library`, brief `sfx_library_dirs`, `JIANJI_SFX_DIR`) and approved MCP server configs (`--sfx-config`) directly inside `scripts/kh02/run.py` Stage G (zero hardcoded empties).
+- Whenever verified licensed SFX/BGM/ambience cues exist, Stage J executes `render_stems()` -> `measure_stems()` -> `verify_mix_sync()` -> bounded streaming `compare_dry_and_mix()` -> `mix_audio_checked()` atomically into the final MP4.
+- When `0` verified licensed assets are available, `OPTIONAL_LICENSED` preserves the original mapped voice honestly (`LIVE_SOUND_DESIGN=BLOCKED_PROVIDER_CONFIG`) while `REQUIRED_LICENSED` fails closed (`BLOCKED_SFX_ASSETS`, exit code `3`).

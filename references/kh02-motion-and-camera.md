@@ -24,3 +24,8 @@
 - Supports Latin, Vietnamese diacritics (elevated `1.38` line-height headroom), and CJK glyphs with explicit local fallback stacks (zero unauthorized remote font downloads).
 - Enforces mobile 360px legibility (`>= 10.5px` scaled floor), platform safe zones, bounding-box overflow checks, and reading-rate-based `minimum_read_frames`.
 - **Captions OFF by Default**: Full subtitles are emitted ONLY when `caption_policy == "ON_REQUESTED"` in the brief, placed strictly at top `z_order` (`999`) above all visual overlays.
+
+## 5. KH-02.R2 Persistent Presenter Policy & Reserved-Zone Collision Solver
+- Optional `presenter_policy` (`LEGACY_DYNAMIC` default, `FIXED_PIP`, `ADAPTIVE_PIP`, `DYNAMIC_HYBRID`, `FACELESS`) governs `#personWrap` geometry via `camera.py::resolve_presenter_region()`, `fit_face_safe_crop()`, `compute_presenter_reserved_region()`, and `validate_presenter_path()`.
+- `typography.py::resolve_layout_avoiding_presenter()` checks swept bounding boxes (including entry y-shift and `back.out` spring overshoot) against the reserved presenter region + platform UI safe zones, reflowing cleanly or failing closed with `LAYOUT_CONFLICT` (never hiding the presenter).
+- See [kh02-r2-presenter-policy.md](./kh02-r2-presenter-policy.md) for full contract details.

@@ -17,3 +17,4 @@ KH-02 is designed as a generalizable autonomous editorial architecture rather th
 ## Generalization Guardrails
 - Never claim a niche is production-validated from synthetic fixtures alone: distinguish `TEST_ONLY` vs `SMOKE_VERIFIED` vs `REAL_FOOTAGE_VERIFIED`.
 - Multi-aspect (`9:16`, `16:9`, `1:1`, `4:5`) and multilingual (`en`, `vi` diacritics, `zh`/CJK) are validated deterministically in `tests/kh02/`.
+- **KH-02.R2 Presenter & Long-Form Coverage (`R2-08`, `R2-11`, `R2-23`)**: `FIXED_PIP` (`BOTTOM_LEFT` & `BOTTOM_RIGHT`), `ADAPTIVE_PIP`, `DYNAMIC_HYBRID`, `FACELESS`, `LEGACY_DYNAMIC`, and 65s+ chaptered plans with streaming bounded PCM verification are tested in `tests/kh02/test_r2_*.py` (synthetic fixtures explicitly labeled `SYNTHETIC_SMOKE` — never misrepresented as real multi-niche footage sign-off).

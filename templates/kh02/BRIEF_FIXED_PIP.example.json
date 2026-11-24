@@ -1,0 +1,63 @@
+{
+  "schema_version": "kh02.brief.v2",
+  "brief_id": "example_fixed_pip_bottom_left",
+  "title": "Example Talking-Head Edit with Persistent Bottom-Left KOL PIP",
+  "mode": "talking_head",
+  "profile": "editorial_pro",
+  "objective": "Showcase product/platform details on the main canvas while keeping the presenter continuously visible in a bottom-left rounded PIP.",
+  "audience": "Short-form viewers on mobile portrait feeds",
+  "platform": "reels",
+  "aspect_ratio": "9:16",
+  "language": "en",
+  "tone": "warm, clear, evidence-grounded",
+  "key_message": "Creator walkthrough with persistent speaker presence",
+  "proof_points": [
+    "Opening hook on main canvas",
+    "Verified masked UI capture",
+    "Progressive detail breakdown",
+    "Grounded closing payoff"
+  ],
+  "voice_policy": "PRESERVE_SCRIPT_TRIM",
+  "cut_policy": "PRESERVE_SCRIPT_TRIM",
+  "approved_scope": "owner_approved_nonverbal_dead_air_trim",
+  "energy_mode": "proof",
+  "caption_policy": "OFF",
+  "music_policy": "OFF",
+  "sfx_policy": "OPTIONAL_LICENSED",
+  "sfx_provider": "auto",
+  "license_decision": "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED",
+  "creative_theme": "editorial_burgundy_parchment",
+  "presenter_policy": {
+    "mode": "FIXED_PIP",
+    "visibility": "ALWAYS_VISIBLE",
+    "anchor": "BOTTOM_LEFT",
+    "shape": "ROUNDED_RECT",
+    "width_ratio": 0.30,
+    "min_width_ratio": 0.24,
+    "max_width_ratio": 0.36,
+    "aspect_ratio": "SOURCE_AWARE",
+    "safe_zone_profile": "PLATFORM_AWARE",
+    "face_tracking": "AUTO_WHEN_AVAILABLE",
+    "occlusion_policy": "RESERVE_PRESENTER_ZONE",
+    "allow_fullscreen": false,
+    "allow_anchor_switch": false,
+    "allow_hide": false
+  },
+  "sources": [
+    {
+      "asset_id": "presenter_aroll",
+      "path": "./inputs/presenter_raw.mp4",
+      "kind": "a_roll",
+      "rights": "OWNER_SUPPLIED_NONCOMMERCIAL",
+      "label": "Original talking-head A-roll",
+      "face_rect": [0.22, 0.14, 0.74, 0.54]
+    },
+    {
+      "asset_id": "verified_ui_capture",
+      "path": "./inputs/verified_ui_masked.png",
+      "kind": "real_ui",
+      "rights": "CAPTURED_REAL_EVIDENCE_MASKED",
+      "label": "Verified masked UI capture"
+    }
+  ]
+}

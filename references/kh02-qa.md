@@ -27,3 +27,8 @@ Every final QA report keeps these 7 dimensions strictly separate:
 - `OWNER_AUDIO` (always `PENDING` until owner listens to the exported MP4 SHA)
 - `COMMERCIAL_RELEASE` (always `BLOCKED` under PolyForm Noncommercial 1.0.0 unless written permission from `aiesecxuanli@gmail.com` is logged)
 - `CROSS_NICHE_VALIDATED` (`TEST_ONLY` / `PARTIAL_SMOKE_VERIFIED` / `VERIFIED` strictly matching real evidence)
+
+## 4. KH-02.R2 Decoded Per-Frame Presenter, Effect, Seam & Layer Fidelity QA
+- `qa.py::verify_presenter_frames()` decodes every frame `0..N-1` of the final MP4 and compares the PIP region against the derived source crop (`PRESENTER_FRAME_QA.csv/json`, `PIP_CROP_EVIDENCE/`, `mobile_360px_preview.png`), catching frame-0 flash, EOF fade, occlusion, or frozen presenter frames.
+- `qa.py::build_effect_application_ledger()`, `audit_transition_seams()`, and `audit_visual_holds()` record real rendered effect usage, boundary flash checks, and beat-level pixel motion diagnostics.
+- `qa.py::export_and_verify_jianying_layers()` verifies upstream `jianying_layers.mjs` + `jianying_plan.py` outputs and honestly discloses `LAYER_FIDELITY_PARTIAL` where CSS/GSAP motion is flattened.

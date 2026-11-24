@@ -13,7 +13,7 @@ description: >-
   silently substitute other video rendering engines (Concat/Remotion/video-use render.py).
 ---
 
-# seecut-ai — KH-02.R1 Autonomous Professional Editor on YeJe-cpu/SeeCut v3.4 Core
+# seecut-ai — KH-02.R2 Autonomous Professional Editor on YeJe-cpu/SeeCut v3.4 Core
 
 > **Required Notice**: Copyright (c) 2026 YeJe-cpu (https://github.com/YeJe-cpu)
 > **Upstream License**: PolyForm Noncommercial License 1.0.0 (`https://polyformproject.org/licenses/noncommercial/1.0.0`). See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
@@ -43,32 +43,40 @@ This skill orchestrates the **KH-02 Autonomous Professional Editor** directly at
    - Require verified raw source inputs; never substitute `ANALYSIS_ONLY` reference reels or prior flattened adopted MP4s as source footage (`validate_references()` blocks any `ANALYSIS_ONLY` asset).
    - Never fabricate UI mockups, fake screenshots, or unverified claims (`claim_evidence[]` enforced). Mask source identifiers on real captures and record all visible text in `build/fp-manifest.txt`.
 5. **No Fake PASS / Mandatory Human Sign-Off**:
-   - Report all **19 original gates + 10 KH-02 subgates + 13 KH-02.R1 subgates** truthfully and keep `CODE_QA_PASS`, `OLIVIA_RENDER_VERIFIED`, `AUTO_EDITORIAL_QA`, `OWNER_VISUAL` (`PENDING`), `OWNER_AUDIO` (`PENDING`), `COMMERCIAL_RELEASE` (`BLOCKED`), and `CROSS_NICHE_VALIDATED` strictly separated.
+   - Report all **19 original gates + 10 KH-02 subgates + 13 KH-02.R1 subgates + KH-02.R2 live-pipeline & presenter gates** truthfully and keep `CODE_QA_PASS`, `OLIVIA_RENDER_VERIFIED`, `AUTO_EDITORIAL_QA`, `OWNER_VISUAL` (`PENDING`), `OWNER_AUDIO` (`PENDING`), `COMMERCIAL_RELEASE` (`BLOCKED`), and `CROSS_NICHE_VALIDATED` strictly separated.
    - Never inject `TEST_ONLY` synthesized SFX into production videos; if local licensed SFX and authorized MCP servers are absent, report `R1_SFX_LOCAL_INVENTORY=BLOCKED_SFX_ASSETS` / `R1_MCP_LIVE=BLOCKED_PROVIDER_CONFIG` truthfully.
+   - Explicit optional `presenter_policy` defaults to `LEGACY_DYNAMIC` (v1 backward-compatible); when `FIXED_PIP` + `ALWAYS_VISIBLE` is configured, verify every decoded frame `0..N-1` against the derived source crop (`PRESENTER_FRAME_QA.csv/json`, `PIP_CROP_EVIDENCE/`).
 
 ---
 
-## Single-Entry CLI (`scripts/kh02/run.py`)
+## Single-Entry Live Pipeline CLI (`scripts/kh02/run.py`)
 
 ```bash
-# Dry-run contract, rough-cut, hook, sound & resource budget check (no writes/downloads/renders/model calls):
+# Dry-run contract, rough-cut, hook, presenter policy, sound & disk check (zero writes/downloads/renders):
 python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode plan --dry-run
 
-# Plan + emit SHOTBOOK_V2, CUT_CANDIDATES, HOOK_OPTIONS, PACING_PLAN, sfx_plan & SFX_PROVIDER_STATUS:
-python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode plan --cut-policy PRESERVE_SCRIPT_TRIM --sfx-provider local --offline --workers 2
+# Plan + apply authorized rough cut + emit STAGE_RECEIPTS, SHOTBOOK_V2, SEMANTIC_MAP, HOOK_APPLIED_EVIDENCE, PRESENTER_LAYOUT & SFX manifests:
+python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode plan --cut-policy PRESERVE_SCRIPT_TRIM --sfx-provider auto --workers 2
 
-# Preview (0.5x) or Full native render + structural/audio/integrity QA:
-python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode full --workers 2 --max-disk 4.0
+# Preview (0.5x) or Full native render + H1 geom-check + real stem mix/mux (when licensed SFX exist) + decoded per-frame presenter QA + optional H2/pairwise & JianYing layers:
+python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode full \
+  --presenter-mode FIXED_PIP --presenter-anchor BOTTOM_LEFT --presenter-shape ROUNDED_RECT \
+  --sfx-library <licensed_sfx_dir> --export-layers --run-h2 --compare-baseline <baseline.mp4> --workers 2 --max-disk 8.0
+
+# Verify an existing run's STAGE_RECEIPTS and SHA-256 continuity:
+python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode verify
 ```
 
-Options: `--dry-run`, `--workers 1..4` (default `2`, heavy render concurrency locked to `1`), `--max-disk <GiB>`, `--profile seecut_core|editorial_pro|minimal_documentary|silent_visual`, `--license-decision <status>`, `--cut-policy LOCK_VOICE|PRESERVE_SCRIPT_TRIM|EDITORIAL_CUT|TRIM_APPROVED`, `--sfx-provider local|mcp|api|auto|off`, `--sfx-policy OPTIONAL_LICENSED|OFF|REQUIRED_LICENSED`, `--music-policy OFF|OPTIONAL_LICENSED|REQUIRED_LICENSED`, `--max-downloads <N>`, `--max-download-bytes <bytes>`, `--offline`, `--approved-brief`, `--transcript <faster_whisper.json>`, `--catalog <hyperframes_catalog.json>`.
+Options: `--mode plan|preview|full|verify`, `--dry-run`, `--workers 1..4` (default `2`, heavy render concurrency locked to `1`), `--max-disk <GiB>`, `--profile seecut_core|editorial_pro|minimal_documentary|silent_visual`, `--license-decision <status>`, `--cut-policy LOCK_VOICE|PRESERVE_SCRIPT_TRIM|EDITORIAL_CUT|TRIM_APPROVED`, `--presenter-mode LEGACY_DYNAMIC|FIXED_PIP|ADAPTIVE_PIP|DYNAMIC_HYBRID|FACELESS`, `--presenter-anchor TOP_LEFT|TOP_RIGHT|BOTTOM_LEFT|BOTTOM_RIGHT|CUSTOM`, `--presenter-shape ROUNDED_RECT|CIRCLE`, `--presenter-width-ratio <float>`, `--sfx-provider local|mcp|api|auto|off`, `--sfx-policy OPTIONAL_LICENSED|OFF|REQUIRED_LICENSED`, `--sfx-library <dir>` (repeatable), `--sfx-config <approved_cfg.json>`, `--sfx-cache <cache_dir>`, `--music-policy OFF|OPTIONAL_LICENSED|REQUIRED_LICENSED`, `--max-downloads <N>`, `--max-download-bytes <bytes>`, `--offline`, `--approved-brief`, `--transcript <faster_whisper.json>`, `--catalog <hyperframes_catalog.json>`, `--run-h2`, `--compare-baseline <mp4>` (repeatable), `--export-layers`, `--candidate-version 1..3`, `--output-basename <stem>`.
 
 ---
 
 ## Authoritative References & Schemas
 
 - **Upstream Index & Conflict Log**: [references/upstream-index.md](./references/upstream-index.md)
-- **Gates & Compliance (19 + 10 KH-02 + 13 R1)**: [references/gates-and-compliance.md](./references/gates-and-compliance.md)
+- **Gates & Compliance (19 + 10 KH-02 + 13 R1 + R2)**: [references/gates-and-compliance.md](./references/gates-and-compliance.md)
+- **KH-02.R2 Live Pipeline & Stage Receipts**: [references/kh02-r2-live-pipeline.md](./references/kh02-r2-live-pipeline.md)
+- **KH-02.R2 Presenter Policy & Persistent KOL PIP**: [references/kh02-r2-presenter-policy.md](./references/kh02-r2-presenter-policy.md)
 - **KH-02.R1 Rough Cut & Hook Director**: [references/kh02-r1-rough-cut-hook.md](./references/kh02-r1-rough-cut-hook.md)
 - **KH-02.R1 Licensed SFX Providers & Multi-Layer Mix**: [references/kh02-r1-sfx-providers.md](./references/kh02-r1-sfx-providers.md)
 - **KH-02.R1 Effect Capability Registry & Gallery**: [references/kh02-r1-effect-capabilities.md](./references/kh02-r1-effect-capabilities.md)
@@ -79,7 +87,7 @@ Options: `--dry-run`, `--workers 1..4` (default `2`, heavy render concurrency lo
 - **Cross-Niche Matrix**: [references/kh02-cross-niche.md](./references/kh02-cross-niche.md)
 - **MIT Attribution (`video-use`)**: [references/kh02-video-use-attribution.md](./references/kh02-video-use-attribution.md)
 - **JSON Schemas (13 total)**: `schemas/kh02/{brief,source_inventory,transcript,edl,cut_candidate,hook_plan,shotbook_v2,timeline,capability_registry,sfx_asset,sfx_provider_status,sfx_cues,qa_report}.schema.json`
-- **Examples**: `templates/kh02/{BRIEF,SHOTBOOK_V2,SHOTBOOK_V2.negative,EDIT_PLAN,QA_REPORT}.example.json`
+- **Examples**: `templates/kh02/{BRIEF,BRIEF_FIXED_PIP,BRIEF_DYNAMIC,BRIEF_FACELESS,SHOTBOOK_V2,SHOTBOOK_V2.negative,EDIT_PLAN,QA_REPORT}.example.json`
 
 ---
 

@@ -309,17 +309,105 @@ def validate_frame_clock(
     return [e.to_dict() for e in errors]
 
 
+PRESENTER_MODES = frozenset({"LEGACY_DYNAMIC", "FIXED_PIP", "ADAPTIVE_PIP", "DYNAMIC_HYBRID", "FACELESS"})
+PRESENTER_VISIBILITIES = frozenset({"ALWAYS_VISIBLE", "EDITORIAL_ALLOWED"})
+PRESENTER_ANCHORS = frozenset({"TOP_LEFT", "TOP_RIGHT", "BOTTOM_LEFT", "BOTTOM_RIGHT", "CUSTOM"})
+PRESENTER_SHAPES = frozenset({"ROUNDED_RECT", "CIRCLE"})
+PRESENTER_ASPECTS = frozenset({"SOURCE_AWARE", "PORTRAIT_3_4", "SQUARE_1_1", "PORTRAIT_9_16", "LANDSCAPE_16_9"})
+
+
+def validate_presenter_policy(
+    policy: dict[str, Any] | None,
+    *,
+    brief_mode: str = "talking_head",
+    has_presenter_source: bool = True,
+) -> list[dict[str, str]]:
+    """Fail-closed semantic & conflict validator for explicit presenter_policy contracts."""
+    if policy is None:
+        return []
+    errors: list[ValidationErrorItem] = []
+    if not isinstance(policy, dict):
+        return [ValidationErrorItem("PRESENTER_POLICY_TYPE", "$.presenter_policy", "presenter_policy must be an object").to_dict()]
+
+    mode = policy.get("mode", "LEGACY_DYNAMIC")
+    vis = policy.get("visibility", "ALWAYS_VISIBLE" if mode == "FIXED_PIP" else "EDITORIAL_ALLOWED")
+    anchor = policy.get("anchor", "BOTTOM_LEFT")
+    shape = policy.get("shape", "ROUNDED_RECT")
+    aspect = policy.get("aspect_ratio", "SOURCE_AWARE")
+
+    if mode not in PRESENTER_MODES:
+        errors.append(ValidationErrorItem("PRESENTER_UNKNOWN_MODE", "$.presenter_policy.mode", f"Unknown presenter mode {mode!r}"))
+    if vis not in PRESENTER_VISIBILITIES:
+        errors.append(ValidationErrorItem("PRESENTER_UNKNOWN_VISIBILITY", "$.presenter_policy.visibility", f"Unknown visibility {vis!r}"))
+    if anchor not in PRESENTER_ANCHORS:
+        errors.append(ValidationErrorItem("PRESENTER_UNKNOWN_ANCHOR", "$.presenter_policy.anchor", f"Unknown anchor {anchor!r}"))
+    if shape not in PRESENTER_SHAPES:
+        errors.append(ValidationErrorItem("PRESENTER_UNKNOWN_SHAPE", "$.presenter_policy.shape", f"Unknown shape {shape!r}"))
+    if aspect not in PRESENTER_ASPECTS:
+        errors.append(ValidationErrorItem("PRESENTER_UNKNOWN_ASPECT", "$.presenter_policy.aspect_ratio", f"Unknown aspect_ratio {aspect!r}"))
+
+    wr = policy.get("width_ratio", 0.30)
+    min_wr = policy.get("min_width_ratio", 0.24)
+    max_wr = policy.get("max_width_ratio", 0.36)
+    if not (is_strict_number(wr) and is_strict_number(min_wr) and is_strict_number(max_wr)):
+        errors.append(ValidationErrorItem("PRESENTER_WIDTH_TYPE", "$.presenter_policy.width_ratio", "width_ratio bounds must be finite numbers"))
+    elif min_wr > max_wr or wr < min_wr - 1e-6 or wr > max_wr + 1e-6:
+        errors.append(ValidationErrorItem("PRESENTER_WIDTH_RANGE", "$.presenter_policy.width_ratio", f"width_ratio={wr} outside [{min_wr}, {max_wr}]"))
+
+    if anchor == "CUSTOM":
+        cb = policy.get("custom_box")
+        if not (isinstance(cb, list) and len(cb) == 4 and all(is_strict_number(x) for x in cb)):
+            errors.append(ValidationErrorItem("PRESENTER_CUSTOM_BOX_MISSING", "$.presenter_policy.custom_box", "anchor='CUSTOM' requires valid [x,y,w,h] custom_box"))
+        else:
+            cx, cy, cw, ch = [float(x) for x in cb]
+            if cx < 0 or cy < 0 or cw < 0.14 or ch < 0.12 or cx + cw > 1.0 + 1e-6 or cy + ch > 1.0 + 1e-6:
+                errors.append(ValidationErrorItem("PRESENTER_CUSTOM_BOX_OOB", "$.presenter_policy.custom_box", f"custom_box {cb} out of bounds or too small"))
+
+    # Policy conflict checks
+    if mode == "FACELESS":
+        if vis == "ALWAYS_VISIBLE":
+            errors.append(ValidationErrorItem("PRESENTER_CONFLICT", "$.presenter_policy.visibility", "FACELESS mode cannot require ALWAYS_VISIBLE"))
+    if mode == "FIXED_PIP":
+        if policy.get("allow_fullscreen") is True:
+            errors.append(ValidationErrorItem("PRESENTER_CONFLICT_FULLSCREEN", "$.presenter_policy.allow_fullscreen", "FIXED_PIP forbids allow_fullscreen=true"))
+        if policy.get("allow_anchor_switch") is True:
+            errors.append(ValidationErrorItem("PRESENTER_CONFLICT_ANCHOR_SWITCH", "$.presenter_policy.allow_anchor_switch", "FIXED_PIP forbids allow_anchor_switch=true"))
+        if vis == "ALWAYS_VISIBLE" and policy.get("allow_hide") is True:
+            errors.append(ValidationErrorItem("PRESENTER_CONFLICT_HIDE", "$.presenter_policy.allow_hide", "ALWAYS_VISIBLE forbids allow_hide=true"))
+        if brief_mode == "faceless" or not has_presenter_source:
+            errors.append(ValidationErrorItem("BLOCKED_PRESENTER_SOURCE", "$.presenter_policy.mode", "FIXED_PIP requires a continuous usable presenter source (no silent faceless fallback)"))
+    elif vis == "ALWAYS_VISIBLE":
+        if policy.get("allow_hide") is True:
+            errors.append(ValidationErrorItem("PRESENTER_CONFLICT_HIDE", "$.presenter_policy.allow_hide", "ALWAYS_VISIBLE forbids allow_hide=true"))
+        if brief_mode == "faceless" or not has_presenter_source:
+            errors.append(ValidationErrorItem("BLOCKED_PRESENTER_SOURCE", "$.presenter_policy.visibility", "ALWAYS_VISIBLE requires a usable presenter source"))
+
+    errors.sort(key=lambda e: (e.location, e.code, e.message))
+    return [e.to_dict() for e in errors]
+
+
 def validate_references(
     shotbook: dict[str, Any],
     inventory: dict[str, Any] | None = None,
     registry: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
-    """Validate duplicate IDs, dangling beat/asset/capability references, rights enforcement, bboxes, and frame clock."""
+    """Validate duplicate IDs, dangling beat/asset/capability references, rights enforcement, bboxes, presenter policy, and frame clock."""
     errors: list[ValidationErrorItem] = []
     for se in validate_schema(shotbook, "shotbook_v2"):
         errors.append(ValidationErrorItem(se["code"], se["location"], se["message"], se["evidence"]))
     if not isinstance(shotbook, dict) or not isinstance(shotbook.get("output_spec"), dict) or not isinstance(shotbook.get("beats"), list):
         return [e.to_dict() for e in errors]
+
+    if shotbook.get("presenter_policy") is not None:
+        has_pres = True
+        if inventory and isinstance(inventory.get("assets"), list):
+            has_pres = any(a.get("usable_in_render") and a.get("kind") == "a_roll" for a in inventory["assets"])
+        for pe in validate_presenter_policy(
+            shotbook.get("presenter_policy"),
+            brief_mode=str(shotbook.get("mode", "talking_head")),
+            has_presenter_source=has_pres,
+        ):
+            errors.append(ValidationErrorItem(pe["code"], pe["location"], pe["message"], pe["evidence"]))
 
     spec = shotbook["output_spec"]
     total = spec["total_frames"]

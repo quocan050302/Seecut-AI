@@ -53,6 +53,9 @@
     "rights_ledger_sha": { "type": "string", "minLength": 8 },
     "transcript_sha": { "type": ["string", "null"] },
     "edit_decision_map": { "type": "object" },
+    "presenter_policy": { "type": "object" },
+    "presenter_layout": { "type": ["object", "null"] },
+    "selected_hook": { "type": ["object", "null"] },
     "story_arc": {
       "type": "object",
       "required": ["creative_direction_id", "theme", "archetype", "summary", "alternatives_considered"],
@@ -82,7 +85,11 @@
           "source_word_ids": { "type": "array", "items": { "type": "string" } },
           "semantic_function": {
             "type": "string",
-            "enum": ["hook", "problem", "tension", "mechanism", "evidence", "comparison", "step", "reveal", "payoff", "cta", "breath"]
+            "enum": [
+              "hook", "question", "context", "problem", "tension", "demonstration",
+              "mechanism", "evidence", "proof", "comparison", "step", "reaction",
+              "turning_point", "reveal", "payoff", "cta", "breath", "intentional_silence"
+            ]
           },
           "viewer_goal": { "type": "string", "minLength": 1 },
           "emotion_intensity": { "type": "number", "minimum": 0, "maximum": 1 },
@@ -173,7 +180,13 @@
           "acceleration_limit": { "type": "number", "minimum": 0 },
           "continuity_group": { "type": "string" },
           "reason": { "type": "string" },
-          "source_resolution_limit": { "type": "number", "minimum": 1.0 }
+          "source_resolution_limit": { "type": "number", "minimum": 1.0 },
+          "presenter_opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+          "presenter_shape": { "type": "string" },
+          "presenter_z_order": { "type": "integer" },
+          "presenter_crop": { "type": ["object", "null"] },
+          "main_canvas_scale_from": { "type": "number", "minimum": 0.5, "maximum": 2.0 },
+          "main_canvas_scale_to": { "type": "number", "minimum": 0.5, "maximum": 2.0 }
         }
       }
     },

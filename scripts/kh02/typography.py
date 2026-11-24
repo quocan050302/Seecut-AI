@@ -113,11 +113,37 @@ def plan_text_events(
     mapped_words: list[dict[str, Any]] | None = None,
     canvas_width: int = 720,
     canvas_height: int = 1280,
+    presenter_reserved_region: list[float] | None = None,
+    platform_safe_zone: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
-    """Plan semantic typography hierarchy sized for both 360px mobile legibility and box fit."""
+    """Plan semantic typography hierarchy sized for 360px mobile legibility, box fit & optional presenter avoidance."""
     min_mobile_px = int(math.ceil(11.2 * (float(canvas_width) / 360.0)))
     is_landscape = canvas_width > canvas_height
-    box_pos = [0.06, 0.62, 0.88, 0.24] if is_landscape else [0.06, 0.68, 0.88, 0.18]
+    sz = platform_safe_zone or {"top": 0.08, "bottom": 0.12, "left": 0.04, "right": 0.04}
+    safe_l = round(max(0.05, float(sz["left"])), 4)
+    safe_r = round(max(0.05, float(sz["right"])), 4)
+    safe_t = round(max(0.06, float(sz["top"])), 4)
+    safe_b = round(max(0.10, float(sz["bottom"])), 4)
+    safe_w = round(max(0.45, 1.0 - safe_l - safe_r), 4)
+
+    if presenter_reserved_region and len(presenter_reserved_region) == 4:
+        px, py, pw, ph = [float(v) for v in presenter_reserved_region]
+        # Place primary copy cleanly above or opposite the reserved presenter PIP box inside platform_safe_zone
+        if py >= 0.44:
+            box_pos = [safe_l, max(safe_t, round(py - 0.18, 4)), safe_w, 0.16]
+            if px < 0.42:
+                cx = round(min(0.46, px + pw + 0.025), 4)
+                cw = round(max(0.36, (1.0 - safe_r) - cx), 4)
+                cap_pos = [cx, round(min(1.0 - safe_b - 0.12, py + 0.02), 4), cw, 0.12]
+            else:
+                cw = round(max(0.36, (px - 0.025) - safe_l), 4)
+                cap_pos = [safe_l, round(min(1.0 - safe_b - 0.12, py + 0.02), 4), cw, 0.12]
+        else:
+            box_pos = [safe_l, min(1.0 - safe_b - 0.17, 0.62 if is_landscape else 0.64), safe_w, 0.17]
+            cap_pos = [safe_l, min(1.0 - safe_b - 0.10, 0.78 if is_landscape else 0.79), safe_w, 0.10]
+    else:
+        box_pos = [safe_l, 0.62, safe_w, 0.24] if is_landscape else [safe_l, min(1.0 - safe_b - 0.18, 0.68), safe_w, 0.18]
+        cap_pos = [safe_l, min(1.0 - safe_b - 0.10, 0.82), safe_w, 0.10]
     box_w_px = box_pos[2] * canvas_width
     box_h_px = box_pos[3] * canvas_height
 
@@ -180,7 +206,7 @@ def plan_text_events(
                 "start_frame": csf,
                 "end_frame": cef,
                 "minimum_read_frames": min(cef - csf, compute_min_read_frames(txt, fps, role="label")),
-                "position": [0.08, 0.82, 0.84, 0.10],
+                "position": list(cap_pos),
                 "caption_policy": "ON_REQUESTED",
                 "emphasis": [],
                 "contrast_intent": "caption_top_layer_stroke",
@@ -345,3 +371,216 @@ def measure_layout_mobile(
         canvas_width_px=canvas_width,
         language=language,
     )
+
+
+def compute_swept_bbox(
+    bbox: list[float],
+    *,
+    transform: dict[str, Any] | None = None,
+    easing: str = "power2.out",
+    canvas_width: int = 720,
+    canvas_height: int = 1280,
+) -> list[float]:
+    """Compute conservative swept normalized [x, y, w, h] covering entry shift, spring overshoot & exit motion."""
+    x, y, w, h = [float(v) for v in bbox]
+    tr = transform or {}
+    y_off = float(tr.get("y_offset_px", 0.0)) / float(max(1, canvas_height))
+    exit_up = -10.0 / float(max(1, canvas_height))
+    sc_peak = max(float(tr.get("scale_from", 1.0)), float(tr.get("scale_to", 1.0)))
+    if str(easing).startswith("back.out"):
+        sc_peak = max(sc_peak, float(tr.get("scale_to", 1.0)) * 1.12)
+    extra_w = max(0.0, (sc_peak - 1.0) * w) / 2.0
+    extra_h = max(0.0, (sc_peak - 1.0) * h) / 2.0
+    x0 = x - extra_w
+    x1 = x + w + extra_w
+    y0 = min(y, y + y_off, y + exit_up) - extra_h
+    y1 = max(y + h, y + h + y_off, y + h + exit_up) + extra_h
+    return [round(x0, 4), round(y0, 4), round(max(0.001, x1 - x0), 4), round(max(0.001, y1 - y0), 4)]
+
+
+def boxes_overlap(a: list[float], b: list[float], *, pad: float = 0.0) -> tuple[bool, float]:
+    """Return (overlaps, intersection_ratio_of_min_area) for two normalized [x, y, w, h] boxes."""
+    ax0, ay0, aw, ah = [float(v) for v in a]
+    bx0, by0, bw, bh = [float(v) for v in b]
+    ix0 = max(ax0 - pad, bx0)
+    iy0 = max(ay0 - pad, by0)
+    ix1 = min(ax0 + aw + pad, bx0 + bw)
+    iy1 = min(ay0 + ah + pad, by0 + bh)
+    iw = max(0.0, ix1 - ix0)
+    ih = max(0.0, iy1 - iy0)
+    area = iw * ih
+    if area <= 1e-9:
+        return False, 0.0
+    min_area = max(1e-9, min(aw * ah, bw * bh))
+    return True, round(area / min_area, 4)
+
+
+def resolve_layout_avoiding_presenter(
+    visual_events: list[dict[str, Any]],
+    text_events: list[dict[str, Any]],
+    *,
+    presenter_reserved_region: list[float] | None,
+    platform_safe_zone: dict[str, float] | None = None,
+    canvas_width: int = 720,
+    canvas_height: int = 1280,
+    allow_reflow: bool = True,
+) -> dict[str, Any]:
+    """Swept-bounds auto-layout solver keeping all visual/text/caption events collision-free with reserved presenter zone.
+
+    Never hides the presenter to resolve conflicts. Returns LAYOUT_CONFLICT diagnostics if no readable slot fits.
+    """
+    if not presenter_reserved_region or len(presenter_reserved_region) != 4:
+        return {
+            "ok": True,
+            "status": "NO_RESERVED_PRESENTER_ZONE",
+            "visual_events": [dict(ev) for ev in visual_events],
+            "text_events": [dict(tx) for tx in text_events],
+            "reflows": [],
+            "conflicts": [],
+        }
+
+    sz = platform_safe_zone or {"top": 0.08, "bottom": 0.14, "left": 0.04, "right": 0.04}
+    pr = [float(v) for v in presenter_reserved_region]
+    px, py, pw, ph = pr
+    pad = 0.015
+
+    reflows: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    out_vis: list[dict[str, Any]] = []
+    out_txt: list[dict[str, Any]] = []
+
+    def _find_safe_slot(orig: list[float], transform: dict[str, Any] | None, easing: str, min_w: float, min_h: float) -> list[float] | None:
+        ox, oy, ow, oh = [float(v) for v in orig]
+        # Account for peak spring overshoot expansion + entry y_offset when placing reflow candidates
+        spring_extra = 0.065 if str(easing).startswith("back.out") else 0.01
+        y_pad_extra = abs(float((transform or {}).get("y_offset_px", 0.0))) / float(max(1, canvas_height)) + 0.015
+        cands: list[list[float]] = []
+        # Candidate 1: Opposite horizontal column alongside presenter (e.g. right of BOTTOM_LEFT)
+        if px < 0.42:
+            rx = round(px + pw + pad + spring_extra * min(ow, 0.50), 4)
+            avail_w = round((1.0 - sz["right"]) - rx, 4)
+            if avail_w >= min_w:
+                cw = min(ow, avail_w)
+                ch = min(oh, max(min_h, (1.0 - sz["bottom"]) - max(sz["top"], oy)))
+                cy = max(sz["top"], min(1.0 - sz["bottom"] - ch, oy))
+                cands.append([rx, round(cy, 4), round(cw, 4), round(ch, 4)])
+        else:
+            avail_w = round((px - pad - spring_extra * min(ow, 0.50)) - sz["left"], 4)
+            if avail_w >= min_w:
+                cw = min(ow, avail_w)
+                ch = min(oh, max(min_h, (1.0 - sz["bottom"]) - max(sz["top"], oy)))
+                cy = max(sz["top"], min(1.0 - sz["bottom"] - ch, oy))
+                cands.append([sz["left"], round(cy, 4), round(cw, 4), round(ch, 4)])
+        # Candidate 2: Upper stage above presenter (with vertical entry/overshoot clearance)
+        avail_above = round((py - pad - y_pad_extra - spring_extra * min(oh, 0.25)) - sz["top"], 4)
+        if avail_above >= min_h:
+            ch = min(oh, avail_above)
+            cw = min(ow, (1.0 - sz["left"] - sz["right"]))
+            cx = max(sz["left"], min(1.0 - sz["right"] - cw, ox))
+            cy = max(sz["top"], py - pad - y_pad_extra - spring_extra * ch - ch)
+            cands.append([round(cx, 4), round(cy, 4), round(cw, 4), round(ch, 4)])
+        # Candidate 3: Lower stage below presenter (for TOP_LEFT / TOP_RIGHT presenter)
+        avail_below = round((1.0 - sz["bottom"]) - (py + ph + pad + y_pad_extra), 4)
+        if avail_below >= min_h:
+            ch = min(oh, avail_below)
+            cw = min(ow, (1.0 - sz["left"] - sz["right"]))
+            cx = max(sz["left"], min(1.0 - sz["right"] - cw, ox))
+            cy = py + ph + pad + y_pad_extra
+            cands.append([round(cx, 4), round(cy, 4), round(cw, 4), round(ch, 4)])
+
+        for cand in cands:
+            sw = compute_swept_bbox(cand, transform=transform, easing=easing, canvas_width=canvas_width, canvas_height=canvas_height)
+            ov, _ = boxes_overlap(sw, pr)
+            if not ov and cand[0] >= sz["left"] - 0.02 and (cand[0] + cand[2]) <= (1.0 - sz["right"] + 0.02) and cand[1] >= sz["top"] - 0.02 and (cand[1] + cand[3]) <= (1.0 - sz["bottom"] + 0.02):
+                return cand
+        return None
+
+    for ev in visual_events:
+        ec = dict(ev)
+        params = ec.get("params") or {}
+        if params.get("kind") == "progress_spine" or ec.get("layer_cat") == "hand" or ec.get("face_exclusion") is False:
+            out_vis.append(ec)
+            continue
+        bbox = [float(v) for v in ec["normalized_bbox"]]
+        swept = compute_swept_bbox(
+            bbox, transform=ec.get("transform"), easing=str(ec.get("easing", "power2.out")),
+            canvas_width=canvas_width, canvas_height=canvas_height,
+        )
+        ov, ratio = boxes_overlap(swept, pr)
+        if ov:
+            if not allow_reflow:
+                conflicts.append({
+                    "kind": "visual_event",
+                    "id": ec["event_id"],
+                    "frames": [int(ec["start_frame"]), int(ec["end_frame"])],
+                    "bbox": bbox,
+                    "swept_bbox": swept,
+                    "presenter_reserved": pr,
+                    "overlap_ratio": ratio,
+                    "code": "LAYOUT_CONFLICT",
+                    "message": f"Visual event {ec['event_id']} swept bounds collide with reserved presenter zone ({ratio:.2%})",
+                })
+            else:
+                slot = _find_safe_slot(bbox, ec.get("transform"), str(ec.get("easing", "power2.out")), min_w=0.34, min_h=0.10)
+                if slot is not None:
+                    reflows.append({"kind": "visual_event", "id": ec["event_id"], "from_bbox": bbox, "to_bbox": slot, "reason": "Avoid reserved presenter PIP zone"})
+                    ec["normalized_bbox"] = slot
+                else:
+                    conflicts.append({
+                        "kind": "visual_event",
+                        "id": ec["event_id"],
+                        "frames": [int(ec["start_frame"]), int(ec["end_frame"])],
+                        "bbox": bbox,
+                        "swept_bbox": swept,
+                        "presenter_reserved": pr,
+                        "overlap_ratio": ratio,
+                        "code": "LAYOUT_CONFLICT",
+                        "message": f"No collision-free slot for visual event {ec['event_id']} without violating readability or hiding presenter",
+                    })
+        out_vis.append(ec)
+
+    for tx in text_events:
+        tc = dict(tx)
+        pos = [float(v) for v in tc["position"]]
+        swept = compute_swept_bbox(pos, transform={"y_offset_px": 6}, easing="power2.out", canvas_width=canvas_width, canvas_height=canvas_height)
+        ov, ratio = boxes_overlap(swept, pr)
+        if ov:
+            if not allow_reflow:
+                conflicts.append({
+                    "kind": "text_event",
+                    "id": tc["text_id"],
+                    "frames": [int(tc["start_frame"]), int(tc["end_frame"])],
+                    "bbox": pos,
+                    "swept_bbox": swept,
+                    "presenter_reserved": pr,
+                    "overlap_ratio": ratio,
+                    "code": "LAYOUT_CONFLICT",
+                    "message": f"Text/caption {tc['text_id']} collides with reserved presenter zone ({ratio:.2%})",
+                })
+            else:
+                slot = _find_safe_slot(pos, {"y_offset_px": 6}, "power2.out", min_w=0.34, min_h=0.08)
+                if slot is not None:
+                    reflows.append({"kind": "text_event", "id": tc["text_id"], "from_bbox": pos, "to_bbox": slot, "reason": "Avoid reserved presenter PIP zone"})
+                    tc["position"] = slot
+                else:
+                    conflicts.append({
+                        "kind": "text_event",
+                        "id": tc["text_id"],
+                        "frames": [int(tc["start_frame"]), int(tc["end_frame"])],
+                        "bbox": pos,
+                        "swept_bbox": swept,
+                        "presenter_reserved": pr,
+                        "overlap_ratio": ratio,
+                        "code": "LAYOUT_CONFLICT",
+                        "message": f"No collision-free slot for text/caption {tc['text_id']} without hiding presenter",
+                    })
+        out_txt.append(tc)
+
+    return {
+        "ok": len(conflicts) == 0,
+        "status": "PASS" if not conflicts else "LAYOUT_CONFLICT",
+        "visual_events": out_vis,
+        "text_events": out_txt,
+        "reflows": reflows,
+        "conflicts": conflicts,
+    }

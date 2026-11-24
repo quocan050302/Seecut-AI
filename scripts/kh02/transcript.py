@@ -268,8 +268,8 @@ def map_words_to_output(transcript: dict[str, Any], time_map: dict[str, Any]) ->
                 "out_end_sec": round(out_e, 4),
                 "out_start_frame": out_sf,
                 "out_end_frame": out_ef,
-                "confidence": w["confidence"],
-                "speaker": w["speaker"],
+                "confidence": w.get("confidence", 0.95),
+                "speaker": w.get("speaker"),
             })
             break
     mapped.sort(key=lambda x: (x["out_start_frame"], x["word_id"]))

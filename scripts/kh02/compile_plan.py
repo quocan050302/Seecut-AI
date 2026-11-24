@@ -179,6 +179,10 @@ def compile_master_timeline(shotbook: dict[str, Any], *, word_time_map: dict[str
     return {
         "schema_version": "kh02.timeline.v1",
         "plan_sha256": hash_artifact(shotbook),
+        "edl_sha256": hash_artifact(shotbook.get("edit_decision_map") or {}),
+        "presenter_policy": shotbook.get("presenter_policy"),
+        "presenter_layout": shotbook.get("presenter_layout"),
+        "selected_hook_id": (shotbook.get("selected_hook") or {}).get("selected_option_id"),
         "fps_num": int(spec["fps_num"]),
         "fps_den": int(spec["fps_den"]),
         "total_frames": total_frames,
@@ -215,9 +219,11 @@ def export_project_config(
     face_rect: list[float] | str | None,
     build_dir: Path,
 ) -> dict[str, Any]:
-    """Emit SeeCut-compatible build/project.json with exact native rational fps and H1 check config."""
+    """Emit SeeCut-compatible build/project.json with exact native rational fps, presenter layout & H1 check config."""
     spec = shotbook["output_spec"]
     fps = spec["fps_num"] / spec["fps_den"]
+    pres_pol = shotbook.get("presenter_policy") or {}
+    pres_lay = shotbook.get("presenter_layout")
     proj: dict[str, Any] = {
         "html": "master.html",
         "timeline": "master",
@@ -235,14 +241,23 @@ def export_project_config(
         "steady": compile_map["steady_times_sec"],
         "spring": compile_map["spring_targets"],
         "kh02_plan_sha256": compile_map["plan_sha256"],
+        "kh02_edl_sha256": compile_map.get("edl_sha256"),
+        "kh02_selected_hook_id": compile_map.get("selected_hook_id"),
+        "kh02_presenter_mode": pres_pol.get("mode", "LEGACY_DYNAMIC"),
         "kh02_run_id": shotbook["run_id"],
     }
+    if pres_lay:
+        proj["kh02_presenter_layout"] = pres_lay
     if primary_source_path:
         proj["source"] = os.path.realpath(primary_source_path)
-    if isinstance(face_rect, list) and len(face_rect) == 4:
+        if os.path.isfile(proj["source"]):
+            proj["kh02_source_sha256"] = hash_artifact(Path(proj["source"]))
+    # Extend H1 face_rect check to actual transformed visible PIP crop when in FIXED_PIP/ADAPTIVE_PIP
+    if pres_lay and isinstance((pres_lay.get("crop") or {}).get("face_in_container_norm"), list):
+        proj["face_rect"] = pres_lay["crop"]["face_in_container_norm"]
+    elif isinstance(face_rect, list) and len(face_rect) == 4:
         proj["face_rect"] = face_rect
     elif shotbook["mode"] != "faceless" and primary_source_path:
-        # Conservative upper-center fallback only if person exists without measured face_rect
         proj["face_rect"] = [0.25, 0.16, 0.75, 0.56]
 
     (build_dir / "project.json").write_text(json.dumps(proj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -636,6 +651,7 @@ def compile_shotbook(
     seecut_root: Path | None = None,
     word_time_map: dict[str, float] | None = None,
     registry: dict[str, Any] | None = None,
+    derived_source_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Compile canonical SHOTBOOK V2 into build/master.html, build/project.json, build/fp-manifest.txt, COMPILE_MAP.json."""
     ref_errs = validate_references(shotbook, inventory=inventory, registry=registry)
@@ -674,6 +690,9 @@ def compile_shotbook(
             shutil.copy2(a["canonical_path"], dst)
             asset_rel_map[a["asset_id"]] = f"assets/{safe_fn}"
 
+    if derived_source_path is not None and Path(derived_source_path).is_file():
+        primary_source_path = str(Path(derived_source_path).resolve())
+
     spec = shotbook["output_spec"]
     width = int(spec["width"])
     height = int(spec["height"])
@@ -684,13 +703,16 @@ def compile_shotbook(
     wmap = word_time_map or {}
 
     compile_map = compile_master_timeline(shotbook, word_time_map=wmap)
+    if primary_source_path and os.path.isfile(primary_source_path):
+        compile_map["derived_source_sha256"] = hash_artifact(Path(primary_source_path))
     comp_errs = validate_compiled_events(compile_map, shotbook)
     if comp_errs:
         raise ValueError(f"Compiled timeline validation failed: {comp_errs}")
 
-    # Build HTML elements & GSAP tween specs
+    # Build HTML elements & GSAP tween specs (separating main visual stage vs topmost captions)
     fp_texts: list[str] = []
     elements_html: list[str] = []
+    captions_html: list[str] = []
     js_tweens: list[dict[str, Any]] = []
 
     for ev in shotbook["visual_events"]:
@@ -725,7 +747,7 @@ def compile_shotbook(
             cid = sanitize_identifier(tx["text_id"])
             bx, by, bw, bh = [float(v) for v in tx["position"]]
             fp_texts.append(tx["text"])
-            elements_html.append(
+            captions_html.append(
                 f'  <div id="{cid}" class="kh-el kh-caption" style="left:{bx*width:.1f}px;top:{by*height:.1f}px;'
                 f'width:{bw*width:.1f}px;height:{bh*height:.1f}px;z-index:999;" data-check="box" '
                 f'data-layer="{cid}" data-layer-cat="title">{_esc(tx["text"])}</div>'
@@ -745,11 +767,21 @@ def compile_shotbook(
         shutil.copy2(hf_hw_dir / "fonts/Caveat-700-latin.woff2", assets_dir / "Caveat-700-latin.woff2")
         caveat_css = "@font-face { font-family: 'Caveat'; src: url('assets/Caveat-700-latin.woff2') format('woff2'); font-weight: 700; font-style: normal; }"
 
+    pres_pol = shotbook.get("presenter_policy") or {}
+    pres_mode = str(pres_pol.get("mode", "LEGACY_DYNAMIC"))
+    pres_vis = str(pres_pol.get("visibility", "EDITORIAL_ALLOWED"))
+    is_protected_pip = pres_mode in ("FIXED_PIP", "ADAPTIVE_PIP")
+    is_fixed_pip = (pres_mode == "FIXED_PIP")
+
     # Camera timeline specs for #personWrap & #person
     cam_specs: list[dict[str, Any]] = []
     for c in shotbook.get("camera_events", []):
         tx, ty, tw, th_r = [float(v) for v in c["target_region"]]
-        hide_person = (c.get("framing_to") == "hidden_for_evidence")
+        hide_person = (c.get("framing_to") == "hidden_for_evidence") and not (pres_vis == "ALWAYS_VISIBLE")
+        crop = c.get("presenter_crop") or {}
+        shape = str(c.get("presenter_shape") or pres_pol.get("shape") or "ROUNDED_RECT")
+        radius_px = 999 if (shape == "CIRCLE" and tw < 0.96) else (int(crop.get("border_radius_px", pres_pol.get("border_radius_px", 22))) if tw < 0.96 else 0)
+        z_ord = int(c.get("presenter_z_order", 200 if is_protected_pip else 10))
         cam_specs.append({
             "start": round(c["start_frame"] / fps, 4),
             "end": round(c["end_frame"] / fps, 4),
@@ -757,22 +789,40 @@ def compile_shotbook(
             "top": round(ty * height, 1),
             "width": round(tw * width, 1),
             "height": round(th_r * height, 1),
-            "radius": 22 if tw < 0.96 else 0,
+            "radius": radius_px,
             "border": 4 if tw < 0.96 else 0,
-            "opacity": 0.0 if hide_person else 1.0,
+            "opacity": 1.0 if pres_vis == "ALWAYS_VISIBLE" else (0.0 if hide_person else float(c.get("presenter_opacity", 1.0))),
+            "z_order": z_ord,
             "scale_from": float(c["scale_from"]),
             "scale_to": float(c["scale_to"]),
             "pos_from": [round(float(c.get("pos_from", [0, 0])[0]) * width, 2), round(float(c.get("pos_from", [0, 0])[1]) * height, 2)],
             "pos_to": [round(float(c.get("pos_to", [0, 0])[0]) * width, 2), round(float(c.get("pos_to", [0, 0])[1]) * height, 2)],
             "anchor": [f"{float(c['anchor'][0])*100:.1f}%", f"{float(c['anchor'][1])*100:.1f}%"],
+            "object_position": str(crop.get("object_position", "50% 35%")),
+            "main_scale_from": float(c.get("main_canvas_scale_from", 1.0)),
+            "main_scale_to": float(c.get("main_canvas_scale_to", 1.0)),
             "easing": str(c.get("easing", "power2.inOut")),
+            "fixed_pip": is_fixed_pip,
         })
 
+    # Initial inline CSS for #personWrap BEFORE JS seek -> eliminates frame-0 fullscreen flash!
     person_html = ""
-    if shotbook["mode"] != "faceless" and primary_source_path:
+    if shotbook["mode"] != "faceless" and pres_mode != "FACELESS" and primary_source_path:
+        if cam_specs:
+            c0 = cam_specs[0]
+            bdr_css = f"{c0['border']}px solid {th['card_bg']}" if c0["border"] else "0px solid transparent"
+            pw_style = (
+                f"left:{c0['left']}px;top:{c0['top']}px;width:{c0['width']}px;height:{c0['height']}px;"
+                f"z-index:{c0['z_order']};opacity:{c0['opacity']};border-radius:{c0['radius']}px;border:{bdr_css};"
+            )
+            pi_style = f"object-position:{c0['object_position']};transform-origin:{c0['anchor'][0]} {c0['anchor'][1]};"
+        else:
+            pw_style = f"left:0px;top:0px;width:{width}px;height:{height}px;z-index:10;opacity:1;"
+            pi_style = "object-position:50% 35%;transform-origin:50% 38%;"
         person_html = (
-            f'  <div id="personWrap" class="kh-person-wrap" style="left:0px;top:0px;width:{width}px;height:{height}px;z-index:10;">\n'
-            f'    <img id="person" class="kh-person-img" alt="" />\n'
+            f'  <div id="personWrap" class="kh-person-wrap" style="{pw_style}" '
+            f'data-presenter-mode="{_esc(pres_mode)}" data-layer="presenter_pip" data-layer-cat="person">\n'
+            f'    <img id="person" class="kh-person-img" style="{pi_style}" alt="" />\n'
             f'  </div>'
         )
 
@@ -797,6 +847,7 @@ def compile_shotbook(
     -webkit-font-smoothing: antialiased;
   }}
   #stage {{ position: relative; width: {width}px; height: {height}px; overflow: hidden; }}
+  #mainVisualStage {{ position: absolute; inset: 0; width: {width}px; height: {height}px; overflow: hidden; isolation: isolate; z-index: {10 if is_protected_pip else 20}; }}
   .kh-person-wrap {{
     position: absolute; overflow: hidden; background: {th['canvas_bg']};
     box-shadow: 0 14px 32px rgba(0,0,0,0.28);
@@ -837,9 +888,9 @@ def compile_shotbook(
     border-radius: 18px; padding: 16px 20px; box-shadow: {th['shadow']};
     display: flex; flex-direction: column; justify-content: center; gap: 8px;
   }}
-  .kh-kicker-dark {{ font-size: 15px; font-weight: 900; letter-spacing: 0.10em; text-transform: uppercase; color: {th['accent']}; }}
-  .kh-title-dark {{ font-size: 32px; font-weight: 900; line-height: 1.16; color: {th['light_card_fg']}; }}
-  .kh-sub-dark {{ font-size: 19px; font-weight: 600; line-height: 1.32; color: #4A433D; }}
+  .kh-kicker-dark {{ font-size: 14px; font-weight: 900; letter-spacing: 0.10em; text-transform: uppercase; color: {th['accent']}; }}
+  .kh-title-dark {{ font-size: 26px; font-weight: 900; line-height: 1.18; color: {th['light_card_fg']}; }}
+  .kh-sub-dark {{ font-size: 17px; font-weight: 600; line-height: 1.30; color: #4A433D; }}
   .kh-tags {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }}
   .kh-tag {{
     font-size: 15px; font-weight: 800; padding: 5px 12px; border-radius: 8px;
@@ -961,9 +1012,9 @@ def compile_shotbook(
     overflow: hidden; box-shadow: {th['shadow']}; display: flex; align-items: stretch;
   }}
   .kh-verdict-accent {{ width: 12px; background: linear-gradient(180deg, {th['accent']}, {th['accent_soft']}); flex-shrink: 0; }}
-  .kh-verdict-copy {{ padding: 14px 20px; display: flex; flex-direction: column; justify-content: center; gap: 4px; }}
-  .kh-verdict-title {{ font-size: 34px; font-weight: 900; line-height: 1.15; }}
-  .kh-verdict-sub {{ font-size: 19px; color: {th['card_muted']}; font-weight: 600; }}
+  .kh-verdict-copy {{ padding: 14px 18px; display: flex; flex-direction: column; justify-content: center; gap: 6px; }}
+  .kh-verdict-title {{ font-size: 26px; font-weight: 900; line-height: 1.18; }}
+  .kh-verdict-sub {{ font-size: 17px; color: {th['card_muted']}; font-weight: 600; }}
   .kh-caption {{
     display: flex; align-items: center; justify-content: center; text-align: center;
     font-size: 30px; font-weight: 900; color: #FFFFFF;
@@ -974,27 +1025,27 @@ def compile_shotbook(
   .kh-clip-wipe {{ clip-path: inset(0% 100% 0% 0%); }}
   .kh-spot-wrap {{ overflow: visible; }}
   .kh-spot-scrim {{
-    position: absolute; inset: -16px; border-radius: 26px;
-    background: radial-gradient(circle at 50% 50%, rgba(0,0,0,0.08), rgba(15,12,10,0.52));
+    position: absolute; inset: -6px; border-radius: 24px;
+    background: radial-gradient(circle at 50% 50%, rgba(217,155,38,0.12), rgba(28,24,22,0.18));
     pointer-events: none; opacity: 0; z-index: 0;
   }}
   .kh-spot-card {{
     position: relative; z-index: 1; width: 100%; height: 100%;
     background: {th['card_bg']}; color: {th['card_fg']};
     border: 3px solid {th['accent_soft']}; border-radius: 20px; padding: 16px 20px;
-    box-shadow: 0 22px 48px rgba(0,0,0,0.44); display: flex; flex-direction: column; justify-content: center; gap: 8px;
+    box-shadow: 0 22px 48px rgba(0,0,0,0.34); display: flex; flex-direction: column; justify-content: center; gap: 8px;
   }}
   .kh-spot-media {{ flex: 1; overflow: hidden; border-radius: 12px; background: #FFF; }}
-  .kh-spot-title {{ font-size: 30px; font-weight: 900; line-height: 1.15; color: {th['card_fg']}; }}
+  .kh-spot-title {{ font-size: 28px; font-weight: 900; line-height: 1.18; color: {th['card_fg']}; }}
   .kh-km-card {{
-    background: {th['card_bg']}; color: {th['card_fg']};
-    border: 2.5px solid {th['card_border']}; border-left: 9px solid {th['accent_soft']};
-    border-radius: 18px; padding: 16px 22px; box-shadow: {th['shadow']};
-    display: flex; flex-direction: column; justify-content: center; gap: 6px;
+    background: linear-gradient(150deg, {th['card_bg']} 0%, #3E1216 100%); color: {th['card_fg']};
+    border: 2.5px solid {th['accent_soft']}; border-left: 10px solid {th['accent_soft']};
+    border-radius: 20px; padding: 30px 32px; box-shadow: {th['shadow']};
+    display: flex; flex-direction: column; justify-content: center; gap: 18px;
   }}
-  .kh-km-lines {{ display: flex; flex-direction: column; gap: 2px; }}
-  .kh-km-mask {{ overflow: hidden; display: block; }}
-  .kh-km-line {{ display: inline-block; font-size: 36px; font-weight: 900; line-height: 1.14; color: {th['card_fg']}; }}
+  .kh-km-lines {{ display: flex; flex-direction: column; gap: 4px; }}
+  .kh-km-mask {{ overflow: hidden; display: block; padding: 2px 0 8px 0; }}
+  .kh-km-line {{ display: inline-block; font-size: 46px; font-weight: 900; line-height: 1.15; color: {th['card_fg']}; letter-spacing: -0.01em; }}
   .kh-sweep-badge {{
     position: relative; overflow: hidden;
     background: {th['card_bg']}; color: {th['card_fg']};
@@ -1019,8 +1070,12 @@ def compile_shotbook(
 </head>
 <body>
 <div id="stage">
-{person_html}
+{person_html if not is_protected_pip else ''}
+  <div id="mainVisualStage">
 {chr(10).join(elements_html)}
+  </div>
+{person_html if is_protected_pip else ''}
+{chr(10).join(captions_html)}
 </div>
 <script src="{gsap_rel}"></script>
 <script>
@@ -1028,22 +1083,24 @@ def compile_shotbook(
   const DURATION = {duration_sec};
   const TWEENS = {json.dumps(js_tweens, ensure_ascii=False)};
   const CAMS = {json.dumps(cam_specs, ensure_ascii=False)};
+  const FIXED_PIP = {json.dumps(is_fixed_pip)};
   const tl = gsap.timeline({{ paused: true }});
   tl.set('#stage', {{ opacity: 1 }}, 0);
   tl.to('#stage', {{ opacity: 1, duration: DURATION, ease: 'none' }}, 0);
 
-  // Virtual 2D camera & person container choreography
+  // Virtual 2D camera & presenter choreography (separate main canvas motion when FIXED_PIP)
   const pw = document.getElementById('personWrap');
   const pi = document.getElementById('person');
+  const mvs = document.getElementById('mainVisualStage');
   if (pw && pi && CAMS.length) {{
     const c0 = CAMS[0];
-    tl.set(pw, {{ left: c0.left, top: c0.top, width: c0.width, height: c0.height, opacity: c0.opacity, borderRadius: c0.radius, border: c0.border ? c0.border + 'px solid {th["card_bg"]}' : '0px solid transparent' }}, 0);
+    tl.set(pw, {{ left: c0.left, top: c0.top, width: c0.width, height: c0.height, opacity: c0.opacity, zIndex: c0.z_order, borderRadius: c0.radius, border: c0.border ? c0.border + 'px solid {th["card_bg"]}' : '0px solid transparent' }}, 0);
     tl.set(pi, {{ scale: c0.scale_from, x: c0.pos_from[0], y: c0.pos_from[1], transformOrigin: c0.anchor[0] + ' ' + c0.anchor[1] }}, 0);
     for (let i = 0; i < CAMS.length; i++) {{
       const c = CAMS[i];
       const dur = Math.max(0.15, c.end - c.start);
       const reframeDur = Math.min(0.24, dur * 0.35);
-      if (i > 0) {{
+      if (i > 0 && !FIXED_PIP) {{
         const prevOp = CAMS[i - 1].opacity;
         const opDur = (prevOp !== c.opacity) ? 0.08 : reframeDur;
         tl.to(pw, {{
@@ -1054,25 +1111,34 @@ def compile_shotbook(
         }}, c.start);
         tl.to(pw, {{ opacity: c.opacity, duration: opDur, ease: 'power1.inOut' }}, c.start);
       }}
-      tl.to(pi, {{
-        scale: c.scale_to, x: c.pos_to[0], y: c.pos_to[1],
-        duration: dur, ease: c.easing
-      }}, c.start);
+      if (!FIXED_PIP) {{
+        tl.to(pi, {{
+          scale: c.scale_to, x: c.pos_to[0], y: c.pos_to[1],
+          duration: dur, ease: c.easing
+        }}, c.start);
+      }} else if (mvs && c.main_scale_to && Math.abs(c.main_scale_to - c.main_scale_from) > 0.002) {{
+        // Subtle independent main-canvas breathing while presenter stays rock-steady
+        tl.set(mvs, {{ scale: c.main_scale_from, transformOrigin: '50% 35%' }}, c.start);
+        tl.to(mvs, {{ scale: c.main_scale_to, duration: dur, ease: 'power1.inOut' }}, c.start);
+      }}
     }}
   }}
 
-  // Compiled SHOTBOOK V2 visual & typography events (strict CSS opacity:0 + gsap.set/to)
+  // Compiled SHOTBOOK V2 visual & typography events (strict CSS opacity:0 + gsap.set/to; frame-0 hooks visible immediately)
   for (const tw of TWEENS) {{
     const sel = '#' + tw.id;
+    const isFrameZero = (tw.start <= 0.001);
     if (tw.kind === 'progress_spine') {{
       tl.set(sel, {{ opacity: tw.opacity }}, 0);
       tl.set('#' + tw.id + '_fill', {{ width: '0%' }}, 0);
       tl.to('#' + tw.id + '_fill', {{ width: '100%', duration: DURATION, ease: 'none' }}, 0);
       continue;
     }}
-    const holdDur = Math.max(0.05, tw.end - tw.start - tw.exit);
-    tl.set(sel, {{ opacity: 0, scale: tw.scale_from, y: tw.y_from }}, 0);
-    if (tw.start > 0.001) {{
+    const startOp = isFrameZero ? tw.opacity : 0;
+    const startScale = isFrameZero ? tw.scale_from : tw.scale_from;
+    const startY = isFrameZero ? Math.min(8, tw.y_from) : tw.y_from;
+    tl.set(sel, {{ opacity: startOp, scale: startScale, y: startY }}, 0);
+    if (!isFrameZero) {{
       tl.set(sel, {{ opacity: 0, scale: tw.scale_from, y: tw.y_from }}, tw.start);
     }}
     tl.to(sel, {{ opacity: tw.opacity, scale: tw.scale_to, y: 0, duration: Math.min(tw.entry, Math.max(0.12, tw.end - tw.start)), ease: tw.easing }}, tw.start);
@@ -1113,23 +1179,30 @@ def compile_shotbook(
       tl.to(bsel, {{ width: '100%', duration: 0.42, ease: 'power2.out' }}, tw.start + 0.16);
     }}
     if (tw.kind === 'clip_mask_wipe') {{
-      tl.set(sel, {{ clipPath: 'inset(0% 100% 0% 0%)', opacity: 0 }}, 0);
-      tl.set(sel, {{ clipPath: 'inset(0% 100% 0% 0%)', opacity: tw.opacity }}, tw.start);
-      tl.to(sel, {{ clipPath: 'inset(0% 0% 0% 0%)', duration: Math.min(0.45, Math.max(0.18, tw.entry)), ease: 'power2.inOut' }}, tw.start);
+      const initClip = isFrameZero ? 'inset(0% 0% 0% 0%)' : 'inset(0% 36% 0% 0%)';
+      tl.set(sel, {{ clipPath: initClip, opacity: startOp }}, 0);
+      if (!isFrameZero) {{
+        tl.set(sel, {{ clipPath: 'inset(0% 36% 0% 0%)', opacity: tw.opacity }}, tw.start);
+      }}
+      tl.to(sel, {{ clipPath: 'inset(0% 0% 0% 0%)', duration: Math.min(0.24, Math.max(0.14, tw.entry)), ease: 'power3.out' }}, tw.start);
     }}
     if (tw.kind === 'spotlight_focus') {{
       const scSel = sel + '_scrim';
-      tl.set(scSel, {{ opacity: 0 }}, 0);
-      tl.to(scSel, {{ opacity: 1, duration: 0.28, ease: 'power2.out' }}, tw.start + 0.04);
+      tl.set(scSel, {{ opacity: isFrameZero ? 0.6 : 0 }}, 0);
+      tl.to(scSel, {{ opacity: 1, duration: 0.24, ease: 'power2.out' }}, tw.start + 0.02);
     }}
     if (tw.kind === 'kinetic_phrase_mask') {{
       for (let ln = 1; ln <= 3; ln++) {{
         const lEl = document.getElementById(tw.id + '_line_' + ln);
         if (!lEl) continue;
-        const st = tw.start + (ln - 1) * 0.09;
-        tl.set(lEl, {{ yPercent: 115, opacity: 0 }}, 0);
-        tl.set(lEl, {{ yPercent: 115, opacity: 0 }}, st);
-        tl.to(lEl, {{ yPercent: 0, opacity: 1, duration: 0.30, ease: 'power3.out' }}, st);
+        const st = tw.start + (ln - 1) * 0.08;
+        const initY = isFrameZero ? (ln === 1 ? 0 : 18) : 115;
+        const initOp = isFrameZero ? (ln === 1 ? 1 : 0.88) : 0;
+        tl.set(lEl, {{ yPercent: initY, opacity: initOp }}, 0);
+        if (st > 0.001 && !isFrameZero) {{
+          tl.set(lEl, {{ yPercent: 115, opacity: 0 }}, st);
+        }}
+        tl.to(lEl, {{ yPercent: 0, opacity: 1, duration: 0.26, ease: 'power3.out' }}, st);
       }}
     }}
     if (tw.kind === 'light_sweep_badge') {{
@@ -1140,26 +1213,28 @@ def compile_shotbook(
       tl.set(shSel, {{ opacity: 0 }}, tw.start + 0.80);
     }}
     if (tw.kind === 'freeze_callout') {{
-      tl.set(sel, {{ scale: 0.92, opacity: 0 }}, 0);
-      tl.to(sel, {{ scale: 1.0, opacity: tw.opacity, duration: 0.18, ease: 'power2.out' }}, tw.start);
+      tl.set(sel, {{ scale: 0.94, opacity: 0 }}, 0);
+      tl.to(sel, {{ scale: 1.0, opacity: tw.opacity, duration: 0.16, ease: 'power2.out' }}, tw.start);
     }}
     if (tw.kind === 'hand_underline' || tw.kind === 'hand_arrow' || tw.kind === 'hand_circle') {{
       const pEl = document.getElementById(tw.id + '_path');
       if (pEl && pEl.getTotalLength) {{
         const L = pEl.getTotalLength();
         tl.set(pEl, {{ strokeDasharray: L, strokeDashoffset: L }}, 0);
-        tl.to(pEl, {{ strokeDashoffset: 0, duration: 0.38, ease: 'power2.out' }}, tw.start + 0.04);
+        tl.to(pEl, {{ strokeDashoffset: 0, duration: 0.34, ease: 'power2.out' }}, tw.start + 0.06);
       }}
       const hEl = document.getElementById(tw.id + '_head');
       if (hEl && hEl.getTotalLength) {{
         const Lh = hEl.getTotalLength();
         tl.set(hEl, {{ strokeDasharray: Lh, strokeDashoffset: Lh }}, 0);
-        tl.to(hEl, {{ strokeDashoffset: 0, duration: 0.16, ease: 'power2.out' }}, tw.start + 0.36);
+        tl.to(hEl, {{ strokeDashoffset: 0, duration: 0.14, ease: 'power2.out' }}, tw.start + 0.34);
       }}
     }}
     if (tw.end < DURATION - 0.06) {{
-      const exStart = Math.max(tw.start + tw.entry, tw.end - tw.exit);
-      tl.to(sel, {{ opacity: 0, y: -10, duration: tw.exit, ease: 'power2.in' }}, exStart);
+      // Overlap outgoing fade across beat seam by ~1-2 frames so main canvas NEVER flashes empty!
+      const exDur = Math.min(0.14, Math.max(0.08, tw.exit));
+      const exStart = Math.max(tw.start + tw.entry, tw.end - 0.02);
+      tl.to(sel, {{ opacity: 0, y: -6, duration: exDur, ease: 'power2.in' }}, exStart);
     }}
   }}
 

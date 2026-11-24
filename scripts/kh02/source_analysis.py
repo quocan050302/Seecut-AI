@@ -296,6 +296,7 @@ def build_inventory(
             "root_id": root_id,
             "source_key": f"{root_id}:{raw_id}",
             "basename": resolved.name,
+            "label": spec.get("label"),
             "canonical_path": str(resolved),
             "kind": kind,
             "rights": rights,

@@ -1,0 +1,38 @@
+{
+  "schema_version": "kh02.brief.v2",
+  "brief_id": "example_dynamic_hybrid_tutorial",
+  "title": "Example 16:9 Software Tutorial with Dynamic Hybrid Presenter",
+  "mode": "software_demo",
+  "profile": "editorial_pro",
+  "objective": "Walk through a CLI workflow with full-screen speaker intro/payoff and compact PIP during technical UI steps.",
+  "audience": "Developers and technical operators",
+  "platform": "youtube",
+  "aspect_ratio": "16:9",
+  "language": "en",
+  "tone": "direct, technical, precise",
+  "key_message": "Clean reproducible CLI walkthrough",
+  "voice_policy": "LOCK_VOICE",
+  "caption_policy": "OFF",
+  "music_policy": "OFF",
+  "sfx_policy": "OPTIONAL_LICENSED",
+  "license_decision": "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED",
+  "presenter_policy": {
+    "mode": "DYNAMIC_HYBRID",
+    "visibility": "ALWAYS_VISIBLE",
+    "anchor": "BOTTOM_RIGHT",
+    "shape": "ROUNDED_RECT",
+    "width_ratio": 0.24,
+    "allow_fullscreen": true,
+    "allow_anchor_switch": true,
+    "allow_hide": false
+  },
+  "sources": [
+    {
+      "asset_id": "speaker_demo",
+      "path": "./inputs/tutorial_raw.mp4",
+      "kind": "a_roll",
+      "rights": "OWNER_SUPPLIED_NONCOMMERCIAL",
+      "label": "Speaker intro and commentary"
+    }
+  ]
+}

@@ -24,7 +24,7 @@
     "sources"
   ],
   "properties": {
-    "schema_version": { "type": "string", "const": "kh02.brief.v1" },
+    "schema_version": { "type": "string", "enum": ["kh02.brief.v1", "kh02.brief.v2"] },
     "brief_id": { "type": "string", "minLength": 1 },
     "title": { "type": "string" },
     "mode": {
@@ -60,6 +60,69 @@
     "cut_policy": { "type": "string", "enum": ["LOCK_VOICE", "PRESERVE_SCRIPT_TRIM", "EDITORIAL_CUT", "TRIM_APPROVED"] },
     "energy_mode": { "type": "string", "enum": ["kinetic", "explanatory", "suspense", "calm", "emotional", "proof", "reaction", "payoff"] },
     "sfx_provider": { "type": "string", "enum": ["local", "mcp", "api", "auto", "off"] },
+    "sfx_library_dirs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "sfx_config_path": { "type": ["string", "null"] },
+    "visual_stall_windows": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "items": { "type": "number", "minimum": 0 }
+      }
+    },
+    "presenter_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["LEGACY_DYNAMIC", "FIXED_PIP", "ADAPTIVE_PIP", "DYNAMIC_HYBRID", "FACELESS"]
+        },
+        "visibility": {
+          "type": "string",
+          "enum": ["ALWAYS_VISIBLE", "EDITORIAL_ALLOWED"]
+        },
+        "anchor": {
+          "type": "string",
+          "enum": ["TOP_LEFT", "TOP_RIGHT", "BOTTOM_LEFT", "BOTTOM_RIGHT", "CUSTOM"]
+        },
+        "custom_box": {
+          "type": ["array", "null"],
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "type": "number", "minimum": 0, "maximum": 1 }
+        },
+        "shape": {
+          "type": "string",
+          "enum": ["ROUNDED_RECT", "CIRCLE"]
+        },
+        "width_ratio": { "type": "number", "minimum": 0.15, "maximum": 0.55 },
+        "min_width_ratio": { "type": "number", "minimum": 0.15, "maximum": 0.45 },
+        "max_width_ratio": { "type": "number", "minimum": 0.20, "maximum": 0.60 },
+        "aspect_ratio": {
+          "type": "string",
+          "enum": ["SOURCE_AWARE", "PORTRAIT_3_4", "SQUARE_1_1", "PORTRAIT_9_16", "LANDSCAPE_16_9"]
+        },
+        "safe_zone_profile": {
+          "type": "string",
+          "enum": ["PLATFORM_AWARE", "REELS_SAFE", "TIKTOK_SAFE", "SHORTS_SAFE", "YOUTUBE_16_9", "MINIMAL"]
+        },
+        "face_tracking": {
+          "type": "string",
+          "enum": ["AUTO_WHEN_AVAILABLE", "STATIC_VERIFIED", "OFF"]
+        },
+        "occlusion_policy": {
+          "type": "string",
+          "enum": ["RESERVE_PRESENTER_ZONE", "LEGACY_CHECK_ONLY"]
+        },
+        "allow_fullscreen": { "type": "boolean" },
+        "allow_anchor_switch": { "type": "boolean" },
+        "allow_hide": { "type": "boolean" },
+        "border_radius_px": { "type": "integer", "minimum": 0, "maximum": 999 },
+        "guard_margin_ratio": { "type": "number", "minimum": 0.0, "maximum": 0.12 }
+      }
+    },
     "approved_scope": { "type": "string" },
     "caption_policy": { "type": "string", "enum": ["OFF", "ON_REQUESTED", "KEYWORDS_ONLY"] },
     "music_policy": { "type": "string", "enum": ["OFF", "OPTIONAL_LICENSED", "REQUIRED_LICENSED"] },

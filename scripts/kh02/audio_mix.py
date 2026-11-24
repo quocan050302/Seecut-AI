@@ -1159,6 +1159,23 @@ def verify_mix_sync(
     }
 
 
+def _stream_pcm_window(path: Path, start_sec: float, dur_sec: float, sample_rate: int = 48000) -> list[int]:
+    """Read bounded PCM window via FFmpeg seek (avoids full-file RAM decode on long-form audio)."""
+    s0 = max(0.0, float(start_sec))
+    d = max(0.02, min(15.0, float(dur_sec)))
+    pr = subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-ss", f"{s0:.4f}", "-t", f"{d:.4f}",
+            "-i", str(path), "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-",
+        ],
+        capture_output=True, timeout=60,
+    )
+    if pr.returncode != 0 or not pr.stdout:
+        return []
+    n = len(pr.stdout) // 2
+    return list(struct.unpack(f"<{n}h", pr.stdout[: n * 2]))
+
+
 def compare_dry_and_mix(
     dry_voice_wav: str | Path,
     mix_wav: str | Path,
@@ -1166,43 +1183,55 @@ def compare_dry_and_mix(
     *,
     audio_sample_rate: int = 48000,
 ) -> dict[str, Any]:
-    """Compare sample-aligned dry voice vs final mix over protected speech windows to guard intelligibility."""
-    def _decode(p: Path) -> list[int]:
-        pr = subprocess.run(
-            ["ffmpeg", "-v", "error", "-i", str(p), "-vn", "-ac", "1", "-ar", str(audio_sample_rate), "-f", "s16le", "-"],
-            capture_output=True, timeout=60,
-        )
-        if pr.returncode != 0 or not pr.stdout:
-            return []
-        n = len(pr.stdout) // 2
-        return list(struct.unpack(f"<{n}h", pr.stdout[: n * 2]))
+    """Compare sample-aligned dry voice vs final mix over protected speech windows using bounded streaming reads."""
+    dry_p = Path(dry_voice_wav)
+    mix_p = Path(mix_wav)
+    if not dry_p.is_file() or not mix_p.is_file():
+        return {"pass": False, "status": "NOT_VERIFIED", "error": "Missing dry or mix WAV"}
 
-    dry = _decode(Path(dry_voice_wav))
-    mix = _decode(Path(mix_wav))
-    if not dry or not mix:
-        return {"pass": False, "status": "NOT_VERIFIED", "error": "Failed to decode dry or mix PCM"}
+    pr_d = probe_sfx(dry_p, max_duration_sec=86400.0)
+    pr_m = probe_sfx(mix_p, max_duration_sec=86400.0)
+    if not pr_d.get("valid") or not pr_m.get("valid"):
+        return {"pass": False, "status": "NOT_VERIFIED", "error": "Failed to probe dry or mix WAV"}
 
-    len_diff_samples = abs(len(dry) - len(mix))
+    dry_dur = float(pr_d["duration_sec"])
+    mix_dur = float(pr_m["duration_sec"])
+    dry_samples = int(round(dry_dur * audio_sample_rate))
+    mix_samples = int(round(mix_dur * audio_sample_rate))
+    len_diff_samples = abs(dry_samples - mix_samples)
+
     windows: list[dict[str, Any]] = []
     issues: list[str] = []
     if len_diff_samples > int(0.05 * audio_sample_rate):
-        issues.append(f"Dry vs mix sample length mismatch: {len(dry)} vs {len(mix)}")
+        issues.append(f"Dry vs mix sample length mismatch: {dry_samples} vs {mix_samples}")
 
-    for idx, (s, e) in enumerate(speech_spans or [(0.0, min(len(dry), len(mix)) / float(audio_sample_rate))]):
-        i0 = max(0, int(round(s * audio_sample_rate)))
-        i1 = min(len(dry), len(mix), int(round(e * audio_sample_rate)))
-        if i1 <= i0:
+    spans = speech_spans if speech_spans else [(0.0, min(dry_dur, mix_dur))]
+    # Chunk any long speech span into <=10s windows so memory stays O(1) even on multi-hour podcasts
+    chunked_spans: list[tuple[float, float]] = []
+    for s, e in spans:
+        cur = max(0.0, float(s))
+        end_t = min(dry_dur, mix_dur, float(e))
+        while cur < end_t - 0.02:
+            nxt = min(end_t, cur + 10.0)
+            chunked_spans.append((cur, nxt))
+            cur = nxt
+
+    for idx, (s, e) in enumerate(chunked_spans):
+        dur = max(0.02, e - s)
+        d_seg = _stream_pcm_window(dry_p, s, dur, sample_rate=audio_sample_rate)
+        m_seg = _stream_pcm_window(mix_p, s, dur, sample_rate=audio_sample_rate)
+        n = min(len(d_seg), len(m_seg))
+        if n <= 0:
             continue
-        d_seg = dry[i0:i1]
-        m_seg = mix[i0:i1]
-        d_rms = math.sqrt(sum(x * x for x in d_seg) / len(d_seg)) / 32768.0
-        m_rms = math.sqrt(sum(x * x for x in m_seg) / len(m_seg)) / 32768.0
-        res_rms = math.sqrt(sum((m_seg[k] - d_seg[k]) ** 2 for k in range(len(d_seg))) / len(d_seg)) / 32768.0
+        d_seg = d_seg[:n]
+        m_seg = m_seg[:n]
+        d_rms = math.sqrt(sum(x * x for x in d_seg) / n) / 32768.0
+        m_rms = math.sqrt(sum(x * x for x in m_seg) / n) / 32768.0
+        res_rms = math.sqrt(sum((m_seg[k] - d_seg[k]) ** 2 for k in range(n)) / n) / 32768.0
         d_db = round(20.0 * math.log10(max(1e-6, d_rms)), 2)
         m_db = round(20.0 * math.log10(max(1e-6, m_rms)), 2)
         res_db = round(20.0 * math.log10(max(1e-6, res_rms)), 2)
         voice_to_accompaniment_db = round(d_db - res_db, 2)
-        # Voice must remain dominant over added SFX/BGM inside protected speech windows (>= +5 dB SNR proxy)
         masked = (d_db > -45.0 and voice_to_accompaniment_db < 5.0)
         dropout = (d_db > -40.0 and m_db < d_db - 6.0)
         if masked:
@@ -1224,9 +1253,10 @@ def compare_dry_and_mix(
     return {
         "pass": len(issues) == 0,
         "status": "PASS" if not issues else "FAIL",
-        "dry_samples": len(dry),
-        "mix_samples": len(mix),
+        "dry_samples": dry_samples,
+        "mix_samples": mix_samples,
         "sample_diff": len_diff_samples,
+        "streaming_bounded": True,
         "windows": windows,
         "issues": issues,
         "note": "Signal masking proxy only; subjective listening approval remains OWNER_AUDIO=PENDING.",

@@ -59,6 +59,22 @@ Every `seecut-ai` execution MUST evaluate and report all **19 original gates** A
 | `R1_HOLDOUT` | Unseen multi-niche holdouts (calm interview, fast product ad, software tutorial, education, documentary, 2-min long-form stress) with distinct pacing/mix/effect choices & unchanged source hashes | `tests/kh02/test_effects.py::test_r1_27_multi_niche_holdout_and_long_timeline` |
 | `R1_REGRESSION` | Full 64-group executable test matrix (`T01`–`T36` + `R1-01`..`R1-28`) executed twice cleanly with deterministic outputs and zero race/duplicate writes | `tests/TEST_RUN_1.log`, `tests/TEST_RUN_2.log`, `TEST_MATRIX.json` |
 
+## Additive KH-02.R2 Subgates (Live Pipeline & Persistent Presenter Verification)
+
+| Subgate | Scope & Fail-Closed Criteria | Primary Module / Evidence |
+|---|---|---|
+| `R2_PIPELINE_INTEGRATED` | Normal `scripts/kh02/run.py::execute_pipeline()` executes Stages A..N with verified `STAGE_RECEIPTS/` SHA-256 continuity (no manual bypass) | `scripts/kh02/run.py`, `STAGE_RECEIPTS/*.json`, `R2-01` |
+| `R2_CUT_APPLIED` / `IDENTITY_VERIFIED` | Authoritative EDL applied via `apply_r1_cut_map()` + `verify_cut_result()` inside normal CLI (or `IDENTITY_VERIFIED` under `LOCK_VOICE`) with derived SHA bound into `project.json` | `EDL.json`, `TIME_MAP.json`, `CUT_VERIFICATION.json`, `R2-02`..`R2-04` |
+| `R2_HOOK_APPLIED` | Selected truthful opening compiled visibly at frame `0` with `selected_hook_id` in `SHOTBOOK_V2`, `COMPILE_MAP.json`, and `HOOK_APPLIED_EVIDENCE.json` | `HOOK_CANDIDATES.json`, `SELECTED_HOOK.json`, `HOOK_APPLIED_EVIDENCE.json`, `R2-05` |
+| `R2_PRESENTER_POLICY` | Schema-validated optional `presenter_policy` (`LEGACY_DYNAMIC` v1 default, `FIXED_PIP`/`ADAPTIVE_PIP`/`DYNAMIC_HYBRID`/`FACELESS`), policy conflicts & missing source fail closed (`BLOCKED_PRESENTER_SOURCE`), swept-bbox collision solver | `PRESENTER_POLICY.json`, `PRESENTER_LAYOUT.json`, `R2-07`, `R2-09`, `R2-10`, `R2-11` |
+| `R2_PRESENTER_FRAME_QA` | Every decoded frame `0..N-1` of rendered MP4 matched against derived source crop inside PIP box (frame 0, mid, seams, EOF); catches occlusion, flash, or frozen presenter | `PRESENTER_FRAME_QA.csv/json`, `PIP_CROP_EVIDENCE/`, `R2-08`, `R2-12` |
+| `R2_EFFECTS_APPLIED` | Real applied capability ledger (`EFFECT_APPLICATION_LEDGER.json`), transition seam flash audit (`TRANSITION_SEAM_REPORT.json`), and visual hold audit (`VISUAL_HOLD_AUDIT.json`) | `EFFECT_APPLICATION_LEDGER.json`, `TRANSITION_SEAM_REPORT.json`, `VISUAL_HOLD_AUDIT.json`, `R2-13`, `R2-14` |
+| `R2_SFX_LOCAL` / `R2_SFX_PROVIDER_LIVE` | Configurable local/MCP providers via `--sfx-library`/`--sfx-config`/`JIANJI_SFX_DIR` (zero hardcoded empties); honest `BLOCKED_PROVIDER_CONFIG` when absent | `SFX_PROVIDER_STATUS.json`, `MISSING_AUDIO_ASSETS.json`, `CACHE_INTEGRITY.json`, `R2-15`..`R2-18` |
+| `R2_SOUND_MIX_VERIFIED` | Normal CLI runs `render_stems` -> `measure_stems` -> `verify_mix_sync` -> streaming `compare_dry_and_mix` -> `mix_audio_checked` whenever verified licensed cues exist | `AUDIO_GRAPH.json`, `STEM_MANIFEST.json`, `MIX_VERIFICATION.json`, `R2-19` |
+| `R2_FINAL_POST_MIX_QA` | Structural, audio, presenter, seam, H1, and optional H2/dual-order pairwise bound strictly to exact final mixed MP4 SHA-256 | `FINAL_QA.json`, `H1_GEOM_vN.json`, `R2-20` |
+| `R2_LAYERED_FIDELITY` | Guarded upstream `jianying_layers.mjs` + `jianying_plan.py` package verified with honest `LAYER_FIDELITY_PARTIAL` disclosure | `jianying/LAYER_FIDELITY_REPORT.json`, `R2-20` |
+| `R2_OLIVIA_RENDER` | Fresh Olivia `FIXED_PIP` bottom-left native `1080x1920@24fps` edit via normal CLI from raw `olivia.mp4`, compared honestly vs SC-01, prior KH-02 adopted & R1 v3 | `exports/SeeCut_Olivia_KH02_R2_FIXED_PIP_*.mp4`, `QUALITY_DIFF.md`, `R2-22` |
+
 ## Required Separated Status Flags
 Reports MUST never collapse these 7 independent statuses into one PASS:
 - `CODE_QA_PASS`

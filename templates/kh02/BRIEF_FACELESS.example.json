@@ -1,0 +1,33 @@
+{
+  "schema_version": "kh02.brief.v2",
+  "brief_id": "example_faceless_explainer",
+  "title": "Example Faceless Visual Explainer (No Presenter Required)",
+  "mode": "faceless",
+  "profile": "minimal_documentary",
+  "objective": "Explain a concept cleanly with diagrams and verified stills without requiring a talking-head speaker.",
+  "audience": "General learners",
+  "platform": "youtube",
+  "aspect_ratio": "16:9",
+  "language": "vi",
+  "tone": "calm, structured, factual",
+  "key_message": "Minh họa khái niệm rõ ràng, không cần nhân vật nói trực tiếp",
+  "voice_policy": "LOCK_VOICE",
+  "caption_policy": "OFF",
+  "music_policy": "OFF",
+  "sfx_policy": "OFF",
+  "license_decision": "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED",
+  "presenter_policy": {
+    "mode": "FACELESS",
+    "visibility": "EDITORIAL_ALLOWED",
+    "allow_hide": true
+  },
+  "sources": [
+    {
+      "asset_id": "broll_main",
+      "path": "./inputs/broll_clip.mp4",
+      "kind": "b_roll",
+      "rights": "OWNER_SUPPLIED_NONCOMMERCIAL",
+      "label": "Background visual footage"
+    }
+  ]
+}
