@@ -270,6 +270,8 @@ def execute_pipeline(
     production_mode: bool = True,
     allow_test_only_sfx: bool = False,
     sfx_tool_invoker: Any = None,
+    kh03_selection_receipt: dict[str, Any] | None = None,
+    kh03_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Single-entry orchestrated KH-02.R2 pipeline (Stages A -> N) with strict license gate, stage receipts & SHA linkage."""
     workers = max(1, min(4, int(workers)))
@@ -314,6 +316,22 @@ def execute_pipeline(
             "exit_code": code,
             "reason": str(ex),
         }
+
+    # KH-03 fail-closed receipt check when KH-03 overrides are passed
+    if kh03_overrides is not None:
+        valid_sk = {"SK-01", "SK-02", "SK-03", "SK-04", "SK-05"}
+        if not isinstance(kh03_selection_receipt, dict) or kh03_selection_receipt.get("selected_skill_id") not in valid_sk:
+            return {
+                "status": "BLOCKED_KH03_SELECTION_REQUIRED",
+                "exit_code": 2,
+                "reason": "KH-03 overrides require a validated SELECTION_RECEIPT binding SK-01..SK-05.",
+            }
+        if kh03_overrides.get("selected_skill_id") != kh03_selection_receipt.get("selected_skill_id"):
+            return {
+                "status": "BLOCKED_KH03_SKILL_MISMATCH",
+                "exit_code": 2,
+                "reason": "KH-03 override skill_id does not match validated SELECTION_RECEIPT.",
+            }
 
     # Hard License Gate BEFORE any SeeCut execution
     lic = brief["license_decision"]
@@ -614,12 +632,23 @@ def execute_pipeline(
     # STAGE F: Canonical SHOTBOOK V2 (authoritative EDL + hook + presenter_policy)
     # ------------------------------------------------------------------
     def _stage_f() -> dict[str, Any]:
+        kh03_meta = (
+            {
+                "selected_skill_id": kh03_overrides["selected_skill_id"],
+                "kh03_plan_sha256": kh03_overrides["kh03_plan_sha256"],
+            }
+            if kh03_overrides else None
+        )
         sb = resolve_editorial_plan(
             brief, inventory, run_id=run_id,
             transcript=transcript, registry=registry,
             edl_override=edl,
             hook_decision=hook_dec,
             presenter_policy_override=presenter_policy,
+            custom_beats=(kh03_overrides.get("custom_beats") if kh03_overrides else None),
+            custom_visual_events=(kh03_overrides.get("custom_visual_events") if kh03_overrides else None),
+            creative_direction_override=(kh03_overrides.get("creative_direction_override") if kh03_overrides else None),
+            kh03_metadata=kh03_meta,
             status="TEST_ONLY" if (dry_run or not production_mode) else "PLANNED",
         )
         att_b = plan_attention_beats(sb["beats"], brief=brief, fps=fps)

@@ -1,123 +1,94 @@
 ---
 name: seecut-ai
 description: >-
-  Run the KH-02 autonomous professional video editor built strictly on YeJe-cpu/SeeCut
-  v3.4 Core (unified SHOTBOOK V2, editorial/camera/motion/transition/typography/audio
-  direction, HyperFrames + HTML/CSS/GSAP + guarded render.mjs + H1 geom-check + hardened
-  H2 agy review + order-swapped pairwise iteration up to 3 versions + layered JianYing
-  package + boundary filmstrip/waveform & EBU R128 QA) with strict PolyForm Noncommercial
-  1.0.0 license gating, non-bypass agy security checks, isolated workspaces, and honest
-  human-approval gates. Use when the user asks to edit a talking-head, product/software
-  demo, tutorial, explainer, or pre-voiced AI-avatar video using SeeCut, seecut-ai,
-  SHOTBOOK V2, or HyperFrames/GSAP motion graphics. Does NOT generate avatars/TTS or
-  silently substitute other video rendering engines (Concat/Remotion/video-use render.py).
+  Run KH-03 Universal Editing Intelligence atop KH-02.R2 and YeJe-cpu/SeeCut v3.4 Core.
+  Analyzes any raw video + script across niches, recommends one of FIVE universal editing
+  skills (SK-01..SK-05), and MANDATORILY STOPS for explicit user skill selection before
+  running rights-verified footage acquisition, deep explanation graphs, adaptive compiled
+  components, multi-layer licensed SFX, guarded HyperFrames/GSAP rendering, H1/H2/pairwise
+  QA, and honest human sign-off. Enforces PolyForm Noncommercial 1.0.0 fail-closed licensing
+  (PROBLEM-01) and preserves full backward compatibility with legacy KH-02.R2 invocations.
 ---
 
-# seecut-ai — KH-02.R2 Autonomous Professional Editor on YeJe-cpu/SeeCut v3.4 Core
+# seecut-ai — KH-03 Universal Editing Intelligence atop KH-02.R2 / YeJe-cpu/SeeCut v3.4 Core
 
 > **Required Notice**: Copyright (c) 2026 YeJe-cpu (https://github.com/YeJe-cpu)
 > **Upstream License**: PolyForm Noncommercial License 1.0.0 (`https://polyformproject.org/licenses/noncommercial/1.0.0`). See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
 > **Commercial Licensing Contact**: `aiesecxuanli@gmail.com`.
-> **Selective MIT Helper Attribution**: Analysis/diagnostic helpers adapted from `browser-use/video-use` (`@43cfc566`, MIT) in `transcript.py`, `qa.py`, `typography.py`, and `sound.py` — see [references/kh02-video-use-attribution.md](./references/kh02-video-use-attribution.md). Does NOT alter SeeCut's PolyForm Noncommercial license or rendering engine.
+> **Selective MIT Helper Attribution**: Analysis/diagnostic helpers adapted from `browser-use/video-use` (`@43cfc566`, MIT) in `scripts/kh02/{transcript,qa,typography,sound}.py` — see [references/kh02-video-use-attribution.md](./references/kh02-video-use-attribution.md). Does NOT alter SeeCut's PolyForm Noncommercial license or sole rendering engine.
 
-This skill orchestrates the **KH-02 Autonomous Professional Editor** directly atop the unmodified **YeJe-cpu/SeeCut v3.4 Core** rendering engine in a strictly isolated workspace with fail-closed gates for licensing, security permissions, path/cache safety, source integrity, evidence truthfulness, deterministic + browser + model QA, and human visual/audio sign-off.
-
-## Non-Negotiable Guardrails
-
-1. **Hard License Gate (Run First)**:
-   - Audit upstream `LICENSE` and `NOTICE` before executing any edit/render.
-   - `YeJe-cpu/SeeCut` is licensed under **PolyForm Noncommercial 1.0.0**, NOT MIT.
-   - If the intended use includes monetized social media, ads, client services, resale, or any anticipated commercial application without written permission from `aiesecxuanli@gmail.com`, **STOP** with `BLOCKED_COMMERCIAL_LICENSE` and do not run SeeCut or render deliverables.
-2. **Hard Security & P0 Safety Gate**:
-   - **Never** run `--dangerously-skip-permissions` or `npx hyperframes@latest`.
-   - Use only hardened local wrappers:
-     - [scripts/safe_preflight.sh](./scripts/safe_preflight.sh) (`--offline` or `--live`, pinned executables, exact normalized `OK` check, JSON output, strict exit `0/1/2`).
-     - [scripts/agy_read_safe.sh](./scripts/agy_read_safe.sh) (symlink/allowlist rejection, ownership-marked `trap` cleanup, transmission gate).
-     - [scripts/agy_judge_safe.py](./scripts/agy_judge_safe.py) (exit-code-before-parse, strict schema/bool checks, complete H2 rubric `{C1,C3,C4,C5,C6,C7}`, distinct SHA-bound fingerprint hits, calibrated duration tolerance, strict `X`/`Y` winner mapping, sanitized `grab_fail_frames`).
-   - Always invoke upstream `render.mjs` through [scripts/kh02/render_guard.py](./scripts/kh02/render_guard.py) (canonical run-owned `person_dir`, `.kh02_run_owned` marker, composite cache key, `>= 5 GiB` disk floor, atomic staging+rename, full decode QA).
-3. **Strict Engine & Workspace Isolation**:
-   - Sole rendering engine: **YeJe-cpu/SeeCut v3.4 Core** (`HyperFrames + HTML/CSS/GSAP + Playwright/Chromium + render.mjs + FFmpeg mux`).
-   - Selective `video-use` helpers are permitted ONLY for read-only transcript phrase packing, boundary filmstrip/waveform QA diagnostics, opt-in SRT chunking, and loudness measurement — **NEVER** execute `video-use/helpers/render.py`, ElevenLabs API, Concat, Remotion, Manim, or CapCut as a rendering engine.
-   - Keep avatar/TTS generation **DISABLED** for already-voiced clips (`LOCK_VOICE` default). Never touch unrelated repositories, global skills, or CapCut/JianYing user profiles.
-4. **Input & Evidence Truthfulness**:
-   - Require verified raw source inputs; never substitute `ANALYSIS_ONLY` reference reels or prior flattened adopted MP4s as source footage (`validate_references()` blocks any `ANALYSIS_ONLY` asset).
-   - Never fabricate UI mockups, fake screenshots, or unverified claims (`claim_evidence[]` enforced). Mask source identifiers on real captures and record all visible text in `build/fp-manifest.txt`.
-5. **No Fake PASS / Mandatory Human Sign-Off**:
-   - Report all **19 original gates + 10 KH-02 subgates + 13 KH-02.R1 subgates + KH-02.R2 live-pipeline & presenter gates** truthfully and keep `CODE_QA_PASS`, `OLIVIA_RENDER_VERIFIED`, `AUTO_EDITORIAL_QA`, `OWNER_VISUAL` (`PENDING`), `OWNER_AUDIO` (`PENDING`), `COMMERCIAL_RELEASE` (`BLOCKED`), and `CROSS_NICHE_VALIDATED` strictly separated.
-   - Never inject `TEST_ONLY` synthesized SFX into production videos; if local licensed SFX and authorized MCP servers are absent, report `R1_SFX_LOCAL_INVENTORY=BLOCKED_SFX_ASSETS` / `R1_MCP_LIVE=BLOCKED_PROVIDER_CONFIG` truthfully.
-   - Explicit optional `presenter_policy` defaults to `LEGACY_DYNAMIC` (v1 backward-compatible); when `FIXED_PIP` + `ALWAYS_VISIBLE` is configured, verify every decoded frame `0..N-1` against the derived source crop (`PRESENTER_FRAME_QA.csv/json`, `PIP_CROP_EVIDENCE/`).
+KH-03 adds a **cross-niche creative decision layer** (`scripts/kh03/`) directly on top of the existing **KH-02.R2** single-path live pipeline (`scripts/kh02/`) and the unmodified **YeJe-cpu/SeeCut v3.4 Core** engine (`HyperFrames + HTML/CSS/GSAP + Playwright/Chromium + render.mjs + FFmpeg mux`).
 
 ---
 
-## Single-Entry Live Pipeline CLI (`scripts/kh02/run.py`)
+## Mandatory Interactive Invocation Flow (KH-03 Router First)
+
+For every new editing request, `seecut-ai` **MUST** route through the KH-03 two-step gate:
+
+1. **Step 1 — Input Intelligence & 5-Skill Recommendation (`recommend`)**:
+   - Read-only `ffprobe`, SHA-256 verification, optional local `faster-whisper` ASR vs script reconciliation, semantic graph (`SEMANTIC_GRAPH.json`), numeric/causal/action-loop analysis, and safe-zone analysis (`INPUT_ANALYSIS.json`, `SOURCE_ACTION_MAP.json`).
+   - Score **ALL FIVE** universal editing skills (`SK-01..SK-05`) with deterministic editorial fit heuristics (NOT retention/CTR predictions), rationale, trade-offs, expected preview, and prerequisites (`SKILL_RECOMMENDATION.json/.md`).
+   - **MANDATORY STOP (`AWAITING_USER_SELECTION`)**: Present all five skills and WAIT for an explicit user selection.
+   - **Prohibited**: AI auto-selection, default selection, countdowns, implicit approval, or any hidden `AUTO` / `HYBRID` sixth skill.
+2. **Step 2 — Explicit User Selection (`select`)**:
+   - The user chooses **ANY** of `SK-01`, `SK-02`, `SK-03`, `SK-04`, or `SK-05` (even a lower-ranked skill).
+   - Binds durable `SELECTION_RECEIPT.json` cryptographically to `run_id`, `video_sha256`, `script_sha256`, `recommendation_sha256`, `registry_version`, and approval evidence. Any later input change invalidates the receipt and requires a fresh recommendation.
+3. **Step 3 — Autonomous Execution Through KH-02.R2 (`execute`)**:
+   - Validates `SELECTION_RECEIPT.json` AND **PROBLEM-01** license gate (fail-closed!).
+   - Runs archived research context (`METADATA_ONLY`, zero live vidIQ calls), rights-verified footage planning/acquisition (`footage.py`), deep explanation graph & exact `Decimal` numeric checks (`explanation.py`), 3 internal creative directions within the chosen skill (`director.py`), 8 compiled adaptive component families (`components.py`), multi-layer licensed sound direction (`sound_director.py`), and routes the compiled plan straight into `scripts/kh02/run.py::execute_pipeline()`.
+   - Runs visual collision, motion, comprehension, and independent KH-02/KH-03 QA, keeping `OWNER_VISUAL=PENDING`, `OWNER_AUDIO=PENDING`, and `COMMERCIAL_RELEASE=BLOCKED`.
 
 ```bash
-# Dry-run contract, rough-cut, hook, presenter policy, sound & disk check (zero writes/downloads/renders):
-python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode plan --dry-run
+# 0. Offline preflight (environment, disk floor, license notice):
+python -m scripts.kh03 preflight
 
-# Plan + apply authorized rough cut + emit STAGE_RECEIPTS, SHOTBOOK_V2, SEMANTIC_MAP, HOOK_APPLIED_EVIDENCE, PRESENTER_LAYOUT & SFX manifests:
-python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode plan --cut-policy PRESERVE_SCRIPT_TRIM --sfx-provider auto --workers 2
+# 1. Analyze raw video + script and issue 5-skill menu (STOPS in AWAITING_USER_SELECTION):
+python -m scripts.kh03 recommend --video <raw_source.mp4> --script <script.txt> --run-root <isolated_run_dir> [--layout-lock FULLSCREEN_9_16] [--cut-policy PRESERVE_SCRIPT_TRIM]
 
-# Preview (0.5x) or Full native render + H1 geom-check + real stem mix/mux (when licensed SFX exist) + decoded per-frame presenter QA + optional H2/pairwise & JianYing layers:
-python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode full \
-  --presenter-mode FIXED_PIP --presenter-anchor BOTTOM_LEFT --presenter-shape ROUNDED_RECT \
-  --sfx-library <licensed_sfx_dir> --export-layers --run-h2 --compare-baseline <baseline.mp4> --workers 2 --max-disk 8.0
+# 2. Explicit owner choice (binding receipt for this exact run & input hashes):
+python -m scripts.kh03 select --run-root <isolated_run_dir> --skill SK-04
 
-# Verify an existing run's STAGE_RECEIPTS and SHA-256 continuity:
-python3 -m scripts.kh02.run --brief <brief.json> --run-root <isolated_run_dir> --mode verify
+# 3. Execute full KH-03 -> KH-02.R2 pipeline after validated selection:
+python -m scripts.kh03 execute --run-root <isolated_run_dir> --mode plan|preview|full [--sfx-library <licensed_dir>] [--footage-library <licensed_dir>] --workers 2
+
+# 4. Inspect state machine & verify end-to-end SHA propagation:
+python -m scripts.kh03 status --run-root <isolated_run_dir>
+python -m scripts.kh03 verify --run-root <isolated_run_dir>
 ```
 
-Options: `--mode plan|preview|full|verify`, `--dry-run`, `--workers 1..4` (default `2`, heavy render concurrency locked to `1`), `--max-disk <GiB>`, `--profile seecut_core|editorial_pro|minimal_documentary|silent_visual`, `--license-decision <status>`, `--cut-policy LOCK_VOICE|PRESERVE_SCRIPT_TRIM|EDITORIAL_CUT|TRIM_APPROVED`, `--presenter-mode LEGACY_DYNAMIC|FIXED_PIP|ADAPTIVE_PIP|DYNAMIC_HYBRID|FACELESS`, `--presenter-anchor TOP_LEFT|TOP_RIGHT|BOTTOM_LEFT|BOTTOM_RIGHT|CUSTOM`, `--presenter-shape ROUNDED_RECT|CIRCLE`, `--presenter-width-ratio <float>`, `--sfx-provider local|mcp|api|auto|off`, `--sfx-policy OPTIONAL_LICENSED|OFF|REQUIRED_LICENSED`, `--sfx-library <dir>` (repeatable), `--sfx-config <approved_cfg.json>`, `--sfx-cache <cache_dir>`, `--music-policy OFF|OPTIONAL_LICENSED|REQUIRED_LICENSED`, `--max-downloads <N>`, `--max-download-bytes <bytes>`, `--offline`, `--approved-brief`, `--transcript <faster_whisper.json>`, `--catalog <hyperframes_catalog.json>`, `--run-h2`, `--compare-baseline <mp4>` (repeatable), `--export-layers`, `--candidate-version 1..3`, `--output-basename <stem>`.
+---
+
+## Five Universal Editing Skills (`references/kh03/`)
+
+All five skills are **cross-niche creative grammars** (zero hardcoded `niche -> skill` mapping), share the same footage acquisition, deep explanation, adaptive component, and sound design engines, and respect explicit layout locks (`FULLSCREEN_9_16`, `FIXED_PIP`, etc.):
+
+| Skill ID | Name | Editorial Focus | Doctrine Reference |
+|---|---|---|---|
+| `SK-01` | **Viral Dynamic Editing** | High-energy truthful contradiction/stakes hooks, pattern shifts, kinetic emphasis, rhythmic SFX | [SK-01-viral-dynamic.md](./references/kh03/SK-01-viral-dynamic.md) |
+| `SK-02` | **Premium Motion Design** | Brand-derived art direction, cohesive editorial grids, spatial masks, truthful product reveals | [SK-02-premium-motion.md](./references/kh03/SK-02-premium-motion.md) |
+| `SK-03` | **Cinematic Storytelling** | Narrative progression, atmosphere, causal arcs, visual callbacks, measured sound bridges | [SK-03-cinematic-storytelling.md](./references/kh03/SK-03-cinematic-storytelling.md) |
+| `SK-04` | **Intelligent Visual Explainer** | Deep comprehension graphs, exact `Decimal` visual math, causal diagrams, verifiable proof | [SK-04-visual-explainer.md](./references/kh03/SK-04-visual-explainer.md) |
+| `SK-05` | **Natural Retention Editing** | Authentic human delivery, physical action continuity, lightweight negative-space overlays, natural sound | [SK-05-natural-retention.md](./references/kh03/SK-05-natural-retention.md) |
+
+Shared rules: [references/kh03/shared-doctrine.md](./references/kh03/shared-doctrine.md).
 
 ---
 
-## Authoritative References & Schemas
+## Non-Negotiable Guardrails & PROBLEM-01
 
-- **Upstream Index & Conflict Log**: [references/upstream-index.md](./references/upstream-index.md)
-- **Gates & Compliance (19 + 10 KH-02 + 13 R1 + R2)**: [references/gates-and-compliance.md](./references/gates-and-compliance.md)
-- **KH-02.R2 Live Pipeline & Stage Receipts**: [references/kh02-r2-live-pipeline.md](./references/kh02-r2-live-pipeline.md)
-- **KH-02.R2 Presenter Policy & Persistent KOL PIP**: [references/kh02-r2-presenter-policy.md](./references/kh02-r2-presenter-policy.md)
-- **KH-02.R1 Rough Cut & Hook Director**: [references/kh02-r1-rough-cut-hook.md](./references/kh02-r1-rough-cut-hook.md)
-- **KH-02.R1 Licensed SFX Providers & Multi-Layer Mix**: [references/kh02-r1-sfx-providers.md](./references/kh02-r1-sfx-providers.md)
-- **KH-02.R1 Effect Capability Registry & Gallery**: [references/kh02-r1-effect-capabilities.md](./references/kh02-r1-effect-capabilities.md)
-- **KH-02 Doctrine**: [references/kh02-editorial-doctrine.md](./references/kh02-editorial-doctrine.md)
-- **Motion, Camera, Transitions, Typography**: [references/kh02-motion-and-camera.md](./references/kh02-motion-and-camera.md)
-- **Sound & Audio QA**: [references/kh02-audio.md](./references/kh02-audio.md)
-- **Independent QA & Adoption**: [references/kh02-qa.md](./references/kh02-qa.md)
-- **Cross-Niche Matrix**: [references/kh02-cross-niche.md](./references/kh02-cross-niche.md)
-- **MIT Attribution (`video-use`)**: [references/kh02-video-use-attribution.md](./references/kh02-video-use-attribution.md)
-- **JSON Schemas (13 total)**: `schemas/kh02/{brief,source_inventory,transcript,edl,cut_candidate,hook_plan,shotbook_v2,timeline,capability_registry,sfx_asset,sfx_provider_status,sfx_cues,qa_report}.schema.json`
-- **Examples**: `templates/kh02/{BRIEF,BRIEF_FIXED_PIP,BRIEF_DYNAMIC,BRIEF_FACELESS,SHOTBOOK_V2,SHOTBOOK_V2.negative,EDIT_PLAN,QA_REPORT}.example.json`
+1. **Hard License Gate (PROBLEM-01)**: `YeJe-cpu/SeeCut` is **PolyForm Noncommercial 1.0.0**. Any commercial use without written permission from `aiesecxuanli@gmail.com` MUST fail closed with `BLOCKED_COMMERCIAL_LICENSE`. Never reclassify commercial ads as research, never bypass `license_decision`, and never remove `LICENSE` / `NOTICE`.
+2. **Hard Security & Sandbox Discipline**: Zero `--dangerously-skip-permissions`, zero `npx @latest`, HTTPS allowlist + SSRF/private-IP/symlink/decompression-bomb protection on asset acquisition, XSS/`eval`/network-URL blocking on component params, untrusted scripts/transcripts treated strictly as data.
+3. **Sole Rendering Engine & Legacy Compatibility**: Sole rendering engine remains unmodified **YeJe-cpu/SeeCut v3.4 Core** (`HyperFrames + HTML/CSS/GSAP + Playwright + render.mjs + FFmpeg mux`). Legacy explicit KH-02 callers (`python -m scripts.kh02.run --brief ...`) continue to work unchanged, while `scripts/kh02/run.py` fails closed if KH-03 overrides are passed without a validated `SELECTION_RECEIPT`.
+4. **Honest Limitations & Separated Gates**:
+   - External stock/SFX/vidIQ providers are NOT required to run offline planning/QA; missing external libraries report `FOOTAGE_PARTIAL` / `A_ROLL_AND_GRAPHICS_ONLY` / `BLOCKED_SFX_ASSETS` honestly without injecting `TEST_ONLY` tones or fabricated UI.
+   - Archived vidIQ metadata (`research/kh03/vidiq_snapshot_20261124.json`) is strictly `METADATA_ONLY` — zero live vidIQ calls, zero competitor footage reuse, zero view guarantees.
+   - Always report separated status flags (`IMPLEMENTATION_STATUS`, `KH03_SELECTION_GATE`, `KH03_RECOMMENDATION`, `KH03_FOOTAGE_ACQUISITION`, `KH03_EXPLANATION_COVERAGE`, `KH03_COMPONENTS_VERIFIED`, `KH03_SOUND_ASSETS`, `KH03_SOUND_MIX`, `KH03_NORMAL_PIPELINE`, `KH03_ANTI_TEMPLATE`, `KH03_REGRESSION`, `KH03_DETERMINISM`, `KH03_REAL_CROSS_NICHE`, `CODE_QA_PASS`, `AUTO_EDITORIAL_QA`, `OWNER_VISUAL=PENDING`, `OWNER_AUDIO=PENDING`, `COMMERCIAL_RELEASE=BLOCKED`).
 
 ---
 
-## Execution Workflow (KH-02.R1 Phases 00–07)
+## Authoritative Schemas & References
 
-### Phase 00 — Preflight, License & Run Isolation
-1. Create a unique timestamped run folder `runs/<UTC_TS>_KH02R1_<shortsha>_<nonce>/` with `README.md`, `build/`, `qc/`, `exports/`, `jianying/layers/`, `logs/`, `evidence/`, `probe/`, `tests/`, `cache/`, `manifests/`, `stems/`, `gallery/`.
-2. Enforce the **Hard License Gate** (`LICENSE_AUDIT.md`, `REUSE_DECISIONS.md`) and run `zsh scripts/safe_preflight.sh --live --json-out <run>/logs/preflight.json` (or `--offline` for code-only checks).
-
-### Phase 01 & 01b — Read-Only Source Analysis, ASR & Intelligent Rough Cut
-1. Run `source_analysis.py::build_inventory()` and local `faster-whisper` (`transcript.py`) + raw loudness analysis (`sound.py::analyze_audio()`).
-2. **Phase 01b (Intelligent Rough Cut)**: Classify pauses/stalls/takes via `rough_cut.py::propose_r1_cut_candidates()` under `LOCK_VOICE` (default), `PRESERVE_SCRIPT_TRIM`, or explicitly scoped `EDITORIAL_CUT`. Emit `CUT_CANDIDATES.json`, `CUT_DECISION_REPORT.md`, `EDL.json`, `TIME_MAP.json`, `OUTPUT_TRANSCRIPT.json`. If authorized cuts apply, materialize paired derived A/V clip BEFORE composition and verify via `verify_cut_result()` (`CUT_VERIFICATION.json`).
-
-### Phase 02a & 02b — Hook/Pacing Director, Licensed SFX Discovery & Unified `SHOTBOOK_V2`
-1. **Phase 02a (Hook & Pacing)**: Generate 2–3 distinct truthful openings (`planner.py::build_hook_candidates()` -> `choose_opening()`), pacing budget (`resolve_pacing_budget()`, `editorial_intent_only=true`), attention beats & payoff audit -> emit `HOOK_OPTIONS.json`, `HOOK_DECISION.md`, `PACING_PLAN.json`, `ATTENTION_BEATS.md`, `EDITORIAL_COVERAGE.json`.
-2. **Phase 02b (Unified Visual + Sound Planning & SFX Acquisition)**: Inventory local licensed SFX (`sfx_assets.py::LocalProvider`), check configured MCP provider (`McpProvider`, never installing unapproved global servers), emit `SFX_PROVIDER_STATUS.json`, `SFX_ASSET_INDEX.json`, `SFX_RIGHTS_LEDGER.csv`, `SFX_QUERY_PLAN.json`, `SFX_CACHE_MANIFEST.json`, `SFX_ACQUISITION_LOG.jsonl`, and unified `sfx_plan.json` (`audio_mix.py::plan_soundscape()`). Resolve canonical `SHOTBOOK_V2.json/.md` using Chromium-verified capabilities (`effects_gallery.py`).
-
-### Phase 03 — Canonical Compile & Guarded Render
-1. Compile `SHOTBOOK_V2.json` via `compile_plan.py::compile_shotbook()` → `build/master.html`, `build/project.json`, `build/fp-manifest.txt`, `COMPILE_MAP.json`.
-2. Render probe frames first via `render_guard.py::run_render_checked(..., mode="probe")`, preview at `RENDER_SCALE=0.5`, and native full scale for the final render.
-
-### Phase 04 — Self-Review Loop (H1 + H2 + Order-Swapped Pairwise, Max 3 Versions)
-1. **H1 Geometry Gate**: Run unmodified `node third_party/SeeCut/skill/seecut/scripts/geom-check.mjs <build>` (`FAIL 0` required).
-2. **H2 Hard-Defect Gate**: Run hardened `python3 scripts/agy_judge_safe.py check --video <mp4> --html <build>/master.html --out qc/vN-check.json`. Inspect extracted fail-frames before acting on any flag.
-3. **Order-Swapped Pairwise**: Run `python3 scripts/agy_judge_safe.py pair --a <cand> --b <base> --html-a <cand_html> --html-b <base_html> --out qc/vN-vs-base.json`. Adopt ONLY via `qa.py::decide_adoption()` (H1 + H2 + objective QA PASS + dual-order consensus). Cap at max 3 versions (`v1`–`v3`).
-
-### Phase 05 — Multi-Layer Stem Mix (When Licensed Assets Exist) & Layered JianYing Package
-1. Render chunked 48kHz PCM stems (`audio_mix.py::render_stems()`), measure stems (`measure_stems()`), verify onset & dry-vs-mix intelligibility (`verify_mix_sync()`, `compare_dry_and_mix()`), and mux (`mix_audio_checked()`) ONLY with verified licensed audio (zero `TEST_ONLY` tones). If no licensed SFX assets exist, preserve voice track untouched and mark sound-enhanced gate `BLOCKED_SFX_ASSETS`.
-2. Export layered package via unmodified `jianying_layers.mjs` + `jianying_plan.py` (`jianying/layers/manifest.json`, `jianying/plan.json`).
-
-### Phase 06 & 07 — Independent Export QA, Diagnostics & Human Sign-Off
-1. Run `qa.py::validate_structural()`, `qa.py::inspect_audio()`, `source_analysis.py::verify_source_integrity()`, mouth-sync stills, and `qa.py::render_timeline_diagnostics()` (boundary filmstrips + waveforms).
-2. Emit `GATE_REPORT.json`, `FINAL_QA.json`, `QUALITY_DIFF.md`, `DELIVERY_REPORT.md`, `OWNER_REVIEW.md`, `RUN_MANIFEST.json`, `SHA256SUMS`, keeping `OWNER_VISUAL=PENDING`, `OWNER_AUDIO=PENDING`, and `COMMERCIAL_RELEASE=BLOCKED`.
+- **KH-03 Schemas (10 strict versioned JSON schemas)**: `schemas/kh03/{input_analysis,skill_registry,recommendation,selection,footage_manifest,explanation_graph,creative_plan,component_spec,sound_plan,qa_report}.schema.json`
+- **KH-03 Subskills & Doctrine**: `references/kh03/{shared-doctrine,SK-01-viral-dynamic,SK-02-premium-motion,SK-03-cinematic-storytelling,SK-04-visual-explainer,SK-05-natural-retention}.md`
+- **KH-03 Archived Research Snapshot (`METADATA_ONLY`)**: `research/kh03/vidiq_snapshot_20261124.json`
+- **KH-02.R2 Legacy Pipeline & Compliance References**: [references/gates-and-compliance.md](./references/gates-and-compliance.md), [references/kh02-r2-live-pipeline.md](./references/kh02-r2-live-pipeline.md), [references/kh02-r2-presenter-policy.md](./references/kh02-r2-presenter-policy.md), [references/upstream-index.md](./references/upstream-index.md).

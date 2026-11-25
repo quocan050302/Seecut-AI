@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/skill_registry.schema.json",
+  "title": "KH-03 Five Universal Editing Skills Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "registry_version", "allow_auto_skill", "skills"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.skill_registry.v1" },
+    "registry_version": { "type": "string", "minLength": 1 },
+    "allow_auto_skill": { "type": "boolean", "const": false },
+    "skills": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "skill_id", "version", "name", "short_tagline", "intent",
+          "pacing_principles", "hook_strategy_pool", "footage_grammar",
+          "explanation_strategy_pool", "motion_design_principles",
+          "audio_strategy", "failure_modes", "compatibility",
+          "prohibited_behaviors", "fallback_policy", "qa_rubric",
+          "doc_path", "preferred_theme", "preferred_energy", "preferred_profile"
+        ],
+        "properties": {
+          "skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+          "version": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 3 },
+          "short_tagline": { "type": "string", "minLength": 3 },
+          "intent": { "type": "string", "minLength": 10 },
+          "pacing_principles": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "hook_strategy_pool": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "footage_grammar": { "type": "object" },
+          "explanation_strategy_pool": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "motion_design_principles": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "audio_strategy": { "type": "object" },
+          "failure_modes": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "compatibility": { "type": "object" },
+          "prohibited_behaviors": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "fallback_policy": { "type": "string", "minLength": 5 },
+          "qa_rubric": { "type": "object" },
+          "doc_path": { "type": "string", "minLength": 1 },
+          "preferred_theme": { "type": "string", "minLength": 1 },
+          "preferred_energy": { "type": "string", "minLength": 1 },
+          "preferred_profile": { "type": "string", "enum": ["seecut_core", "editorial_pro", "minimal_documentary", "silent_visual"] }
+        }
+      }
+    }
+  }
+}

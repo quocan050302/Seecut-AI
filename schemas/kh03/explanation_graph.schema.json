@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/explanation_graph.schema.json",
+  "title": "KH-03 Deep Understanding Explanation Graph",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "selected_skill_id", "nodes", "edges",
+    "numeric_checks", "visual_representations", "viewer_questions", "coverage_ratio"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.explanation_graph.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "selected_skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["node_id", "node_type", "label", "summary", "word_ids", "complexity", "illustrative"],
+        "properties": {
+          "node_id": { "type": "string", "minLength": 1 },
+          "node_type": {
+            "type": "string",
+            "enum": ["concept", "condition", "variable", "mechanism", "cause", "intermediate_step", "effect", "comparison", "exception", "example", "conclusion"]
+          },
+          "label": { "type": "string", "minLength": 1 },
+          "summary": { "type": "string", "minLength": 1 },
+          "word_ids": { "type": "array", "items": { "type": "string" } },
+          "complexity": { "type": "string", "enum": ["low", "medium", "high"] },
+          "prerequisite_ids": { "type": "array", "items": { "type": "string" } },
+          "misconception_risk": { "type": "string" },
+          "illustrative": { "type": "boolean" },
+          "source_evidence": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from_node", "to_node", "relation", "evidence_note"],
+        "properties": {
+          "from_node": { "type": "string", "minLength": 1 },
+          "to_node": { "type": "string", "minLength": 1 },
+          "relation": {
+            "type": "string",
+            "enum": ["causes", "enables", "contrasts", "precedes", "part_of", "quantifies", "illustrates", "uncertain"]
+          },
+          "evidence_note": { "type": "string" }
+        }
+      }
+    },
+    "numeric_checks": {
+      "type": "object",
+      "required": ["checked_count", "all_valid", "arithmetic_steps", "issues"],
+      "properties": {
+        "checked_count": { "type": "integer", "minimum": 0 },
+        "all_valid": { "type": "boolean" },
+        "arithmetic_steps": { "type": "array", "items": { "type": "object" } },
+        "issues": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "visual_representations": { "type": "array", "items": { "type": "object" } },
+    "viewer_questions": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["question_id", "question", "expected_answer", "evidence_node_ids"],
+        "properties": {
+          "question_id": { "type": "string" },
+          "question": { "type": "string", "minLength": 5 },
+          "expected_answer": { "type": "string", "minLength": 3 },
+          "evidence_node_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "target_frame_range": { "type": "array", "items": { "type": "integer" } }
+        }
+      }
+    },
+    "coverage_ratio": { "type": "number", "minimum": 0, "maximum": 1 }
+  }
+}

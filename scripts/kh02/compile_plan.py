@@ -246,6 +246,11 @@ def export_project_config(
         "kh02_presenter_mode": pres_pol.get("mode", "LEGACY_DYNAMIC"),
         "kh02_run_id": shotbook["run_id"],
     }
+    prov = shotbook.get("provenance") or {}
+    if prov.get("kh03_selected_skill_id"):
+        proj["kh03_selected_skill_id"] = prov["kh03_selected_skill_id"]
+    if prov.get("kh03_plan_sha256"):
+        proj["kh03_plan_sha256"] = prov["kh03_plan_sha256"]
     if pres_lay:
         proj["kh02_presenter_layout"] = pres_lay
     if primary_source_path:
@@ -622,6 +627,176 @@ def _render_event_html(
             f'<div class="kh-title-dark">{headline}</div>'
             f'{f"<div class=kh-sub-dark>{sub}</div>" if sub else ""}'
             f'{f"<div class=kh-tags>{tags_html}</div>" if tags_html else ""}</div>'
+        )
+
+    # KH-03 Adaptive Visual Component Families (real compiled HTML/CSS/SVG/GSAP)
+    if kind == "kh03_contradiction_lockup":
+        kicker = _esc(params.get("kicker", "PARADOX"))
+        left_v = _esc(params.get("left_value", ""))
+        op = _esc(params.get("operator", "≠"))
+        right_v = _esc(params.get("right_value", "?"))
+        sub = _esc(params.get("headline") or params.get("subtitle") or "")
+        for t in (params.get("kicker"), params.get("left_value"), params.get("right_value"), params.get("headline")):
+            if t:
+                fp_texts.append(str(t))
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-dark kh3-contradiction" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-accent">{kicker}</div>'
+            f'<div class="kh3-eq-row"><span class="kh3-num">{left_v}</span>'
+            f'<span id="{dom_id}_op" class="kh3-op">{op}</span>'
+            f'<span class="kh3-num kh3-pos">{right_v}</span></div>'
+            f'{f"<div class=kh-sub-light>{sub}</div>" if sub else ""}</div>'
+        )
+
+    if kind == "kh03_proportional_reservoir":
+        kicker = _esc(params.get("kicker", "ALLOCATION"))
+        headline = _esc(params.get("headline", ""))
+        segs = params.get("segments") or [{"label": "Allocated", "pct": 75.0, "delta": ""}, {"label": "Left", "pct": 25.0, "delta": ""}]
+        for t in (params.get("kicker"), params.get("headline")):
+            if t:
+                fp_texts.append(str(t))
+        seg_divs = []
+        leg_divs = []
+        colors = ("#DF8A3E", "#E8B154", "#DC6B50", "#4CC393", "#60A5FA")
+        for s_i, sg in enumerate(segs[:5]):
+            pct = max(2.0, min(100.0, float(sg.get("pct", 20.0))))
+            lbl = _esc(sg.get("label", f"S{s_i + 1}"))
+            dlt = _esc(sg.get("delta", ""))
+            fp_texts.append(f"{sg.get('label', '')} {sg.get('delta', '')}".strip())
+            bg = colors[s_i % len(colors)]
+            bar_txt = f"{lbl} {dlt}".strip() if pct >= 30.0 else ""
+            seg_divs.append(
+                f'<div id="{dom_id}_seg_{s_i + 1}" class="kh3-res-seg" style="width:{pct:.3f}%;background:{bg};">'
+                f'<span>{bar_txt}</span></div>'
+            )
+            leg_divs.append(
+                f'<span class="kh3-res-chip"><i class="kh3-res-dot" style="background:{bg};"></i>{lbl} {dlt}</span>'
+            )
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-dark kh3-reservoir" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-accent">{kicker}</div>'
+            f'<div class="kh3-res-track">{"".join(seg_divs)}</div>'
+            f'<div class="kh3-res-legend">{"".join(leg_divs)}</div>'
+            f'{f"<div class=kh-sub-light>{headline}</div>" if headline else ""}</div>'
+        )
+
+    if kind == "kh03_rolling_counter":
+        kicker = _esc(params.get("kicker", "VALUE"))
+        headline = _esc(params.get("headline", ""))
+        end_v = _esc(params.get("end_value", "0"))
+        start_v = _esc(params.get("start_value", ""))
+        for t in (params.get("kicker"), params.get("headline"), params.get("end_value")):
+            if t:
+                fp_texts.append(str(t))
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-dark kh3-counter" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-card-top"><span class="kh-kicker-accent">{kicker}</span>'
+            f'{f"<span class=kh-sub-light>from {start_v}</span>" if start_v else ""}</div>'
+            f'<div id="{dom_id}_val" class="kh3-big-counter">{end_v}</div>'
+            f'{f"<div class=kh-sub-light>{headline}</div>" if headline else ""}</div>'
+        )
+
+    if kind == "kh03_causal_flow_graph":
+        kicker = _esc(params.get("kicker", "MECHANISM"))
+        headline = _esc(params.get("headline", ""))
+        nodes = params.get("nodes") or [{"label": "Cause", "text": "Input"}, {"label": "Effect", "text": "Output"}]
+        for t in (params.get("kicker"), params.get("headline")):
+            if t:
+                fp_texts.append(str(t))
+        n_html = []
+        for ni, nd in enumerate(nodes[:3]):
+            nl = _esc(nd.get("label", f"N{ni + 1}"))
+            nt = _esc(nd.get("text", ""))
+            fp_texts.extend([str(nd.get("label", "")), str(nd.get("text", ""))])
+            if ni > 0:
+                n_html.append('<div class="kh3-arrow">→</div>')
+            n_html.append(f'<div id="{dom_id}_node_{ni + 1}" class="kh3-flow-node"><div class="kh3-fn-lbl">{nl}</div><div class="kh3-fn-txt">{nt}</div></div>')
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-dark kh3-flow" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-accent">{kicker}</div>'
+            f'<div class="kh3-flow-row">{"".join(n_html)}</div>'
+            f'{f"<div class=kh-sub-light>{headline}</div>" if headline else ""}</div>'
+        )
+
+    if kind == "kh03_annotated_timeline":
+        kicker = _esc(params.get("kicker", "TIMELINE"))
+        headline = _esc(params.get("headline", ""))
+        steps = params.get("steps") or [{"label": "01", "text": headline}]
+        for t in (params.get("kicker"), params.get("headline")):
+            if t:
+                fp_texts.append(str(t))
+        st_html = []
+        for si, st in enumerate(steps[:3]):
+            sl = _esc(st.get("label", f"0{si + 1}"))
+            stx = _esc(st.get("text", ""))
+            fp_texts.extend([str(st.get("label", "")), str(st.get("text", ""))])
+            st_html.append(f'<div id="{dom_id}_tl_{si + 1}" class="kh3-tl-step"><span class="kh3-tl-badge">{sl}</span><span class="kh3-tl-text">{stx}</span></div>')
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-light kh3-timeline" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-dark">{kicker}</div>'
+            f'<div class="kh-title-dark">{headline}</div>'
+            f'<div class="kh3-tl-list">{"".join(st_html)}</div></div>'
+        )
+
+    if kind == "kh03_comparison_matrix":
+        kicker = _esc(params.get("kicker", "COMPARISON"))
+        headline = _esc(params.get("headline", ""))
+        lc = params.get("left_col") or {"title": "A", "detail": ""}
+        rc = params.get("right_col") or {"title": "B", "detail": ""}
+        for t in (params.get("kicker"), params.get("headline"), lc.get("title"), rc.get("title")):
+            if t:
+                fp_texts.append(str(t))
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-light kh3-compare" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-dark">{kicker} · {headline}</div>'
+            f'<div class="kh3-cmp-grid">'
+            f'<div class="kh3-cmp-col"><div class="kh3-cmp-t">{_esc(lc.get("title",""))}</div><div class="kh3-cmp-d">{_esc(lc.get("detail",""))}</div></div>'
+            f'<div class="kh3-cmp-col kh3-cmp-alt"><div class="kh3-cmp-t">{_esc(rc.get("title",""))}</div><div class="kh3-cmp-d">{_esc(rc.get("detail",""))}</div></div>'
+            f'</div></div>'
+        )
+
+    if kind == "kh03_proof_frame_reveal":
+        kicker = _esc(params.get("kicker", "VERIFIED PROOF"))
+        headline = _esc(params.get("headline", ""))
+        sub = _esc(params.get("subtitle", ""))
+        badge = _esc(params.get("evidence_label", "CONCEPT_ILLUSTRATION"))
+        for t in (params.get("kicker"), params.get("headline"), params.get("subtitle"), params.get("evidence_label")):
+            if t:
+                fp_texts.append(str(t))
+        media_html = (
+            f'<div class="kh3-proof-img"><img src="{_esc(asset_rel_map[aref])}" alt="{headline}" class="kh-evid-img-contain" /></div>'
+            if has_media else ""
+        )
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-light kh3-proof-frame kh-clip-wipe" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-card-top"><span class="kh-kicker-dark">{kicker}</span><span class="kh-pill">{badge}</span></div>'
+            f'{media_html}'
+            f'<div class="kh-title-dark">{headline}</div>'
+            f'{f"<div class=kh-sub-dark>{sub}</div>" if sub else ""}</div>'
+        )
+
+    if kind == "kh03_cta_magnetic_underline":
+        kicker = _esc(params.get("kicker", "NEXT STEP"))
+        headline = _esc(params.get("headline", ""))
+        tag = _esc(params.get("cta_tag", ""))
+        for t in (params.get("kicker"), params.get("headline"), params.get("cta_tag")):
+            if t:
+                fp_texts.append(str(t))
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-light kh3-cta" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-dark">{kicker}</div>'
+            f'<div class="kh-title-dark">{headline}</div>'
+            f'<svg class="kh3-cta-ul" viewBox="0 0 360 12" width="100%" height="12">'
+            f'<path id="{dom_id}_ul" d="M 2 7 Q 180 1 356 7" fill="none" stroke="#C9822B" stroke-width="4" stroke-linecap="round" /></svg>'
+            f'{f"<div class=kh-sub-dark>{tag}</div>" if tag else ""}</div>'
         )
 
     # Default high-contrast editorial headline / callout panel
@@ -1066,6 +1241,32 @@ def compile_shotbook(
     font-size: 13px; font-weight: 900; padding: 4px 10px; border-radius: 6px;
     background: {th['accent']}; color: #FFFFFF; letter-spacing: 0.08em;
   }}
+  .kh3-eq-row {{ display: flex; align-items: center; justify-content: space-between; gap: 10px; font-variant-numeric: tabular-nums; }}
+  .kh3-num {{ font-size: 38px; font-weight: 900; color: {th['card_fg']}; }}
+  .kh3-op {{ font-size: 36px; font-weight: 900; color: #E56B55; }}
+  .kh3-pos {{ color: #4CC393; }}
+  .kh3-res-track {{ display: flex; width: 100%; height: 24px; border-radius: 8px; overflow: hidden; border: 1.5px solid rgba(255,255,255,0.22); }}
+  .kh3-res-seg {{ display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 800; color: #132520; overflow: hidden; white-space: nowrap; }}
+  .kh3-res-legend {{ display: flex; flex-wrap: wrap; gap: 5px 10px; margin-top: 2px; }}
+  .kh3-res-chip {{ display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700; color: {th['card_fg']}; white-space: nowrap; }}
+  .kh3-res-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }}
+  .kh3-big-counter {{ font-size: 46px; font-weight: 900; color: #4CC393; font-variant-numeric: tabular-nums; line-height: 1.05; }}
+  .kh3-flow-row {{ display: flex; align-items: stretch; gap: 4px; width: 100%; }}
+  .kh3-flow-node {{ flex: 1 1 0; min-width: 0; background: rgba(255,255,255,0.10); border: 1.5px solid rgba(255,255,255,0.24); border-radius: 9px; padding: 6px 7px; overflow: hidden; }}
+  .kh3-fn-lbl {{ font-size: 10px; font-weight: 900; color: {th['accent_soft']}; text-transform: uppercase; letter-spacing: 0.04em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .kh3-fn-txt {{ font-size: 13px; font-weight: 700; color: {th['card_fg']}; line-height: 1.22; word-break: break-word; margin-top: 2px; }}
+  .kh3-arrow {{ display: flex; align-items: center; font-size: 16px; font-weight: 900; color: {th['accent_soft']}; flex-shrink: 0; }}
+  .kh3-tl-list {{ display: flex; flex-direction: column; gap: 6px; }}
+  .kh3-tl-step {{ display: flex; align-items: center; gap: 10px; }}
+  .kh3-tl-badge {{ font-size: 13px; font-weight: 900; padding: 3px 9px; border-radius: 6px; background: {th['accent']}; color: #FFF; }}
+  .kh3-tl-text {{ font-size: 16px; font-weight: 700; color: {th['light_card_fg']}; }}
+  .kh3-cmp-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+  .kh3-cmp-col {{ background: rgba(22,46,41,0.08); border-radius: 10px; padding: 10px; border-left: 4px solid {th['accent']}; }}
+  .kh3-cmp-alt {{ border-left-color: #1E7A56; }}
+  .kh3-cmp-t {{ font-size: 17px; font-weight: 900; color: {th['light_card_fg']}; }}
+  .kh3-cmp-d {{ font-size: 14px; font-weight: 600; color: #4A433D; margin-top: 2px; }}
+  .kh3-proof-img {{ flex: 1; max-height: 110px; overflow: hidden; border-radius: 8px; border: 1px solid rgba(0,0,0,0.14); }}
+  .kh3-cta-ul {{ display: block; margin: 2px 0; overflow: visible; }}
 </style>
 </head>
 <body>
@@ -1178,13 +1379,21 @@ def compile_shotbook(
       tl.set(bsel, {{ width: '0%' }}, 0);
       tl.to(bsel, {{ width: '100%', duration: 0.42, ease: 'power2.out' }}, tw.start + 0.16);
     }}
-    if (tw.kind === 'clip_mask_wipe') {{
+    if (tw.kind === 'clip_mask_wipe' || tw.kind === 'kh03_proof_frame_reveal') {{
       const initClip = isFrameZero ? 'inset(0% 0% 0% 0%)' : 'inset(0% 36% 0% 0%)';
       tl.set(sel, {{ clipPath: initClip, opacity: startOp }}, 0);
       if (!isFrameZero) {{
         tl.set(sel, {{ clipPath: 'inset(0% 36% 0% 0%)', opacity: tw.opacity }}, tw.start);
       }}
       tl.to(sel, {{ clipPath: 'inset(0% 0% 0% 0%)', duration: Math.min(0.24, Math.max(0.14, tw.entry)), ease: 'power3.out' }}, tw.start);
+    }}
+    if (tw.kind === 'kh03_cta_magnetic_underline') {{
+      const uEl = document.getElementById(tw.id + '_ul');
+      if (uEl && uEl.getTotalLength) {{
+        const Lu = uEl.getTotalLength();
+        tl.set(uEl, {{ strokeDasharray: Lu, strokeDashoffset: Lu }}, 0);
+        tl.to(uEl, {{ strokeDashoffset: 0, duration: 0.36, ease: 'power2.out' }}, tw.start + 0.08);
+      }}
     }}
     if (tw.kind === 'spotlight_focus') {{
       const scSel = sel + '_scrim';

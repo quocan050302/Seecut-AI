@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/component_spec.schema.json",
+  "title": "KH-03 Adaptive Visual Component Spec",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "component_id", "family", "capability_id", "kind",
+    "role", "beat_id", "start_frame", "end_frame", "normalized_bbox",
+    "z_order", "easing", "entry_frames", "hold_frames", "exit_frames",
+    "params", "protected_regions_checked", "safe_fallback_id", "rights", "semantic_anchor"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.component_spec.v1" },
+    "component_id": { "type": "string", "minLength": 1 },
+    "family": { "type": "string", "enum": ["typography", "semantic_data", "explanatory_structure", "product_footage", "visual_depth", "transition", "narrative_retention", "authenticity"] },
+    "capability_id": { "type": "string", "minLength": 1 },
+    "kind": { "type": "string", "minLength": 1 },
+    "role": { "type": "string", "minLength": 1 },
+    "beat_id": { "type": "string", "minLength": 1 },
+    "start_frame": { "type": "integer", "minimum": 0 },
+    "end_frame": { "type": "integer", "minimum": 1 },
+    "normalized_bbox": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number", "minimum": 0, "maximum": 1 } },
+    "z_order": { "type": "integer" },
+    "easing": { "type": "string", "minLength": 1 },
+    "entry_frames": { "type": "integer", "minimum": 0 },
+    "hold_frames": { "type": "integer", "minimum": 0 },
+    "exit_frames": { "type": "integer", "minimum": 0 },
+    "params": { "type": "object" },
+    "data_bindings": { "type": "object" },
+    "asset_ref": { "type": ["string", "null"] },
+    "protected_regions_checked": { "type": "boolean" },
+    "safe_fallback_id": { "type": "string", "minLength": 1 },
+    "rights": { "type": "string", "minLength": 1 },
+    "semantic_anchor": { "type": "string", "minLength": 1 }
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/input_analysis.schema.json",
+  "title": "KH-03 Input Analysis Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "video_path", "video_sha256", "video_rights",
+    "media", "script_supplied", "script_sha256", "language", "asr_status",
+    "topic_signals", "intent", "audience_profile", "narrative_structure",
+    "numeric_claims", "evidence_needs_summary", "action_open_loops",
+    "safe_regions", "constraints", "warnings"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.input_analysis.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "video_path": { "type": "string", "minLength": 1 },
+    "video_sha256": { "type": "string", "minLength": 16 },
+    "video_rights": { "type": "string", "minLength": 1 },
+    "media": {
+      "type": "object",
+      "required": ["width", "height", "fps_num", "fps_den", "nb_frames", "duration_sec", "has_audio", "aspect_ratio"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 16 },
+        "height": { "type": "integer", "minimum": 16 },
+        "fps_num": { "type": "integer", "minimum": 1 },
+        "fps_den": { "type": "integer", "minimum": 1 },
+        "nb_frames": { "type": "integer", "minimum": 1 },
+        "duration_sec": { "type": "number", "minimum": 0.05 },
+        "has_audio": { "type": "boolean" },
+        "audio_sample_rate": { "type": ["integer", "null"] },
+        "rotation_deg": { "type": "integer" },
+        "aspect_ratio": { "type": "string", "enum": ["9:16", "16:9", "1:1", "4:5"] }
+      }
+    },
+    "script_supplied": { "type": "boolean" },
+    "script_sha256": { "type": "string", "minLength": 16 },
+    "normalized_script": { "type": "string" },
+    "language": { "type": "string", "minLength": 2 },
+    "asr_status": { "type": "string", "enum": ["TRANSCRIPT_SUPPLIED", "LOCAL_ASR_VERIFIED", "SCRIPT_ONLY_NO_ASR", "SILENT_VISUAL_ONLY", "ASR_UNCERTAIN"] },
+    "asr_confidence_mean": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "topic_signals": { "type": "array", "items": { "type": "string" } },
+    "intent": { "type": "string", "enum": ["educate", "persuade_product", "storytell", "demonstrate", "entertain_hook", "document", "mixed"] },
+    "audience_profile": { "type": "string", "minLength": 1 },
+    "narrative_structure": {
+      "type": "object",
+      "required": ["has_hook_tension", "has_payoff", "has_cta", "has_step_sequence", "has_causal_chain", "explanation_burden", "action_continuity_score"],
+      "properties": {
+        "has_hook_tension": { "type": "boolean" },
+        "has_payoff": { "type": "boolean" },
+        "has_cta": { "type": "boolean" },
+        "has_step_sequence": { "type": "boolean" },
+        "has_causal_chain": { "type": "boolean" },
+        "explanation_burden": { "type": "number", "minimum": 0, "maximum": 1 },
+        "action_continuity_score": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "numeric_claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["claim_id", "raw_text", "value", "unit", "illustrative"],
+        "properties": {
+          "claim_id": { "type": "string" },
+          "raw_text": { "type": "string" },
+          "value": { "type": "string" },
+          "unit": { "type": "string" },
+          "illustrative": { "type": "boolean" }
+        }
+      }
+    },
+    "evidence_needs_summary": { "type": "array", "items": { "type": "string" } },
+    "action_open_loops": { "type": "array", "items": { "type": "string" } },
+    "safe_regions": {
+      "type": "object",
+      "required": ["protected_zones", "clear_overlay_zones"],
+      "properties": {
+        "protected_zones": { "type": "array", "items": { "type": "object" } },
+        "clear_overlay_zones": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "constraints": { "type": "object" },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  }
+}

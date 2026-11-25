@@ -1055,6 +1055,7 @@ def resolve_editorial_plan(
     custom_camera_events: list[dict[str, Any]] | None = None,
     custom_claim_evidence: list[dict[str, Any]] | None = None,
     creative_direction_override: dict[str, Any] | None = None,
+    kh03_metadata: dict[str, Any] | None = None,
     status: str = "PLANNED",
 ) -> dict[str, Any]:
     """Single master editorial resolver producing one authoritative, validated SHOTBOOK V2 JSON."""
@@ -1414,6 +1415,10 @@ def resolve_editorial_plan(
             "base_git_sha": base_git_sha,
             "upstream_seecut_sha": UPSTREAM_SEECUT_SHA,
             "video_use_ref_sha": VIDEO_USE_REF_SHA,
+            **({
+                "kh03_selected_skill_id": kh03_metadata["selected_skill_id"],
+                "kh03_plan_sha256": kh03_metadata["kh03_plan_sha256"],
+            } if kh03_metadata else {}),
         },
     }
 
