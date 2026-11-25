@@ -399,7 +399,7 @@ def analyze_inputs(
             {"zone_id": "platform_right_rail", "bbox_norm": [0.88, 0.35, 0.12, 0.55], "basis": "tiktok_reels_right_rail_heuristic"},
         ]
         clear = [
-            {"zone_id": "top_clear_stage", "bbox_norm": [0.055, 0.065, 0.805, 0.130], "basis": "upper_negative_space_above_head"},
+            {"zone_id": "top_clear_stage", "bbox_norm": [0.055, 0.042, 0.820, 0.112], "basis": "upper_negative_space_above_head"},
         ]
     elif aspect == "16:9":
         protected = [
@@ -672,3 +672,93 @@ def build_semantic_graph(
     if run_dir is not None:
         write_json_atomic(run_dir / "analysis" / "SEMANTIC_GRAPH.json", graph)
     return graph
+
+
+def build_editorial_context(
+    input_analysis: dict[str, Any],
+    semantic_graph: dict[str, Any],
+    *,
+    skill_id: str | None = None,
+    tracked_entities: list[dict[str, Any]] | None = None,
+    available_assets: list[dict[str, Any]] | None = None,
+    constraints: dict[str, Any] | None = None,
+    run_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Section 03 universal cross-niche versioned context schema (supports UNKNOWN/multi-label & UNSUPPORTED detection)."""
+    media = dict(input_analysis.get("media") or {})
+    w = int(media.get("width") or 0)
+    h = int(media.get("height") or 0)
+    nb_f = int(media.get("nb_frames") or 0)
+    fps_num = int(media.get("fps_num") or 0)
+    fps_den = max(1, int(media.get("fps_den") or 1))
+    v_codec = str(media.get("video_codec") or media.get("codec") or media.get("vcodec") or "").lower()
+
+    unsupported_reasons: list[str] = []
+    if w < 64 or h < 64 or nb_f <= 0 or fps_num <= 0:
+        unsupported_reasons.append(f"INVALID_MEDIA_GEOMETRY_OR_TIMING({w}x{h}, frames={nb_f}, fps={fps_num}/{fps_den})")
+    if v_codec in ("unknown", "unsupported"):
+        unsupported_reasons.append(f"UNSUPPORTED_VIDEO_CODEC({v_codec!r})")
+
+    phrases = list(semantic_graph.get("phrases") or [])
+    txt_all = " ".join(str(p.get("text") or "") for p in phrases).lower()
+    # Multi-label semantic domain signals (advisory signal ONLY — never hardcoded trigger for skill/effects!)
+    signal_map = {
+        "finance": ("paycheck", "budget", "bills", "bank", "savings", "debt", "invest", "tax", "$"),
+        "software_ai": ("code", "terminal", "api", "app", "browser", "dashboard", "prompt", "workflow", "git", "python"),
+        "cooking": ("cook", "pan", "sear", "chop", "recipe", "boil", "bake", "ingredient", "sauce", "kitchen"),
+        "beauty": ("skin", "serum", "makeup", "spf", "routine", "cleanser", "shade"),
+        "fitness": ("rep", "squat", "form", "workout", "stretch", "muscle", "cardio", "posture"),
+        "education_science": ("experiment", "physics", "molecule", "equation", "formula", "cell", "energy", "theorem"),
+        "history_storytelling": ("century", "empire", "battle", "expedition", "treaty", "archive", "ancient", "history"),
+        "travel_lifestyle": ("city", "flight", "mountain", "trail", "hotel", "itinerary", "coast", "sunset"),
+        "product_ecommerce": ("bundle", "workbook", "kit", "review", "unboxing", "price", "link in"),
+        "crafts_diy": ("glue", "wood", "stitch", "paint", "sandpaper", "build", "craft", "fold"),
+        "podcast_ugc": ("honestly", "story", "guest", "episode", "question", "opinion", "talk"),
+        "gaming_screen": ("level", "boss", "fps", "hud", "match", "spawn", "controller", "gameplay"),
+    }
+    matched_signals = sorted(k for k, kws in signal_map.items() if any(kw in txt_all for kw in kws))
+    niche_labels = matched_signals if matched_signals else ["UNKNOWN"]
+
+    missing_inputs: list[str] = []
+    if not phrases:
+        missing_inputs.append("transcript_or_script")
+    if not available_assets:
+        missing_inputs.append("external_evidence_assets")
+    if not tracked_entities:
+        missing_inputs.append("verified_entity_tracks")
+
+    ctx = {
+        "schema_version": "kh03.editorial_context.v1",
+        "support_status": "UNSUPPORTED" if unsupported_reasons else "SUPPORTED",
+        "unsupported_reasons": unsupported_reasons,
+        "format": media.get("aspect_ratio") or "unknown",
+        "language": input_analysis.get("language") or "unknown",
+        "audience_goal": input_analysis.get("audience_profile") or "general",
+        "skill_id": skill_id,
+        "duration_sec": round(nb_f / max(1.0, fps_num / float(fps_den)), 4) if nb_f > 0 and fps_num > 0 else 0.0,
+        "fps_num": fps_num,
+        "fps_den": fps_den,
+        "canvas": {"width": w, "height": h, "aspect_ratio": media.get("aspect_ratio")},
+        "niche_signals": niche_labels,
+        "speech_spans": [
+            {"phrase_id": p.get("phrase_id"), "start_frame": p.get("start_frame"), "end_frame": p.get("end_frame")}
+            for p in phrases
+        ],
+        "semantic_beats": [
+            {"phrase_id": p.get("phrase_id"), "role": p.get("semantic_role"), "has_numbers": bool(p.get("numeric_claims"))}
+            for p in phrases
+        ],
+        "entities": list(tracked_entities or []),
+        "available_assets": [a.get("asset_id") for a in (available_assets or []) if isinstance(a, dict)],
+        "constraints": dict(constraints or input_analysis.get("constraints") or {}),
+        "provenance": {
+            "video_sha256": input_analysis.get("video_sha256"),
+            "script_sha256": input_analysis.get("script_sha256"),
+            "analysis_source": "local_media_and_semantic_parser",
+        },
+        "confidence": round(0.85 if (not unsupported_reasons and phrases) else 0.45, 3),
+        "missing_inputs": missing_inputs,
+    }
+    if run_dir is not None:
+        write_json_atomic(run_dir / "analysis" / "EDITORIAL_CONTEXT.json", ctx)
+    return ctx

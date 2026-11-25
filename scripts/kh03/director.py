@@ -7,6 +7,7 @@ components into CREATIVE_PLAN.json, and translates cleanly into KH-02 SHOTBOOK V
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -234,8 +235,8 @@ def _select_component_for_beat(
         if skill_id == "SK-02":
             return "kh03.proof_frame_reveal", {
                 "kicker": "FEATURED FOCUS",
-                "headline": txt[:56],
-                "subtitle": exp_node.get("misconception_risk", "")[:58],
+                "headline": _trim_words(txt, 56),
+                "subtitle": "Key breakdown ahead",
                 "evidence_label": "REAL_EVIDENCE" if has_asset else "EDITORIAL_TITLE",
                 "font_size_px": 28,
             }
@@ -251,7 +252,7 @@ def _select_component_for_beat(
         if role == "cta" or skill_id in ("SK-01", "SK-02", "SK-05"):
             return "kh03.cta_magnetic_underline", {
                 "kicker": "NEXT STEP" if role == "cta" else "KEY TAKEAWAY",
-                "headline": txt[:54],
+                "headline": _trim_words(txt, 52),
                 "cta_tag": "Actionable takeaway",
                 "font_size_px": 28,
             }
@@ -259,7 +260,7 @@ def _select_component_for_beat(
             last = arith_steps[-1]
             return "kh03.rolling_counter", {
                 "kicker": "VERIFIED RESULT",
-                "headline": txt[:52],
+                "headline": _trim_words(txt, 50),
                 "start_value": str(arith_steps[0].get("before", "")),
                 "end_value": str(last.get("after", "")),
                 "unit": str(last.get("unit", "")),
@@ -267,8 +268,8 @@ def _select_component_for_beat(
             }
         return "r1.light_sweep_badge", {
             "kicker": "RESOLUTION",
-            "headline": txt[:56],
-            "subtitle": exp_node["summary"][:64],
+            "headline": _trim_words(txt, 54),
+            "subtitle": _trim_words(exp_node["summary"], 62),
             "font_size_px": 26,
         }
 
@@ -276,7 +277,7 @@ def _select_component_for_beat(
     if role == "evidence" or (has_asset and skill_id in ("SK-02", "SK-05")):
         return "kh03.proof_frame_reveal", {
             "kicker": "VERIFIED PROOF" if has_asset else "SOLUTION",
-            "headline": txt[:56],
+            "headline": _trim_words(txt, 54),
             "subtitle": (footage_binding or {}).get("evidence_label", "CONCEPT_ILLUSTRATION"),
             "evidence_label": "REAL_EVIDENCE" if has_asset else "CONCEPT_ILLUSTRATION",
             "font_size_px": 26,
@@ -291,39 +292,58 @@ def _select_component_for_beat(
             ]
             return "kh03.proportional_reservoir", {
                 "kicker": "ILLUSTRATIVE PROPORTION",
-                "headline": txt[:56],
+                "headline": _trim_words(txt, 54),
                 "segments": segs[:5] or [{"label": "Allocated", "pct": 75.0, "delta": "-"}, {"label": "Remaining", "pct": 25.0, "delta": ""}],
                 "font_size_px": 24,
             }
         last = arith_steps[-1]
         return "kh03.rolling_counter", {
             "kicker": "REMAINING BALANCE",
-            "headline": txt[:52],
+            "headline": _trim_words(txt, 50),
             "start_value": str(arith_steps[0].get("before", "100")),
             "end_value": str(last.get("after", "0")),
             "unit": str(last.get("unit", "")),
             "font_size_px": 30,
         }
 
-    # Comparison beat
+    # Comparison beat — split real spoken clauses cleanly (NEVER leak internal diagnostic metadata on screen!)
     if role == "comparison" or phrase.get("has_comparison"):
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", txt) if s.strip()]
+        if len(sentences) >= 2:
+            left_txt = _trim_words(sentences[0], 88)
+            right_txt = _trim_words(" ".join(sentences[1:]), 88)
+        else:
+            clauses = [c.strip() for c in re.split(r"\b(?:instead of|versus|vs\.?|while|but|however)\b", txt, maxsplit=1, flags=re.I) if c.strip()]
+            if len(clauses) >= 2:
+                left_txt = _trim_words(clauses[0], 88)
+                right_txt = _trim_words(clauses[1], 88)
+            else:
+                words_all = txt.split()
+                mid_w = max(1, len(words_all) // 2)
+                left_txt = _trim_words(" ".join(words_all[:mid_w]), 88)
+                right_txt = _trim_words(" ".join(words_all[mid_w:]) or txt, 88)
         return "kh03.comparison_matrix", {
-            "kicker": "DIRECT COMPARISON",
-            "headline": txt[:54],
-            "left_col": {"title": "Option A", "detail": txt[:42]},
-            "right_col": {"title": "Option B", "detail": exp_node.get("misconception_risk", "Contrasting trade-off")[:42]},
+            "kicker": "KEY CONTRAST",
+            "headline": _trim_words(sentences[0] if sentences else txt, 56),
+            "left_col": {"title": "First", "detail": left_txt},
+            "right_col": {"title": "Then", "detail": right_txt},
             "font_size_px": 24,
         }
 
     # Causal mechanism beat
     if role == "mechanism" or phrase.get("has_causal"):
+        words_m = txt.split()
+        third = max(1, len(words_m) // 3)
+        n1 = _trim_words(" ".join(words_m[:third]), 34)
+        n2 = _trim_words(" ".join(words_m[third:2 * third]) or txt, 34)
+        n3 = _trim_words(" ".join(words_m[2 * third:]) or exp_node["label"], 34)
         return "kh03.causal_flow_graph", {
-            "kicker": "CAUSE -> EFFECT MECHANISM",
-            "headline": txt[:54],
+            "kicker": "CAUSE -> EFFECT",
+            "headline": _trim_words(txt, 52),
             "nodes": [
-                {"label": "Cause", "text": txt[:32]},
-                {"label": "Mechanism", "text": exp_rep.get("representation", "Process")[:30]},
-                {"label": "Outcome", "text": exp_node["label"][:32]},
+                {"label": "Cause", "text": n1},
+                {"label": "Process", "text": n2},
+                {"label": "Outcome", "text": n3},
             ],
             "font_size_px": 24,
         }
@@ -332,22 +352,22 @@ def _select_component_for_beat(
     if role == "step" or skill_id in ("SK-03", "SK-04"):
         return "kh03.annotated_timeline", {
             "kicker": f"STEP {idx:02d}",
-            "headline": txt[:56],
+            "headline": _trim_words(txt, 54),
             "steps": [
-                {"label": f"0{idx}", "text": txt[:46]},
+                {"label": f"0{idx}", "text": _trim_words(txt, 48)},
             ],
             "font_size_px": 26,
         }
 
     # Skill-distinct fallback so skills never look identical on the same script
     fallback_by_skill = {
-        "SK-01": ("r1.kinetic_phrase_mask", {"kicker": "KEY SHIFT", "lines": [txt[:34]], "headline": txt[:52], "font_size_px": 28}),
-        "SK-02": ("r1.clip_mask_wipe", {"kicker": "EDITORIAL DETAIL", "headline": txt[:54], "subtitle": exp_node["node_type"].upper(), "font_size_px": 26}),
-        "SK-03": ("kh03.annotated_timeline", {"kicker": "STORY ARC", "headline": txt[:54], "steps": [{"label": f"ARC {idx}", "text": txt[:44]}], "font_size_px": 26}),
-        "SK-04": ("kh03.causal_flow_graph", {"kicker": "EXPLANATION", "headline": txt[:54], "nodes": [{"label": "Premise", "text": txt[:32]}, {"label": "Result", "text": exp_node["label"][:32]}], "font_size_px": 24}),
-        "SK-05": ("r1.spotlight_focus", {"kicker": "NOTE", "badge": "CLEAR", "headline": txt[:52], "subtitle": "Natural A-roll focus", "font_size_px": 26}),
+        "SK-01": ("r1.kinetic_phrase_mask", {"kicker": "KEY SHIFT", "lines": [_trim_words(txt, 34)], "headline": _trim_words(txt, 50), "font_size_px": 28}),
+        "SK-02": ("r1.clip_mask_wipe", {"kicker": "EDITORIAL DETAIL", "headline": _trim_words(txt, 52), "subtitle": exp_node["node_type"].upper(), "font_size_px": 26}),
+        "SK-03": ("kh03.annotated_timeline", {"kicker": "STORY ARC", "headline": _trim_words(txt, 52), "steps": [{"label": f"ARC {idx}", "text": _trim_words(txt, 46)}], "font_size_px": 26}),
+        "SK-04": ("kh03.causal_flow_graph", {"kicker": "EXPLANATION", "headline": _trim_words(txt, 52), "nodes": [{"label": "Premise", "text": _trim_words(txt, 34)}, {"label": "Result", "text": _trim_words(exp_node["label"], 34)}], "font_size_px": 24}),
+        "SK-05": ("r1.spotlight_focus", {"kicker": "NOTE", "badge": "CLEAR", "headline": _trim_words(txt, 50), "subtitle": "Natural A-roll focus", "font_size_px": 26}),
     }
-    return fallback_by_skill.get(skill_id, ("local.editorial_panel", {"kicker": "DETAIL", "headline": txt[:54], "font_size_px": 26}))
+    return fallback_by_skill.get(skill_id, ("local.editorial_panel", {"kicker": "DETAIL", "headline": _trim_words(txt, 52), "font_size_px": 26}))
 
 
 def build_creative_plan(
@@ -472,23 +492,41 @@ def build_creative_plan(
     prot_zones = input_analysis["safe_regions"]["protected_zones"]
     default_box = list(clear_zones[0]["bbox_norm"]) if clear_zones else [0.06, 0.07, 0.80, 0.14]
 
-    # KH-03.R2 ADL-01/02 + R3 CMI-04: Solve spatial layout sequence BEFORE component placement
-    verified_probe_obs = [
-        {
-            "frame": int(ob.get("frame", 0)),
-            "face_bbox_norm": ob["face_bbox_norm"],
-            "confidence": float(ob.get("confidence", 0.72)),
-            "verified_detector": True,
-        }
-        for ob in (tracking_res.get("subject_tracks") or [])
-        if ob.get("verified_detector") and ob.get("face_bbox_norm")
-    ]
+    # KH-03.R2 ADL-01/02 + R3 CMI-04 + R4 PED-02: Propagate real detected face/hand regions into layout solver!
+    verified_probe_obs: list[dict[str, Any]] = []
+    detected_hands_boxes: list[list[float]] = []
+    for ent in (tracking_res.get("tracked_entities") or []):
+        if ent.get("verified_detector") and ent.get("role") == "face" and ent.get("bbox_norm"):
+            verified_probe_obs.append({
+                "frame": int((ent.get("frame_span") or [0])[0]),
+                "face_bbox_norm": list(ent["bbox_norm"]),
+                "confidence": float(ent.get("confidence", 0.78)),
+                "verified_detector": True,
+            })
+        elif ent.get("verified_detector") and ent.get("role") in ("hand", "hands") and ent.get("bbox_norm"):
+            detected_hands_boxes.append(list(ent["bbox_norm"]))
+    for ob in (tracking_res.get("subject_tracks") or []):
+        if ob.get("verified_detector") and ob.get("face_bbox_norm"):
+            verified_probe_obs.append({
+                "frame": int(ob.get("frame", 0)),
+                "face_bbox_norm": ob["face_bbox_norm"],
+                "confidence": float(ob.get("confidence", 0.72)),
+                "verified_detector": True,
+            })
     action_tracks = build_subject_action_tracks(
         media,
         transcript=tr_doc,
         action_map=act_doc,
         probe_frames=verified_probe_obs or None,
     )
+    if detected_hands_boxes:
+        hx0 = min(b[0] for b in detected_hands_boxes)
+        hy0 = min(b[1] for b in detected_hands_boxes)
+        hx1 = max(b[0] + b[2] for b in detected_hands_boxes)
+        hy1 = max(b[1] + b[3] for b in detected_hands_boxes)
+        action_tracks["hands_bbox_norm"] = [round(hx0, 4), round(hy0, 4), round(hx1 - hx0, 4), round(hy1 - hy0, 4)]
+        action_tracks["verified_hands_detected"] = True
+    action_tracks["action_protection_windows"] = list(tracking_res.get("action_protection_windows") or [])
 
     pre_beats: list[dict[str, Any]] = []
     for idx, ph in enumerate(merged_phrases):
@@ -611,11 +649,11 @@ def build_creative_plan(
         )
         # Ensure headline & subtitle snap cleanly to word boundaries and fit beat read-time budget
         if isinstance(comp_params.get("headline"), str):
-            hl = _trim_words(comp_params["headline"], 48)
-            max_words = max(3, int(((ef - sf) / max(1.0, fps)) * 3.0))
+            hl = _trim_words(comp_params["headline"], 52)
+            max_words = max(7 if idx == 0 else 5, int(((ef - sf) / max(1.0, fps)) * 3.8))
             words = hl.split()
             if len(words) > max_words:
-                hl = _trim_words(" ".join(words[:max_words]), 46)
+                hl = _trim_words(" ".join(words[:max_words]), 50)
             comp_params["headline"] = hl
         if isinstance(comp_params.get("subtitle"), str):
             comp_params["subtitle"] = _trim_words(comp_params["subtitle"], 56)
@@ -800,6 +838,12 @@ def build_creative_plan(
         type_system=type_system,
         run_dir=run_dir,
     )
+    from .evidence_and_type import resolve_art_direction, validate_design_tokens
+    from .layout import detect_visual_repetition
+    detect_visual_repetition(layout_plan, creative_plan=plan_core, motion_graph=motion_graph, run_dir=run_dir)
+    art_res = resolve_art_direction(selected_skill_id, caption_policy=cap_pol, language=str(input_analysis.get("language") or "en"))
+    dt_qa = validate_design_tokens(art_res, type_system, components=final_specs, caption_policy=cap_pol)
+    write_json_atomic(run_dir / "qc" / "DESIGN_TOKENS_QA.json", dt_qa)
     plan_core["plan_sha256"] = hash_artifact(plan_core)
     assert_kh03_schema(plan_core, "creative_plan")
 
@@ -871,14 +915,69 @@ def compile_to_kh02_overrides(
         fps=fps,
         profile=sk["preferred_profile"],
     )
+    lc = creative_plan.get("layout_constraints") or {}
+    fs_lock = bool(lc.get("fullscreen_lock"))
+    layout_policy = str(lc.get("layout_policy") or ("FULLSCREEN_LOCK" if fs_lock else "LEGACY_DYNAMIC"))
+    # PED-03 / H1 companion stage cue: on split/inset beats where presenter area < 45% and captions are OFF,
+    # add a crisp non-overlapping chapter_pill inside the layout's reserved caption_box_norm so the stage
+    # maintains balanced editorial hierarchy (>=2 info boxes) with 0% overlap against presenter, face, or graphic.
+    if layout_policy == "ADAPTIVE_DYNAMIC" and caption_policy != "ON_REQUESTED" and isinstance(layout_plan, dict):
+        lp_by_bid = {str(lb.get("beat_id")): lb for lb in (layout_plan.get("beats") or [])}
+        beat_by_bid = {str(b.get("beat_id")): b for b in kh02_beats}
+        for b_idx, b in enumerate(kh02_beats):
+            bid = str(b["beat_id"])
+            lb = lp_by_bid.get(bid)
+            if not lb:
+                continue
+            pbox = lb.get("presenter_box_norm") or [0.0, 0.0, 1.0, 1.0]
+            p_area = float(pbox[2]) * float(pbox[3])
+            cbox = lb.get("caption_slot_norm") or lb.get("caption_box_norm")
+            if p_area < 0.45 and isinstance(cbox, list) and len(cbox) == 4:
+                cx, cy, cw, ch = [float(v) for v in cbox]
+                pill_h = round(min(ch, 0.056), 4)
+                sf, ef = int(b["start_frame"]), int(b["end_frame"])
+                dur_f = max(4, ef - sf)
+                en_f = min(4, max(1, dur_f // 4))
+                ex_f = min(4, max(1, dur_f // 4))
+                hd_f = max(1, dur_f - en_f - ex_f)
+                sem_fn = str(b.get("semantic_function") or "context").replace("_", " ").upper()
+                kh02_visual_events.append({
+                    "event_id": sanitize_identifier(f"kh03_cue_{b_idx + 1:02d}_{bid}"),
+                    "beat_id": bid,
+                    "track_id": "track_info_secondary",
+                    "layer_id": sanitize_identifier(f"kh03_cue_{b_idx + 1:02d}_{bid}"),
+                    "layer_cat": "title",
+                    "z_order": 34,
+                    "asset_ref": None,
+                    "capability_id": "hf.badge_pop",
+                    "start_frame": sf,
+                    "end_frame": ef,
+                    "anchor_word_id": None,
+                    "anchor_mode": "beat_start",
+                    "entry_frames": en_f,
+                    "hold_frames": hd_f,
+                    "exit_frames": ex_f,
+                    "normalized_bbox": [round(cx, 4), round(cy, 4), round(cw, 4), pill_h],
+                    "opacity": 1.0,
+                    "transform": {"scale_from": 0.96, "scale_to": 1.0, "y_offset_px": 6},
+                    "mask": None,
+                    "blend": "normal",
+                    "easing": "power2.out",
+                    "params": {
+                        "kind": "chapter_pill",
+                        "kicker": f"{b_idx + 1:02d}",
+                        "headline": sem_fn[:24],
+                    },
+                    "safe_zone": True,
+                    "face_exclusion": True,
+                    "semantic_reason": f"PED-03 split-stage structural cue for {bid} ({lb.get('layout_mode')})",
+                    "expected_visual_evidence": f"Chapter cue pill {b_idx + 1:02d} {sem_fn} visible in non-overlapping caption slot.",
+                })
     sel_dir = next(d for d in creative_plan["directions_considered"] if d["selected"])
     hp = creative_plan.get("hook_plan") or {}
     sel_hook_opt = next((o for o in (hp.get("options") or []) if o.get("selected")), None) or {}
     first_vis_id = kh02_visual_events[0]["event_id"] if kh02_visual_events else "ev_01_hook"
     payoff_bid = kh02_beats[-1]["beat_id"] if kh02_beats else "beat_01"
-    lc = creative_plan.get("layout_constraints") or {}
-    fs_lock = bool(lc.get("fullscreen_lock"))
-    layout_policy = str(lc.get("layout_policy") or ("FULLSCREEN_LOCK" if fs_lock else "LEGACY_DYNAMIC"))
 
     selected_hook_override = {
         "selected_option_id": hp.get("selected_hook_id", f"{creative_plan['selected_skill_id'].lower()}_hook_01"),

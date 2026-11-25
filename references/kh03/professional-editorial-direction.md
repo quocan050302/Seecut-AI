@@ -1,0 +1,20 @@
+# KH-03.R4Intelligence — Professional Editorial Direction & Native Production QA
+
+KH-03.R4 upgrades editorial decision quality, connects all final pixel/audio/action QA gates directly to the production render SHA-256, and hardens bounded async execution without altering the locked 5-skill flow (`SK-01..SK-05`) or bypassing `PROBLEM-01` (`PolyForm Noncommercial License 1.0.0`).
+
+## PED-01 .. PED-10 Owner Module Mapping
+
+| Capability | Owner Module(s) | Key Entrypoints / Artifacts |
+|---|---|---|
+| **Universal Context (Sec 03)** | `scripts/kh03/intelligence.py` | `build_editorial_context()` -> `analysis/EDITORIAL_CONTEXT.json` (multi-label, `UNKNOWN`, fail-closed `UNSUPPORTED`) |
+| **PED-01 First-Frame Visual Impact** | `scripts/kh03/motion_graph.py`, `scripts/kh03/visual_qa.py` | `build_hook_intent()`, `plan_hook_visual()`, `validate_hook_reveal()`, ROI-isolated `verify_hook_pixels()` (separates hook ROI from KOL/source plate motion; supports intentional static readability gate) |
+| **PED-02 Action Protection Engine** | `scripts/kh03/tracking.py`, `scripts/kh03/director.py`, `scripts/kh03/layout.py` | `resolve_detector_capabilities()`, `detect_semantic_entities()` (macOS Apple Vision face/hand/text + cross-platform NumPy streaming motion), `build_action_protection_windows()`, `evaluate_action_visibility()` (`>=95%` retained visible, `<=5%` overlay coverage -> `TRACKS.json`, `ACTION_PROTECTION.json`) |
+| **PED-03 Adaptive Layout Rhythm** | `scripts/kh03/layout.py`, `scripts/kh03/motion_graph.py` | `classify_layout_topology()`, `score_layout_candidates()`, `compute_layout_occupancy()`, `detect_visual_repetition()` across ALL topologies (`>60%` non-purposeful dominance flagged; justified `SK-05`/`FULLSCREEN_LOCK` accepted -> `LAYOUT_RHYTHM.json`) |
+| **PED-04 Spatial Interaction** | `scripts/kh03/tracking.py` | `bind_component_to_track()`, `resolve_spatial_anchor()` (scene-cut reset, lost-track safe reposition), `validate_spatial_alignment()` |
+| **PED-05 Motion Choreography** | `scripts/kh03/motion_graph.py`, `scripts/kh03/qa.py` | `plan_motion_phases()` (`anticipation->impact->settle->continuity` vs quiet/reduced-motion), `compile_motion_to_existing_timeline()`, `validate_motion_continuity()`, `MOTION_SOUND_SYNC.json` |
+| **PED-06 Evidence Demonstration** | `scripts/kh03/evidence_and_type.py` | `resolve_evidence_asset()`, `plan_evidence_demonstration()`, `validate_evidence_claims()` (rejects competitor refs & fake real labels; `BLOCKED_EVIDENCE` when required proof absent) |
+| **PED-07 Premium Art Direction** | `scripts/kh03/evidence_and_type.py` | `resolve_art_direction()`, `build_visual_hierarchy()`, `validate_design_tokens()` (`DESIGN_TOKENS_QA.json`, strict `caption_policy=OFF` enforcement) |
+| **PED-08 Render-Level Editorial Judge + PROBLEM-01** | `scripts/kh03/qa.py`, `scripts/kh03/router.py`, `scripts/kh03/visual_qa.py` | `orchestrate_final_render_qa()`, `evaluate_editorial_quality()`, `aggregate_gate_results()`, `audit_decoded_frames_full()` -> `FINAL_PIXEL_QA.json`, `FINAL_GATE_MATRIX.json`, `FLOW_TRACE.json`, `FRAME_AUDIT.json`, `NATIVE_RENDER_PROOF.json`, `OWNER_APPROVAL.json` |
+| **PED-09 Multi-Candidate Competition** | `scripts/kh03/candidates.py`, `scripts/kh03/router.py` | `generate_creative_candidates()` (`<=3` structurally distinct `A/B/C` within selected skill), `validate_candidate_diversity()`, `rank_candidates()` (order-swapped pairwise `A/B` & `B/A`), `adopt_candidate()` -> `CANDIDATES.json` |
+| **PED-10 Async Execution Hardening** | `scripts/kh03/execution.py` | `CancellationToken`, `TaskLease`, `TaskContext`, `CoordinatorPublisher` (`LATE_WRITE_REJECTED`), `run_subprocess_isolated()` (process-group kill/reap), worker quarantine (`BLOCKED_CANCELLATION`), `CANCELLATION_PROOF.json`, `ASYNC_METRICS.json` |
+

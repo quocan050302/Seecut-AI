@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv as _csv
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -652,34 +653,53 @@ def verify_adaptive_layout_frames(
     return report
 
 
+def _valid_norm_box(box: Any) -> list[float] | None:
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    try:
+        x, y, w, h = [float(v) for v in box]
+    except Exception:
+        return None
+    if not all(math.isfinite(v) for v in (x, y, w, h)):
+        return None
+    if w <= 0.01 or h <= 0.01:
+        return None
+    if x < -0.02 or y < -0.02 or (x + w) > 1.02 or (y + h) > 1.02:
+        return None
+    return [max(0.0, x), max(0.0, y), min(1.0 - max(0.0, x), w), min(1.0 - max(0.0, y), h)]
+
+
 def verify_component_internal_roi_motion(
     final_mp4: str | Path,
     node_bindings: list[dict[str, Any]],
     *,
+    source_mp4: str | Path | None = None,
     presenter_box_norm_by_frame: dict[int, list[float]] | None = None,
     codec_noise_floor: float = 1.6,
     probe_w: int = 360,
     probe_h: int = 640,
     out_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """CMI-02 & CMI-09 pixel verifier: checks internal component ROI motion strictly EXCLUDING presenter motion!
+    """CMI-02 / CMI-09 / PED-08 pixel verifier: checks internal component ROI motion strictly EXCLUDING presenter/source-plate motion!
 
-    Catches frozen static components even when live presenter moves elsewhere on screen, and rejects
-    tiny codec-noise fluctuations below `codec_noise_floor`.
+    Catches frozen static components even when live presenter moves elsewhere on screen, rejects offscreen/invalid ROIs,
+    and supports source-plate delta subtraction when `source_mp4` is supplied.
     """
     fin_p = Path(final_mp4).resolve()
     if not fin_p.is_file():
         return {"schema_version": "kh03.component_pixel_qa.v1", "pass": False, "status": "MISSING_MP4", "nodes": []}
+    if not node_bindings:
+        return {"schema_version": "kh03.component_pixel_qa.v1", "pass": False, "status": "NO_NODE_BINDINGS", "nodes": [], "frozen_nodes": []}
 
-    # Collect only the exact frame indices needed (start, mid, settle) so RAM stays tiny!
     needed_frames: set[int] = set()
     for nb in node_bindings:
         sf = max(0, int(nb.get("start_frame", 0)))
         stf = max(sf + 1, int(nb.get("settle_frame", sf + 6)))
         ef = max(stf + 1, int(nb.get("end_frame", stf + 6)))
-        needed_frames.update({sf, (sf + stf) // 2, stf, max(sf, ef - 2)})
+        needed_frames.update({max(0, sf - 2), sf, (sf + stf) // 2, stf, max(sf, ef - 2)})
 
     captured: dict[int, Image.Image] = {}
+    src_captured: dict[int, Image.Image] = {}
     max_needed = max(needed_frames) if needed_frames else 0
     idx = 0
     with StreamingRGBFrameDecoder(fin_p, probe_w, probe_h, ffmpeg_threads=2, timeout_sec=120.0) as dec:
@@ -691,40 +711,111 @@ def verify_component_internal_roi_motion(
                 captured[idx] = Image.frombytes("RGB", (probe_w, probe_h), raw)
             idx += 1
 
+    src_p = Path(source_mp4).resolve() if (source_mp4 and Path(source_mp4).is_file()) else None
+    if src_p is not None:
+        s_idx = 0
+        with StreamingRGBFrameDecoder(src_p, probe_w, probe_h, ffmpeg_threads=2, timeout_sec=120.0) as sdec:
+            while s_idx <= max_needed:
+                raw = sdec.read_frame()
+                if raw is None:
+                    break
+                if s_idx in needed_frames:
+                    src_captured[s_idx] = Image.frombytes("RGB", (probe_w, probe_h), raw)
+                s_idx += 1
+
     results: list[dict[str, Any]] = []
     frozen_nodes: list[str] = []
+    invalid_rois: list[str] = []
     for nb in node_bindings:
         nid = str(nb["node_id"])
         sf = max(0, int(nb.get("start_frame", 0)))
         stf = max(sf + 1, int(nb.get("settle_frame", sf + 6)))
-        rx, ry, rw, rh = [float(v) for v in nb.get("canvas_roi_norm", [0.1, 0.1, 0.5, 0.2])]
+        midf = (sf + stf) // 2
+        v_roi = _valid_norm_box(nb.get("canvas_roi_norm"))
+        if v_roi is None:
+            invalid_rois.append(nid)
+            frozen_nodes.append(nid)
+            results.append({"node_id": nid, "component_id": nb.get("component_id"), "roi_delta": 0.0, "moved": False, "reason": "ROI_INVALID_OR_OFFSCREEN"})
+            continue
+        rx, ry, rw, rh = v_roi
         box = (
             max(0, int(rx * probe_w)), max(0, int(ry * probe_h)),
             min(probe_w, max(2, int((rx + rw) * probe_w))), min(probe_h, max(2, int((ry + rh) * probe_h))),
         )
         im0 = captured.get(sf)
+        im_mid = captured.get(midf)
         im1 = captured.get(stf)
         if im0 is None or im1 is None or box[2] <= box[0] or box[3] <= box[1]:
             results.append({"node_id": nid, "component_id": nb.get("component_id"), "roi_delta": 0.0, "moved": False, "reason": "FRAME_UNAVAILABLE"})
             frozen_nodes.append(nid)
             continue
 
-        c0 = im0.crop(box).copy()
-        c1 = im1.crop(box).copy()
-        # Mask out presenter overlap inside ROI if presenter overlaps any corner so presenter motion cannot spoof component motion!
-        pbox = (presenter_box_norm_by_frame or {}).get(stf)
-        if pbox and len(pbox) == 4:
-            px0 = max(0, int(pbox[0] * probe_w) - box[0])
-            py0 = max(0, int(pbox[1] * probe_h) - box[1])
-            px1 = min(c0.width, int((pbox[0] + pbox[2]) * probe_w) - box[0])
-            py1 = min(c0.height, int((pbox[1] + pbox[3]) * probe_h) - box[1])
-            if px1 > px0 and py1 > py0:
-                c0.paste((0, 0, 0), (px0, py0, px1, py1))
-                c1.paste((0, 0, 0), (px0, py0, px1, py1))
+        def _crop_masked(im: Image.Image, fno: int) -> Image.Image:
+            cr = im.crop(box).copy()
+            pbox = (presenter_box_norm_by_frame or {}).get(fno) or (presenter_box_norm_by_frame or {}).get(stf)
+            if pbox and len(pbox) == 4:
+                px0 = max(0, int(pbox[0] * probe_w) - box[0])
+                py0 = max(0, int(pbox[1] * probe_h) - box[1])
+                px1 = min(cr.width, int((pbox[0] + pbox[2]) * probe_w) - box[0])
+                py1 = min(cr.height, int((pbox[1] + pbox[3]) * probe_h) - box[1])
+                if px1 > px0 and py1 > py0:
+                    cr.paste((0, 0, 0), (px0, py0, px1, py1))
+            return cr
 
-        delta = round(sum(ImageStat.Stat(ImageChops.difference(c0, c1)).mean) / 3.0, 3)
+        c0 = _crop_masked(im0, sf)
+        c1 = _crop_masked(im1, stf)
+
+        def _patch_motion(a_im: Image.Image, b_im: Image.Image) -> float:
+            diff = ImageChops.difference(a_im, b_im)
+            full_m = sum(ImageStat.Stat(diff).mean) / 3.0
+            # Also evaluate 4x4 local tiles so crisp vector animations (e.g. SVG underline draw) register
+            # truthfully without requiring the entire card background to flash (frozen cards score ~0 everywhere!).
+            dw, dh = diff.size
+            peak_tile = 0.0
+            if dw >= 16 and dh >= 16:
+                tw, th = max(4, dw // 4), max(4, dh // 4)
+                for gy in range(4):
+                    for gx in range(4):
+                        tile = diff.crop((gx * tw, gy * th, min(dw, (gx + 1) * tw), min(dh, (gy + 1) * th)))
+                        peak_tile = max(peak_tile, sum(ImageStat.Stat(tile).mean) / 3.0)
+            return max(full_m, peak_tile * 0.45)
+
+        raw_delta = _patch_motion(c0, c1)
+        if im_mid is not None:
+            cm = _crop_masked(im_mid, midf)
+            raw_delta = max(raw_delta, _patch_motion(c0, cm), _patch_motion(cm, c1))
+        pre_f = max(0, sf - 2)
+        if pre_f != sf and pre_f in captured:
+            c_pre = _crop_masked(captured[pre_f], pre_f)
+            raw_delta = max(raw_delta, _patch_motion(c_pre, c1))
+
+        # If source plate available, check whether the component actually changed relative to source plate!
+        plate_delta = None
+        plate_motion = 0.0
+        if sf in src_captured and stf in src_captured:
+            s0 = _crop_masked(src_captured[sf], sf)
+            s1 = _crop_masked(src_captured[stf], stf)
+            # Overlay signature at sf vs stf: diff between (final - source) at sf and (final - source) at stf!
+            ov0 = ImageChops.difference(c0, s0)
+            ov1 = ImageChops.difference(c1, s1)
+            plate_delta = round(max(
+                sum(ImageStat.Stat(ov0).mean) / 3.0,
+                sum(ImageStat.Stat(ov1).mean) / 3.0,
+            ), 3)
+            plate_motion = _patch_motion(ov0, ov1)
+            if pre_f != sf and pre_f in captured and pre_f in src_captured:
+                ov_pre = ImageChops.difference(_crop_masked(captured[pre_f], pre_f), _crop_masked(src_captured[pre_f], pre_f))
+                plate_motion = max(plate_motion, _patch_motion(ov_pre, ov1))
+            delta = round(plate_motion, 3)
+        else:
+            delta = round(raw_delta, 3)
+
+        is_static_hold = nb.get("primitive") == "stable_hold" or bool(nb.get("intentional_static"))
         moved = delta >= codec_noise_floor
-        if not moved and nb.get("primitive") != "stable_hold":
+        visible_over_plate = (plate_delta is None) or (plate_delta >= codec_noise_floor)
+        if not visible_over_plate:
+            frozen_nodes.append(nid)
+        elif not moved and not is_static_hold:
             frozen_nodes.append(nid)
         results.append({
             "node_id": nid,
@@ -732,18 +823,23 @@ def verify_component_internal_roi_motion(
             "primitive": nb.get("primitive"),
             "frames_compared": [sf, stf],
             "roi_delta": delta,
+            "plate_presence_delta": plate_delta,
             "codec_noise_floor": codec_noise_floor,
+            "intentional_static": is_static_hold,
             "moved": moved,
+            "visible_over_plate": visible_over_plate,
         })
 
     rep = {
         "schema_version": "kh03.component_pixel_qa.v1",
         "final_mp4_sha256": hash_artifact(fin_p),
+        "source_plate_isolated": src_p is not None,
         "nodes_checked": len(results),
         "moved_nodes": sum(1 for r in results if r["moved"]),
         "frozen_nodes": frozen_nodes,
+        "invalid_rois": invalid_rois,
         "nodes": results,
-        "pass": len(frozen_nodes) == 0 and len(results) > 0,
+        "pass": len(frozen_nodes) == 0 and len(invalid_rois) == 0 and len(results) > 0,
     }
     if out_dir is not None:
         od = Path(out_dir)
@@ -757,16 +853,67 @@ def verify_hook_pixels(
     hook_plan: dict[str, Any],
     *,
     fps: float = 24.0,
+    source_mp4: str | Path | None = None,
+    hook_roi_norm: list[float] | None = None,
+    presenter_box_norm: list[float] | None = None,
+    reveal_constraints: dict[str, Any] | None = None,
+    intentional_static: bool | None = None,
+    codec_noise_floor: float = 1.8,
     out_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """CMI-01 pixel verifier: checks frame 0 visibility + 0-3s hook evolution without empty black flash."""
+    """PED-01 & CMI-01 ROI-isolated hook pixel verifier: strictly separates hook component ROI from KOL/source motion!
+
+    - Never passes a frozen/missing hook just because the presenter/KOL moves elsewhere on screen!
+    - Rejects invalid/offscreen ROIs fail-closed.
+    - When `source_mp4` is supplied, diffs `(final_roi - source_roi)` across frames so source plate motion
+      inside/behind the ROI cannot spoof hook animation.
+    - When `intentional_static=True`, evaluates readability/visibility/semantic reveal without faking `motion_pass=True`.
+    """
     fin_p = Path(final_mp4).resolve()
     if not fin_p.is_file():
         return {"schema_version": "kh03.hook_pixel_qa.v1", "pass": False, "status": "MISSING_MP4"}
+
+    # Resolve strict hook ROI (from explicit arg, hook_plan, or safe top negative-space band; reject offscreen!)
+    raw_roi = hook_roi_norm if hook_roi_norm is not None else hook_plan.get("hook_roi_norm")
+    if raw_roi is None:
+        # Backward-compatible default top negative-space hook band (strictly isolated from central KOL torso!)
+        raw_roi = [0.05, 0.04, 0.90, 0.18]
+    v_roi = _valid_norm_box(raw_roi)
+    if v_roi is None:
+        rep = {
+            "schema_version": "kh03.hook_pixel_qa.v1",
+            "final_mp4_sha256": hash_artifact(fin_p),
+            "selected_hook_id": hook_plan.get("selected_hook_id"),
+            "status": "FAIL_INVALID_OR_OFFSCREEN_ROI",
+            "hook_roi_norm": raw_roi,
+            "issues": [f"HOOK_ROI_INVALID_OR_OFFSCREEN: {raw_roi!r}"],
+            "pass": False,
+        }
+        if out_dir is not None:
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            write_json_atomic(Path(out_dir) / "HOOK_PIXEL_QA.json", rep)
+        return rep
+
+    # Determine whether hook is intentionally static (e.g., calm_context unbroken shot with explicit rationale)
+    if intentional_static is None:
+        mbs = hook_plan.get("microbeats") or []
+        intentional_static = bool(
+            hook_plan.get("intentional_static")
+            or (len(mbs) == 1 and mbs[0].get("continuous_unbroken_shot") is True)
+        )
+
     w, h = 270, 480
-    sample_f = [0, min(12, int(round(fps * 0.5))), min(36, int(round(fps * 1.5))), min(68, int(round(fps * 2.8)))]
-    imgs: dict[int, Image.Image] = {}
+    rx, ry, rw, rh = v_roi
+    roi_px = (
+        max(0, int(round(rx * w))),
+        max(0, int(round(ry * h))),
+        min(w, max(2, int(round((rx + rw) * w)))),
+        min(h, max(2, int(round((ry + rh) * h)))),
+    )
+    sample_f = sorted({0, max(1, int(round(fps * 0.45))), max(2, int(round(fps * 1.25))), max(3, int(round(fps * 2.4)))})
     max_f = max(sample_f)
+
+    imgs: dict[int, Image.Image] = {}
     idx = 0
     with StreamingRGBFrameDecoder(fin_p, w, h, ffmpeg_threads=2, timeout_sec=60.0) as dec:
         while idx <= max_f:
@@ -776,34 +923,262 @@ def verify_hook_pixels(
             if idx in sample_f:
                 imgs[idx] = Image.frombytes("RGB", (w, h), raw)
             idx += 1
-    f0 = imgs.get(0)
-    f0_luma = round(sum(ImageStat.Stat(f0).mean) / 3.0, 2) if f0 else 0.0
-    deltas = []
-    ordered = [imgs[k] for k in sample_f if k in imgs]
-    for i in range(len(ordered) - 1):
-        deltas.append(round(sum(ImageStat.Stat(ImageChops.difference(ordered[i], ordered[i + 1])).mean) / 3.0, 3))
-    evolving = any(d >= 1.5 for d in deltas)
-    ok = (f0 is not None and f0_luma >= 10.0 and evolving)
+
+    src_imgs: dict[int, Image.Image] = {}
+    src_p = Path(source_mp4).resolve() if (source_mp4 and Path(source_mp4).is_file()) else None
+    if src_p is not None:
+        s_idx = 0
+        with StreamingRGBFrameDecoder(src_p, w, h, ffmpeg_threads=2, timeout_sec=60.0) as sdec:
+            while s_idx <= max_f:
+                raw = sdec.read_frame()
+                if raw is None:
+                    break
+                if s_idx in sample_f:
+                    src_imgs[s_idx] = Image.frombytes("RGB", (w, h), raw)
+                s_idx += 1
+
+    def _crop_hook_roi(im: Image.Image) -> Image.Image:
+        cr = im.crop(roi_px).copy()
+        if presenter_box_norm and len(presenter_box_norm) == 4:
+            px0 = max(0, int(round(presenter_box_norm[0] * w)) - roi_px[0])
+            py0 = max(0, int(round(presenter_box_norm[1] * h)) - roi_px[1])
+            px1 = min(cr.width, int(round((presenter_box_norm[0] + presenter_box_norm[2]) * w)) - roi_px[0])
+            py1 = min(cr.height, int(round((presenter_box_norm[1] + presenter_box_norm[3]) * h)) - roi_px[1])
+            # Only mask presenter sub-region if it does not obliterate >85% of hook ROI; if it covers >85%, flag occlusion!
+            if px1 > px0 and py1 > py0:
+                cr.paste((0, 0, 0), (px0, py0, px1, py1))
+        return cr
+
+    # Check presenter occlusion over hook ROI
+    occluded_ratio = 0.0
+    if presenter_box_norm and len(presenter_box_norm) == 4:
+        ix0 = max(rx, float(presenter_box_norm[0]))
+        iy0 = max(ry, float(presenter_box_norm[1]))
+        ix1 = min(rx + rw, float(presenter_box_norm[0]) + float(presenter_box_norm[2]))
+        iy1 = min(ry + rh, float(presenter_box_norm[1]) + float(presenter_box_norm[3]))
+        if ix1 > ix0 and iy1 > iy0:
+            occluded_ratio = round(((ix1 - ix0) * (iy1 - iy0)) / max(1e-6, rw * rh), 4)
+
+    ordered_keys = [k for k in sample_f if k in imgs]
+    ordered_full = [imgs[k] for k in ordered_keys]
+    ordered_roi = [_crop_hook_roi(imgs[k]) for k in ordered_keys]
+
+    f0_full = imgs.get(0)
+    f0_roi = ordered_roi[0] if (0 in imgs and ordered_roi) else None
+    f0_luma = round(sum(ImageStat.Stat(f0_full).mean) / 3.0, 2) if f0_full else 0.0
+    f0_roi_luma = round(sum(ImageStat.Stat(f0_roi).mean) / 3.0, 2) if f0_roi else 0.0
+    f0_roi_std = round(sum(ImageStat.Stat(f0_roi).stddev) / 3.0, 2) if f0_roi else 0.0
+
+    roi_deltas: list[float] = []
+    plate_deltas: list[float] = []
+    for i in range(len(ordered_keys)):
+        k = ordered_keys[i]
+        if k in src_imgs:
+            sr = _crop_hook_roi(src_imgs[k])
+            ov = ImageChops.difference(ordered_roi[i], sr)
+            plate_deltas.append(round(sum(ImageStat.Stat(ov).mean) / 3.0, 3))
+        if i + 1 < len(ordered_keys):
+            k2 = ordered_keys[i + 1]
+            if k in src_imgs and k2 in src_imgs:
+                ov_a = ImageChops.difference(ordered_roi[i], _crop_hook_roi(src_imgs[k]))
+                ov_b = ImageChops.difference(ordered_roi[i + 1], _crop_hook_roi(src_imgs[k2]))
+                roi_deltas.append(round(sum(ImageStat.Stat(ImageChops.difference(ov_a, ov_b)).mean) / 3.0, 3))
+            else:
+                roi_deltas.append(round(sum(ImageStat.Stat(ImageChops.difference(ordered_roi[i], ordered_roi[i + 1])).mean) / 3.0, 3))
+
+    # Reveal timing validation (if payoff reveal constraints provided)
+    reveal_ok = True
+    reveal_issues: list[str] = []
+    if isinstance(reveal_constraints, dict):
+        if reveal_constraints.get("early_payoff_spoiler"):
+            reveal_ok = False
+            reveal_issues.append("EARLY_PAYOFF_SPOILER_IN_HOOK")
+        earliest_f = reveal_constraints.get("earliest_reveal_frame")
+        actual_f = reveal_constraints.get("actual_hook_entry_frame", 0)
+        if earliest_f is not None and int(actual_f) > int(reveal_constraints.get("max_hook_entry_frame", int(round(fps * 1.0)))):
+            reveal_ok = False
+            reveal_issues.append(f"HOOK_ENTRY_TOO_LATE(f{actual_f})")
+
+    issues: list[str] = list(reveal_issues)
+    if occluded_ratio > 0.60:
+        issues.append(f"HOOK_ROI_OCCLUDED_BY_PRESENTER({occluded_ratio:.2f})")
+    if f0_full is None or f0_luma < 10.0:
+        issues.append(f"FRAME0_DARK_OR_EMPTY(luma={f0_luma})")
+    plate_visible = (not plate_deltas) or (max(plate_deltas) >= codec_noise_floor)
+    if src_p is not None and not intentional_static and not plate_visible:
+        issues.append(f"HOOK_NOT_VISIBLE_OVER_SOURCE_PLATE(max_plate_delta={max(plate_deltas, default=0.0)})")
+
+    roi_evolving = any(d >= codec_noise_floor for d in roi_deltas)
+    if intentional_static:
+        motion_gate_status = "NOT_APPLICABLE_INTENTIONAL_STATIC"
+        readability_ok = (f0_roi is not None and f0_roi_luma >= 8.0 and (f0_roi_std >= 4.0 or plate_visible))
+        if not readability_ok:
+            issues.append(f"STATIC_HOOK_LOW_READABILITY(luma={f0_roi_luma}, std={f0_roi_std})")
+        ok = (len(issues) == 0 and reveal_ok and readability_ok)
+    else:
+        motion_gate_status = "PASS" if roi_evolving else "FAIL_FROZEN_HOOK_ROI"
+        if not roi_evolving:
+            issues.append(f"HOOK_COMPONENT_FROZEN_IN_ROI(deltas={roi_deltas}, floor={codec_noise_floor})")
+        ok = (len(issues) == 0 and reveal_ok and roi_evolving)
+
     rep = {
         "schema_version": "kh03.hook_pixel_qa.v1",
         "final_mp4_sha256": hash_artifact(fin_p),
         "selected_hook_id": hook_plan.get("selected_hook_id"),
-        "sampled_frames": [k for k in sample_f if k in imgs],
+        "hook_roi_norm": v_roi,
+        "source_plate_isolated": src_p is not None,
+        "presenter_occlusion_ratio": occluded_ratio,
+        "intentional_static": bool(intentional_static),
+        "motion_gate_status": motion_gate_status,
+        "sampled_frames": ordered_keys,
         "frame0_mean_luma": f0_luma,
+        "frame0_roi_luma": f0_roi_luma,
+        "frame0_roi_contrast_std": f0_roi_std,
         "frame0_non_empty": f0_luma >= 10.0,
-        "subframe_deltas": deltas,
-        "opening_evolving": evolving,
+        "subframe_deltas": roi_deltas,
+        "plate_presence_deltas": plate_deltas,
+        "opening_evolving": roi_evolving,
+        "reveal_timing_ok": reveal_ok,
+        "issues": issues,
+        "status": "PASS" if ok else "FAIL",
         "pass": ok,
     }
     if out_dir is not None:
         od = Path(out_dir)
         od.mkdir(parents=True, exist_ok=True)
         write_json_atomic(od / "HOOK_PIXEL_QA.json", rep)
-        if ordered:
-            strip = Image.new("RGB", (w * len(ordered), h), (16, 12, 10))
-            for i, im in enumerate(ordered):
+        if ordered_full:
+            strip = Image.new("RGB", (w * len(ordered_full), h), (16, 12, 10))
+            for i, im in enumerate(ordered_full):
                 strip.paste(im, (i * w, 0))
             strip.save(od / "hook_contact_sheet.png")
+    return rep
+
+
+def audit_decoded_frames_full(
+    final_mp4: str | Path,
+    *,
+    expected_frames: int | None = None,
+    intentional_still_spans: list[tuple[int, int]] | None = None,
+    probe_w: int = 180,
+    probe_h: int = 320,
+    out_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """PED-08 O(1)-RAM full-frame PTS decoder audit: detects black flashes, duplicates, unintended freezes & exports sheets."""
+    fin_p = Path(final_mp4).resolve()
+    if not fin_p.is_file():
+        return {"schema_version": "kh03.frame_audit.v1", "pass": False, "status": "MISSING_MP4", "decoded_frames": 0}
+
+    still_spans = list(intentional_still_spans or [])
+
+    def _in_intentional_still(fidx: int) -> bool:
+        return any(s0 <= fidx < s1 for s0, s1 in still_spans)
+
+    decoded = 0
+    black_frames: list[int] = []
+    duplicate_frames: list[int] = []
+    unintended_freeze_runs: list[dict[str, int]] = []
+    cur_freeze_start: int | None = None
+    cur_freeze_len = 0
+    prev_im: Image.Image | None = None
+    min_luma = 255.0
+    max_luma = 0.0
+    rep_thumbs: list[tuple[int, Image.Image]] = []
+    fail_thumbs: list[tuple[int, str, Image.Image]] = []
+    sample_step = max(1, (expected_frames or 240) // 12)
+
+    with StreamingRGBFrameDecoder(fin_p, probe_w, probe_h, ffmpeg_threads=2, timeout_sec=180.0) as dec:
+        while True:
+            raw = dec.read_frame()
+            if raw is None:
+                break
+            im = Image.frombytes("RGB", (probe_w, probe_h), raw)
+            luma = sum(ImageStat.Stat(im).mean) / 3.0
+            min_luma = min(min_luma, luma)
+            max_luma = max(max_luma, luma)
+            if luma < 8.0:
+                black_frames.append(decoded)
+                if len(fail_thumbs) < 8:
+                    fail_thumbs.append((decoded, "BLACK", im.copy()))
+            if prev_im is not None:
+                mad = sum(ImageStat.Stat(ImageChops.difference(im, prev_im)).mean) / 3.0
+                if mad < 0.05:
+                    duplicate_frames.append(decoded)
+                    if not _in_intentional_still(decoded):
+                        if cur_freeze_start is None:
+                            cur_freeze_start = decoded - 1
+                            cur_freeze_len = 2
+                        else:
+                            cur_freeze_len += 1
+                    else:
+                        cur_freeze_start = None
+                        cur_freeze_len = 0
+                else:
+                    if cur_freeze_len >= 12:
+                        unintended_freeze_runs.append({"start_frame": int(cur_freeze_start or 0), "length_frames": cur_freeze_len})
+                        if len(fail_thumbs) < 8:
+                            fail_thumbs.append((int(cur_freeze_start or 0), f"FREEZE_{cur_freeze_len}F", prev_im.copy()))
+                    cur_freeze_start = None
+                    cur_freeze_len = 0
+            if decoded % sample_step == 0 and len(rep_thumbs) < 12:
+                rep_thumbs.append((decoded, im.copy()))
+            prev_im = im
+            decoded += 1
+
+    if cur_freeze_len >= 12:
+        unintended_freeze_runs.append({"start_frame": int(cur_freeze_start or 0), "length_frames": cur_freeze_len})
+
+    frame_count_ok = (expected_frames is None) or (abs(decoded - int(expected_frames)) <= 1)
+    issues: list[str] = []
+    if not frame_count_ok:
+        issues.append(f"FRAME_COUNT_MISMATCH(decoded={decoded}, expected={expected_frames})")
+    if black_frames:
+        issues.append(f"BLACK_FRAMES_DETECTED({len(black_frames)} frames: {black_frames[:8]})")
+    if unintended_freeze_runs:
+        issues.append(f"UNINTENDED_FREEZE_RUNS({len(unintended_freeze_runs)})")
+
+    contact_sheet_path = None
+    failure_sheet_path = None
+    if out_dir is not None:
+        od = Path(out_dir)
+        od.mkdir(parents=True, exist_ok=True)
+        if rep_thumbs:
+            cols = min(4, len(rep_thumbs))
+            rows = int(math.ceil(len(rep_thumbs) / float(cols)))
+            sheet = Image.new("RGB", (probe_w * cols, probe_h * rows), (12, 16, 14))
+            for i, (_fi, th) in enumerate(rep_thumbs):
+                sheet.paste(th, ((i % cols) * probe_w, (i // cols) * probe_h))
+            cs_p = od / "FRAME_AUDIT_CONTACT_SHEET.png"
+            sheet.save(cs_p)
+            contact_sheet_path = str(cs_p)
+        if fail_thumbs:
+            fs = Image.new("RGB", (probe_w * len(fail_thumbs), probe_h), (40, 10, 10))
+            for i, (_fi, _tag, th) in enumerate(fail_thumbs):
+                fs.paste(th, (i * probe_w, 0))
+            fp = od / "FRAME_AUDIT_FAILURES.png"
+            fs.save(fp)
+            failure_sheet_path = str(fp)
+
+    rep = {
+        "schema_version": "kh03.frame_audit.v1",
+        "final_mp4_sha256": hash_artifact(fin_p),
+        "decoded_frames": decoded,
+        "expected_frames": expected_frames,
+        "frame_count_ok": frame_count_ok,
+        "black_frames": black_frames[:64],
+        "black_frame_count": len(black_frames),
+        "duplicate_frame_count": len(duplicate_frames),
+        "unintended_freeze_runs": unintended_freeze_runs,
+        "mean_luma_min": round(min_luma, 2) if decoded > 0 else 0.0,
+        "mean_luma_max": round(max_luma, 2) if decoded > 0 else 0.0,
+        "contact_sheet_path": contact_sheet_path,
+        "failure_sheet_path": failure_sheet_path,
+        "issues": issues,
+        "status": "PASS" if (decoded > 0 and not issues) else "FAIL",
+        "pass": (decoded > 0 and not issues),
+    }
+    if out_dir is not None:
+        write_json_atomic(Path(out_dir) / "FRAME_AUDIT.json", rep)
     return rep
 
 

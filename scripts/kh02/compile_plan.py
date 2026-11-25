@@ -1054,7 +1054,7 @@ def compile_shotbook(
     width: 100%; height: 100%; object-fit: cover; display: block;
     transform-origin: 50% 38%;
   }}
-  .kh-el {{ position: absolute; opacity: 0; will-change: transform, opacity; }}
+  .kh-el {{ position: absolute; opacity: 0; will-change: transform, opacity; overflow: hidden; }}
   .kh-spine-track {{
     width: 100%; height: 100%; background: rgba(255,255,255,0.22);
     border-radius: 99px; overflow: hidden; border: 1px solid rgba(28,24,22,0.18);
@@ -1279,17 +1279,18 @@ def compile_shotbook(
   .kh3-fn-lbl {{ font-size: 10px; font-weight: 900; color: {th['accent_soft']}; text-transform: uppercase; letter-spacing: 0.04em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
   .kh3-fn-txt {{ font-size: 13px; font-weight: 700; color: {th['card_fg']}; line-height: 1.22; word-break: break-word; margin-top: 2px; }}
   .kh3-arrow {{ display: flex; align-items: center; font-size: 16px; font-weight: 900; color: {th['accent_soft']}; flex-shrink: 0; }}
-  .kh3-tl-list {{ display: flex; flex-direction: column; gap: 6px; }}
-  .kh3-tl-step {{ display: flex; align-items: center; gap: 10px; }}
-  .kh3-tl-badge {{ font-size: 13px; font-weight: 900; padding: 3px 9px; border-radius: 6px; background: {th['accent']}; color: #FFF; }}
-  .kh3-tl-text {{ font-size: 16px; font-weight: 700; color: {th['light_card_fg']}; }}
-  .kh3-cmp-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
-  .kh3-cmp-col {{ background: rgba(22,46,41,0.08); border-radius: 10px; padding: 10px; border-left: 4px solid {th['accent']}; }}
-  .kh3-cmp-alt {{ border-left-color: #1E7A56; }}
-  .kh3-cmp-t {{ font-size: 17px; font-weight: 900; color: {th['light_card_fg']}; }}
-  .kh3-cmp-d {{ font-size: 14px; font-weight: 600; color: #4A433D; margin-top: 2px; }}
+  .kh3-tl-list {{ display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }}
+  .kh3-tl-step {{ display: flex; align-items: flex-start; gap: 12px; background: rgba(22,46,41,0.06); border-radius: 12px; padding: 12px 14px; border-left: 5px solid {th['accent']}; }}
+  .kh3-tl-badge {{ font-size: 16px; font-weight: 900; padding: 4px 10px; border-radius: 7px; background: {th['accent']}; color: #FFF; flex-shrink: 0; }}
+  .kh3-tl-text {{ font-size: 20px; font-weight: 800; line-height: 1.25; color: {th['light_card_fg']}; }}
+  .kh3-compare {{ justify-content: space-between; padding: 24px 20px; gap: 18px; }}
+  .kh3-cmp-grid {{ display: grid; grid-template-columns: 1fr; gap: 16px; flex: 1; align-content: center; }}
+  .kh3-cmp-col {{ background: rgba(22,46,41,0.07); border-radius: 14px; padding: 18px 16px; border-left: 6px solid {th['accent']}; display: flex; flex-direction: column; gap: 8px; }}
+  .kh3-cmp-alt {{ border-left-color: #1E7A56; background: rgba(30,122,86,0.08); }}
+  .kh3-cmp-t {{ font-size: 22px; font-weight: 900; color: {th['light_card_fg']}; letter-spacing: 0.01em; }}
+  .kh3-cmp-d {{ font-size: 19px; font-weight: 600; line-height: 1.32; color: #2F2A26; }}
   .kh3-proof-img {{ flex: 1; max-height: 110px; overflow: hidden; border-radius: 8px; border: 1px solid rgba(0,0,0,0.14); }}
-  .kh3-cta-ul {{ display: block; margin: 2px 0; overflow: visible; }}
+  .kh3-cta-ul {{ display: block; margin: 4px 0; overflow: visible; }}
 </style>
 </head>
 <body>
@@ -1352,6 +1353,20 @@ def compile_shotbook(
     }}
   }}
 
+  // Precompute camera reframe windows so incoming/outgoing graphics never collide with a mid-morph #personWrap face
+  const REFRAME_WINS = [];
+  if (CAMS.length > 1 && !FIXED_PIP) {{
+    for (let i = 1; i < CAMS.length; i++) {{
+      const prev = CAMS[i - 1], cur = CAMS[i];
+      const moved = (Math.abs(prev.left - cur.left) > 4 || Math.abs(prev.top - cur.top) > 4 || Math.abs(prev.width - cur.width) > 4 || Math.abs(prev.height - cur.height) > 4);
+      if (moved) {{
+        const dur = Math.max(0.15, cur.end - cur.start);
+        const rDur = (cur.reframe_dur && cur.reframe_dur > 0) ? Math.min(cur.reframe_dur, dur * 0.65) : Math.min(0.24, dur * 0.35);
+        REFRAME_WINS.push({{ start: cur.start, dur: rDur }});
+      }}
+    }}
+  }}
+
   // Compiled SHOTBOOK V2 visual & typography events (strict CSS opacity:0 + gsap.set/to; frame-0 hooks visible immediately)
   for (const tw of TWEENS) {{
     const sel = '#' + tw.id;
@@ -1362,14 +1377,22 @@ def compile_shotbook(
       tl.to('#' + tw.id + '_fill', {{ width: '100%', duration: DURATION, ease: 'none' }}, 0);
       continue;
     }}
+    let effStart = tw.start;
+    if (!isFrameZero) {{
+      for (const rw of REFRAME_WINS) {{
+        if (Math.abs(tw.start - rw.start) < 0.08 && (tw.end - (rw.start + rw.dur)) > 0.25) {{
+          effStart = Math.max(effStart, rw.start + rw.dur + 0.01);
+        }}
+      }}
+    }}
     const startOp = isFrameZero ? tw.opacity : 0;
     const startScale = isFrameZero ? tw.scale_from : tw.scale_from;
     const startY = isFrameZero ? Math.min(8, tw.y_from) : tw.y_from;
     tl.set(sel, {{ opacity: startOp, scale: startScale, y: startY }}, 0);
     if (!isFrameZero) {{
-      tl.set(sel, {{ opacity: 0, scale: tw.scale_from, y: tw.y_from }}, tw.start);
+      tl.set(sel, {{ opacity: 0, scale: tw.scale_from, y: tw.y_from }}, effStart);
     }}
-    tl.to(sel, {{ opacity: tw.opacity, scale: tw.scale_to, y: 0, duration: Math.min(tw.entry, Math.max(0.12, tw.end - tw.start)), ease: tw.easing }}, tw.start);
+    tl.to(sel, {{ opacity: tw.opacity, scale: tw.scale_to, y: 0, duration: Math.min(tw.entry, Math.max(0.12, tw.end - effStart)), ease: tw.easing }}, effStart);
     if (tw.kind === 'step_rail_3') {{
       const delays = tw.step_delays || [0.15, 1.5, 2.9];
       for (let s = 1; s <= 3; s++) {{
@@ -1410,60 +1433,71 @@ def compile_shotbook(
       const initClip = isFrameZero ? 'inset(0% 0% 0% 0%)' : 'inset(0% 36% 0% 0%)';
       tl.set(sel, {{ clipPath: initClip, opacity: startOp }}, 0);
       if (!isFrameZero) {{
-        tl.set(sel, {{ clipPath: 'inset(0% 36% 0% 0%)', opacity: tw.opacity }}, tw.start);
+        tl.set(sel, {{ clipPath: 'inset(0% 36% 0% 0%)', opacity: tw.opacity }}, effStart);
       }}
-      tl.to(sel, {{ clipPath: 'inset(0% 0% 0% 0%)', duration: Math.min(0.24, Math.max(0.14, tw.entry)), ease: 'power3.out' }}, tw.start);
+      tl.to(sel, {{ clipPath: 'inset(0% 0% 0% 0%)', duration: Math.min(0.24, Math.max(0.14, tw.entry)), ease: 'power3.out' }}, effStart);
     }}
+    const _inodes = (tw.internal_nodes || []);
+    const _nodeStart = (idx, fallbackDelay) => {{
+      const n = _inodes[idx];
+      if (n && typeof n.start === 'number' && n.start >= effStart && n.start < tw.end - 0.14) {{
+        return Math.max(effStart + 0.04, n.start);
+      }}
+      return effStart + fallbackDelay;
+    }};
     if (tw.kind === 'kh03_cta_magnetic_underline') {{
       const uEl = document.getElementById(tw.id + '_ul');
       if (uEl && uEl.getTotalLength) {{
         const Lu = uEl.getTotalLength();
+        const stUl = _nodeStart(0, 0.12);
         tl.set(uEl, {{ strokeDasharray: Lu, strokeDashoffset: Lu }}, 0);
-        tl.to(uEl, {{ strokeDashoffset: 0, duration: 0.36, ease: 'power2.out' }}, tw.start + 0.08);
+        tl.to(uEl, {{ strokeDashoffset: 0, duration: 0.42, ease: 'power2.out' }}, stUl);
       }}
     }}
     if (tw.kind === 'kh03_proportional_reservoir') {{
       for (let s = 1; s <= 5; s++) {{
         const segEl = document.getElementById(tw.id + '_seg_' + s);
         if (!segEl) continue;
-        const st = tw.start + 0.04 + (s - 1) * 0.05;
+        const st = _nodeStart(s - 1, 0.04 + (s - 1) * 0.08);
         const initOp = (isFrameZero && s === 1) ? 0.85 : 0.0;
         tl.set(segEl, {{ opacity: initOp, y: 8 }}, 0);
-        tl.to(segEl, {{ opacity: 1.0, y: 0, duration: 0.14, ease: 'power2.out' }}, st);
+        tl.to(segEl, {{ opacity: 1.0, y: 0, duration: 0.18, ease: 'power2.out' }}, st);
       }}
     }}
     if (tw.kind === 'kh03_causal_flow_graph') {{
       for (let s = 1; s <= 3; s++) {{
         const nEl = document.getElementById(tw.id + '_node_' + s);
         if (!nEl) continue;
-        const st = tw.start + 0.04 + (s - 1) * 0.07;
+        const st = _nodeStart(s - 1, 0.06 + (s - 1) * 0.14);
         const initOp = (isFrameZero && s === 1) ? 0.85 : 0.0;
         tl.set(nEl, {{ opacity: initOp, y: 12, scale: 0.92 }}, 0);
-        tl.to(nEl, {{ opacity: 1.0, y: 0, scale: 1.0, duration: 0.16, ease: 'power2.out' }}, st);
+        tl.to(nEl, {{ opacity: 1.0, y: 0, scale: 1.0, duration: 0.22, ease: 'power2.out' }}, st);
       }}
     }}
     if (tw.kind === 'kh03_annotated_timeline') {{
       for (let s = 1; s <= 3; s++) {{
         const tEl = document.getElementById(tw.id + '_tl_' + s);
         if (!tEl) continue;
-        const st = tw.start + 0.06 + (s - 1) * 0.16;
+        const st = _nodeStart(s - 1, 0.08 + (s - 1) * 0.18);
         tl.set(tEl, {{ opacity: isFrameZero && s === 1 ? 0.85 : 0.0, x: -16 }}, 0);
-        tl.to(tEl, {{ opacity: 1.0, x: 0, duration: 0.24, ease: 'power2.out' }}, st);
+        tl.to(tEl, {{ opacity: 1.0, x: 0, duration: 0.26, ease: 'power2.out' }}, st);
       }}
     }}
     if (tw.kind === 'kh03_contradiction_lockup') {{
       const opEl = document.getElementById(tw.id + '_op');
       if (opEl) {{
+        const stOp = _nodeStart(0, 0.12);
         tl.set(opEl, {{ scale: 0.65, opacity: isFrameZero ? 0.8 : 0.0 }}, 0);
-        tl.to(opEl, {{ scale: 1.15, opacity: 1.0, duration: 0.20, ease: 'back.out(1.9)' }}, tw.start + 0.12);
-        tl.to(opEl, {{ scale: 1.0, duration: 0.16, ease: 'power2.out' }}, tw.start + 0.34);
+        tl.to(opEl, {{ scale: 1.15, opacity: 1.0, duration: 0.22, ease: 'back.out(1.9)' }}, stOp);
+        tl.to(opEl, {{ scale: 1.0, duration: 0.18, ease: 'power2.out' }}, stOp + 0.24);
       }}
     }}
     if (tw.kind === 'kh03_rolling_counter') {{
       const vEl = document.getElementById(tw.id + '_val');
       if (vEl) {{
+        const stVal = _nodeStart(0, 0.10);
         tl.set(vEl, {{ scale: 0.78, y: 10, opacity: isFrameZero ? 0.85 : 0.0 }}, 0);
-        tl.to(vEl, {{ scale: 1.0, y: 0, opacity: 1.0, duration: 0.32, ease: 'power3.out' }}, tw.start + 0.08);
+        tl.to(vEl, {{ scale: 1.0, y: 0, opacity: 1.0, duration: 0.34, ease: 'power3.out' }}, stVal);
       }}
     }}
     if (tw.kind === 'kh03_comparison_matrix') {{
@@ -1471,9 +1505,9 @@ def compile_shotbook(
       if (cmpEl) {{
         const cols = cmpEl.querySelectorAll('.kh3-cmp-col');
         cols.forEach((col, ci) => {{
-          const st = tw.start + 0.06 + ci * 0.16;
-          tl.set(col, {{ opacity: isFrameZero && ci === 0 ? 0.85 : 0.0, y: 10 }}, 0);
-          tl.to(col, {{ opacity: 1.0, y: 0, duration: 0.26, ease: 'power2.out' }}, st);
+          const st = _nodeStart(ci, 0.08 + ci * 0.22);
+          tl.set(col, {{ opacity: isFrameZero && ci === 0 ? 0.85 : 0.0, y: 12 }}, 0);
+          tl.to(col, {{ opacity: 1.0, y: 0, duration: 0.28, ease: 'power2.out' }}, st);
         }});
       }}
     }}
@@ -1522,9 +1556,14 @@ def compile_shotbook(
       }}
     }}
     if (tw.end < DURATION - 0.06) {{
-      // Overlap outgoing fade across beat seam by ~1-2 frames so main canvas NEVER flashes empty!
-      const exDur = Math.min(0.14, Math.max(0.08, tw.exit));
-      const exStart = Math.max(tw.start + tw.entry, tw.end - 0.02);
+      const exDur = Math.min(0.12, Math.max(0.06, tw.exit));
+      let hasReframeAtEnd = false;
+      for (const rw of REFRAME_WINS) {{
+        if (Math.abs(tw.end - rw.start) < 0.08) hasReframeAtEnd = true;
+      }}
+      const exStart = hasReframeAtEnd
+        ? Math.max(effStart + 0.08, tw.end - exDur - 0.01)
+        : Math.max(effStart + tw.entry, tw.end - 0.02);
       tl.to(sel, {{ opacity: 0, y: -6, duration: exDur, ease: 'power2.in' }}, exStart);
     }}
   }}

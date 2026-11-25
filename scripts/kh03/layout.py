@@ -448,8 +448,8 @@ def _mode_geometries(aspect_ratio: str, safe_m: dict[str, float]) -> dict[str, d
     return {
         "FULL_CANVAS": {
             "presenter": [0.0, 0.0, 1.0, 1.0],
-            "graphic":   [0.045, round(max(0.055, top_s), 4), 0.91, 0.135],
-            "caption":   [0.055, round(max(0.198, top_s + 0.142), 4), 0.84, 0.055],
+            "graphic":   [0.045, 0.042, 0.91, 0.112],
+            "caption":   [0.055, round(min(0.825, 1.0 - bot_s - 0.068), 4), 0.84, 0.058],
             "radius": 0, "p_z": 10, "g_z": 30,
         },
         "PRESENTER_LEFT_SPLIT": {
@@ -484,8 +484,8 @@ def _mode_geometries(aspect_ratio: str, safe_m: dict[str, float]) -> dict[str, d
         },
         "FULL_SCREEN_RETURN": {
             "presenter": [0.0, 0.0, 1.0, 1.0],
-            "graphic":   [0.050, 0.735, 0.840, 0.125],
-            "caption":   [0.055, 0.655, 0.820, 0.060],
+            "graphic":   [0.045, 0.042, 0.910, 0.112],
+            "caption":   [0.055, round(min(0.825, 1.0 - bot_s - 0.068), 4), 0.840, 0.058],
             "radius": 0, "p_z": 10, "g_z": 30,
         },
     }
@@ -661,11 +661,15 @@ def score_layout_candidates(
                     sc += 7.0
                     reasons.append("SK-03 preserves atmospheric narrative continuity")
 
-            # 3. Anti-repetition & continuity balance
+            # 3. Anti-repetition & continuity balance + PED-02 Action Protection clearance
             if prior_mode == mode and consecutive_same_count >= 2 and skill_id != "SK-05" and not is_first:
                 sc -= 11.0
             if c["source_crop"].get("hands_preserved"):
-                sc += 3.5
+                sc += 5.5
+            else:
+                # Penalize chopping active hands/objects when verified hand/action tracking exists
+                sc -= 9.5
+                reasons.append("Penalized: crops protected lower hand/action zone")
             if c["source_crop"].get("face_preserved"):
                 sc += 3.5
             if mode == "FULL_SCREEN_RETURN" and is_first:
@@ -1427,4 +1431,181 @@ def compute_anti_repetition_report(
     }
     if run_dir is not None:
         write_json_atomic(run_dir / "qc" / "ANTI_REPETITION_REPORT.json", rep)
+    return rep
+
+
+# ======================================================================
+# PED-03 — ADAPTIVE LAYOUT RHYTHM (ALL TOPOLOGIES, DURATION SHARE & ENTROPY)
+# ======================================================================
+
+
+def classify_layout_topology(beat: dict[str, Any]) -> str:
+    """Normalize any beat layout into a canonical topology family (not just top-banner!)."""
+    mode = str(beat.get("layout_mode") or "FULL_CANVAS").strip().upper()
+    gb = beat.get("graphic_box_norm") or [0.0, 0.0, 0.0, 0.0]
+    if mode in ("FULL_CANVAS", "FULL_SCREEN_RETURN"):
+        if len(gb) == 4 and float(gb[2]) * float(gb[3]) > 0.005 and float(gb[1]) < 0.25 and float(gb[3]) < 0.28:
+            return "TOP_BANNER_FULLSCREEN"
+        if len(gb) == 4 and float(gb[2]) * float(gb[3]) > 0.01:
+            return "SPATIAL_OVERLAY_FULLSCREEN"
+        return "FULL_SCREEN_CLEAN"
+    if mode in ("LOWER_COMPANION_SPLIT", "UPPER_COMPANION_SPLIT", "TOP_BOTTOM_SPLIT"):
+        return "TOP_BOTTOM_SPLIT"
+    if mode in ("PRESENTER_LEFT_SPLIT", "PRESENTER_RIGHT_SPLIT", "LEFT_RIGHT_SPLIT"):
+        return "LEFT_RIGHT_SPLIT"
+    if mode in ("FLOATING_INSET_PRESENTER", "PIP", "FIXED_PIP", "ADAPTIVE_PIP"):
+        return "PIP_EVIDENCE_FOCUS"
+    return mode
+
+
+def compute_layout_occupancy(layout_plan: dict[str, Any]) -> dict[str, Any]:
+    """Compute duration-weighted occupancy, longest uninterrupted dwell, repeat sequences & Shannon entropy (PED-03)."""
+    beats = layout_plan.get("beats") or []
+    fps = float(Fraction(int(layout_plan.get("fps_num", 24)), max(1, int(layout_plan.get("fps_den", 1)))))
+    total_f = max(1, sum(max(1, int(b["end_frame"]) - int(b["start_frame"])) for b in beats))
+    total_sec = round(total_f / max(1.0, fps), 4)
+
+    topo_frames: dict[str, int] = {}
+    seq: list[str] = []
+    max_dwell_f = 0
+    max_dwell_topo = "NONE"
+    cur_dwell_f = 0
+    prev_topo: str | None = None
+    per_segment: list[dict[str, Any]] = []
+
+    for b in beats:
+        df = max(1, int(b["end_frame"]) - int(b["start_frame"]))
+        topo = classify_layout_topology(b)
+        topo_frames[topo] = topo_frames.get(topo, 0) + df
+        seq.append(topo)
+        if topo == prev_topo:
+            cur_dwell_f += df
+        else:
+            cur_dwell_f = df
+            prev_topo = topo
+        if cur_dwell_f > max_dwell_f:
+            max_dwell_f = cur_dwell_f
+            max_dwell_topo = topo
+        per_segment.append({
+            "beat_id": b.get("beat_id"),
+            "layout_mode": b.get("layout_mode"),
+            "topology": topo,
+            "start_frame": int(b["start_frame"]),
+            "end_frame": int(b["end_frame"]),
+            "duration_sec": round(df / max(1.0, fps), 4),
+            "duration_share": round(df / float(total_f), 4),
+            "reason": b.get("reason") or "",
+        })
+
+    shares = {k: round(v / float(total_f), 4) for k, v in sorted(topo_frames.items())}
+    dominant_topo = max(shares.items(), key=lambda kv: (kv[1], kv[0]))[0] if shares else "NONE"
+    dominant_share = shares.get(dominant_topo, 0.0)
+
+    # Diagnostic Shannon topology entropy (bits)
+    entropy = 0.0
+    for p in shares.values():
+        if p > 0.0:
+            entropy -= p * math.log2(p)
+
+    # Detect repeated 2-step or 1-step runs >= 3 consecutive identical topologies
+    max_run_len = 0
+    cur_run = 0
+    last_t = None
+    for t in seq:
+        if t == last_t:
+            cur_run += 1
+        else:
+            cur_run = 1
+            last_t = t
+        max_run_len = max(max_run_len, cur_run)
+
+    return {
+        "schema_version": "kh03.layout_occupancy.v1",
+        "total_frames": total_f,
+        "total_duration_sec": total_sec,
+        "topology_shares": shares,
+        "unique_topologies": sorted(shares.keys()),
+        "dominant_topology": dominant_topo,
+        "dominant_duration_share": dominant_share,
+        "longest_dwell_sec": round(max_dwell_f / max(1.0, fps), 3),
+        "longest_dwell_topology": max_dwell_topo,
+        "max_consecutive_same_topology": max_run_len,
+        "topology_entropy_bits": round(entropy, 4),
+        "sequence": seq,
+        "segments": per_segment,
+    }
+
+
+def detect_visual_repetition(
+    layout_plan: dict[str, Any],
+    *,
+    creative_plan: dict[str, Any] | None = None,
+    motion_graph: dict[str, Any] | None = None,
+    max_dominant_share: float = 0.60,
+    justified_stability_reason: str | None = None,
+    run_dir: Path | None = None,
+) -> dict[str, Any]:
+    """PED-03 universal all-topology repetition auditor: catches dominant split/PIP/banner loops (>60%) while permitting justified calm/tutorial holds."""
+    occ = compute_layout_occupancy(layout_plan)
+    skill_id = str(layout_plan.get("selected_skill_id") or (creative_plan or {}).get("selected_skill_id") or "SK-04")
+    pol = str(layout_plan.get("layout_policy") or "LEGACY_DYNAMIC")
+    beats = layout_plan.get("beats") or []
+
+    # Check whether stability is legitimately justified by skill/policy/content continuity (NOT forced churn!)
+    justified_continuity = bool(
+        justified_stability_reason
+        or pol == "FULLSCREEN_LOCK"
+        or skill_id == "SK-05"
+        or (skill_id == "SK-03" and occ["total_duration_sec"] >= 60.0)
+        or (len(beats) <= 2)
+        or any(bool(b.get("continuity_justified")) for b in beats)
+    )
+
+    # Check whether internal motion meaningfully evolves inside a held topology (same layout + rich internal progression vs stagnant!)
+    mg_events = len((motion_graph or {}).get("semantic_motion_events") or [])
+    has_rich_internal_motion = mg_events >= max(3, len(beats))
+
+    findings: list[str] = []
+    status = "PASS"
+    dom_topo = occ["dominant_topology"]
+    dom_share = occ["dominant_duration_share"]
+
+    if pol == "ADAPTIVE_DYNAMIC" and not justified_continuity:
+        if dom_topo == "TOP_BANNER_FULLSCREEN" and dom_share >= 0.78 and len(beats) >= 3:
+            status = "FAIL"
+            findings.append(f"REPEATED_TOP_BANNER_LOOP: {dom_share * 100:.1f}% duration in TOP_BANNER_FULLSCREEN.")
+        elif dom_share > max_dominant_share and len(beats) >= 3:
+            # Flag non-purposeful dominant topology (>60% share, e.g. R3 ~69% TOP_BOTTOM_SPLIT regression!)
+            if dom_share >= 0.80 and not has_rich_internal_motion:
+                status = "FAIL"
+            else:
+                status = "REVIEW"
+            findings.append(
+                f"DOMINANT_TOPOLOGY_REPETITION({dom_topo}): {dom_share * 100:.1f}% duration share exceeds {max_dominant_share * 100:.0f}% threshold "
+                f"(longest dwell={occ['longest_dwell_sec']}s, entropy={occ['topology_entropy_bits']} bits)."
+            )
+    elif justified_continuity and dom_share > max_dominant_share:
+        findings.append(
+            f"JUSTIFIED_STABILITY_ACCEPTED: {dom_topo} ({dom_share * 100:.1f}%) accepted under policy={pol} / skill={skill_id}"
+            + (f" ({justified_stability_reason})" if justified_stability_reason else ".")
+        )
+
+    rep = {
+        "schema_version": "kh03.layout_rhythm.v1",
+        "run_id": layout_plan.get("run_id"),
+        "selected_skill_id": skill_id,
+        "layout_policy": pol,
+        "max_dominant_share_policy": max_dominant_share,
+        "justified_continuity": justified_continuity,
+        "has_rich_internal_motion": has_rich_internal_motion,
+        "occupancy": occ,
+        "findings": findings,
+        "status": status,
+        "pass": status == "PASS",
+        "needs_review": status == "REVIEW",
+    }
+    if run_dir is not None:
+        qdir = run_dir / "qc"
+        qdir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(qdir / "LAYOUT_RHYTHM.json", rep)
     return rep

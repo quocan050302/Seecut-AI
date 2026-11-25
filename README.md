@@ -1,6 +1,6 @@
-# Seecut-AI — KH-03.R3 Universal Editing & Creative Motion Intelligence (atop KH-02.R2 / SeeCut v3.4 Core)
+# Seecut-AI — KH-03.R4Intelligence Professional Editorial Direction (atop KH-02.R2 / SeeCut v3.4 Core)
 
-Antigravity skill (`seecut-ai`) combining the **KH-03.R3 Creative Motion & Visual Intelligence** cross-niche decision layer (**5 universal editing skills `SK-01..SK-05`**, mandatory integrity-bound user-selection gate, **CMI-01..CMI-10** semantic hook director, declarative internal-node motion graphs, face-safe shared-element morphing, subject/object/scene-cut tracking, universal cross-niche evidence ledgers, 360px/WCAG/multilingual typography, duration-weighted visual density/anti-repetition, motion-anchored licensed sound direction, true `O(1)`-RAM streaming decoded frame QA, and bounded async DAG execution) directly on top of the **KH-02.R2** single-path live pipeline (`scripts/kh02/`) and the unmodified **YeJe-cpu/SeeCut v3.4 Core** rendering engine.
+Antigravity skill (`seecut-ai`) combining **KH-03.R4Intelligence (`PED-01..PED-10`)** + **KH-03.R3 (`CMI-01..CMI-10`)** + **KH-03.R2 (`ADL-01..ADL-07`)** universal cross-niche editorial direction (**5 universal editing skills `SK-01..SK-05`**, mandatory integrity-bound user-selection gate, ROI-isolated hook & component pixel QA, real Apple Vision / streaming entity Action Protection Engine, all-topology Adaptive Layout Rhythm, spatial interaction, 4-phase motion choreography, truthful evidence demonstration, art direction token validation, render-level production QA bound to final muxed MP4 SHA-256, multi-candidate competition `A/B/C`, and hardened lease/cancellation/process-group async DAG execution) directly on top of the **KH-02.R2** single-path live pipeline (`scripts/kh02/`) and the unmodified **YeJe-cpu/SeeCut v3.4 Core** rendering engine.
 
 > **Required Notice**: Copyright (c) 2026 YeJe-cpu (https://github.com/YeJe-cpu)
 > **License**: [PolyForm Noncommercial License 1.0.0](./LICENSE) (`https://polyformproject.org/licenses/noncommercial/1.0.0`). See [NOTICE](./NOTICE) and [references/kh02-video-use-attribution.md](./references/kh02-video-use-attribution.md).
@@ -61,7 +61,8 @@ python -m scripts.kh03 verify --run-root runs/my_project_01 [--require-render]
 │   └── kh03/                            # Cross-niche input fixtures (NOT fixed shot templates)
 ├── scripts/
 │   ├── kh03/                            # KH-03.R3 Universal Editing & Creative Motion Intelligence modules
-│   │   ├── __init__.py / __main__.py    # Package version (kh03.3.0), VALID_SKILL_IDS (SK-01..SK-05), CLI entry
+│   │   ├── __init__.py / __main__.py    # Package version (kh03.4.0), VALID_SKILL_IDS (SK-01..SK-05), CLI entry
+│   │   ├── candidates.py                # PED-09: multi-candidate competition (A/B/C), diversity & pairwise adoption
 │   │   ├── contracts.py                 # Strict KH-03 schemas, legal state machine, anti-injection sanitizer
 │   │   ├── execution.py                 # CMI-10: StreamingRGBFrameDecoder, BoundedAsyncExecutor, AtomicKeyedCache, RAM/disk budgets
 │   │   ├── intelligence.py              # ffprobe, ASR reconciliation, semantic graph, numeric/action extraction

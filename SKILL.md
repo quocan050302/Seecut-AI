@@ -1,17 +1,18 @@
 ---
 name: seecut-ai
 description: >-
-  Run KH-03.R3 Universal Editing & Creative Motion Intelligence atop KH-02.R2 and YeJe-cpu/SeeCut v3.4 Core.
+  Run KH-03.R4Intelligence Professional Editorial Direction atop KH-03.R3/R2, KH-02.R2, and YeJe-cpu/SeeCut v3.4 Core.
   Analyzes any raw video + script across niches, recommends one of FIVE universal editing
   skills (SK-01..SK-05), and MANDATORILY STOPS for explicit user skill selection before
-  running rights-verified evidence ledgers, deep explanation graphs, declarative motion graphs
-  and shared-element morphs, adaptive layouts, multi-layer motion-anchored SFX, guarded
-  HyperFrames/GSAP rendering, true O(1) streaming frame QA, H1/H2/pairwise QA, and honest
-  human sign-off. Enforces PolyForm Noncommercial 1.0.0 fail-closed licensing (PROBLEM-01) and
+  running real entity action protection (PED-02), all-topology adaptive layout rhythm (PED-03),
+  spatial interaction, 4-phase motion choreography, rights-verified evidence ledgers, multi-candidate
+  competition (PED-09), hardened lease/cancellation async execution (PED-10), guarded native
+  HyperFrames/GSAP rendering, render-level final pixel/audio QA (PED-08), H1/H2/pairwise QA, and
+  honest human sign-off. Enforces PolyForm Noncommercial 1.0.0 fail-closed licensing (PROBLEM-01) and
   preserves full backward compatibility with legacy KH-02.R2 invocations.
 ---
 
-# seecut-ai — KH-03.R3 Universal Editing & Creative Motion Intelligence atop KH-02.R2 / YeJe-cpu/SeeCut v3.4 Core
+# seecut-ai — KH-03.R4Intelligence Professional Editorial Direction atop KH-02.R2 / YeJe-cpu/SeeCut v3.4 Core
 
 > **Required Notice**: Copyright (c) 2026 YeJe-cpu (https://github.com/YeJe-cpu)
 > **Upstream License**: PolyForm Noncommercial License 1.0.0 (`https://polyformproject.org/licenses/noncommercial/1.0.0`). See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
@@ -72,7 +73,7 @@ All five skills are **cross-niche creative grammars** (zero hardcoded `niche -> 
 | `SK-04` | **Intelligent Visual Explainer** | Deep comprehension graphs, exact `Decimal` visual math, causal diagrams, verifiable proof | [SK-04-visual-explainer.md](./references/kh03/SK-04-visual-explainer.md) |
 | `SK-05` | **Natural Retention Editing** | Authentic human delivery, physical action continuity, lightweight negative-space overlays, natural sound | [SK-05-natural-retention.md](./references/kh03/SK-05-natural-retention.md) |
 
-Shared doctrine & R2/R3 specs: [shared-doctrine.md](./references/kh03/shared-doctrine.md), [adaptive-layout-motion.md](./references/kh03/adaptive-layout-motion.md), [creative-motion-visual-intelligence.md](./references/kh03/creative-motion-visual-intelligence.md).
+Shared doctrine & R2/R3/R4 specs: [shared-doctrine.md](./references/kh03/shared-doctrine.md), [adaptive-layout-motion.md](./references/kh03/adaptive-layout-motion.md), [creative-motion-visual-intelligence.md](./references/kh03/creative-motion-visual-intelligence.md), [professional-editorial-direction.md](./references/kh03/professional-editorial-direction.md).
 
 ---
 

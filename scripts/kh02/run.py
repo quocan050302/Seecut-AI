@@ -1303,14 +1303,29 @@ def execute_pipeline(
                 judge_py = skill_root / "scripts" / "agy_judge_safe.py"
                 h2_out = run_dir / "qc" / f"h2_check_v{candidate_version}.json"
                 html_path = str(compiled["html_path"])
-                p_chk = subprocess.run(
-                    [sys.executable, str(judge_py), "check", "--video", str(final_mp4_path), "--html", html_path, "--out", str(h2_out)],
-                    capture_output=True, text=True, timeout=300,
-                )
-                chk_data = parse_json_strict(h2_out) if h2_out.is_file() else {"summary": {"valid": False, "gate_pass": None}, "returncode": p_chk.returncode, "stderr": p_chk.stderr[-300:]}
+                h2_timeout = int(os.environ.get("SEECUT_H2_TIMEOUT", "120"))
+                h2_attempts = int(os.environ.get("SEECUT_H2_MAX_ATTEMPTS", "2"))
+                try:
+                    p_chk = subprocess.run(
+                        [
+                            sys.executable, str(judge_py), "check",
+                            "--video", str(final_mp4_path), "--html", html_path,
+                            "--out", str(h2_out),
+                            "--timeout", str(h2_timeout),
+                            "--max-attempts", str(h2_attempts),
+                        ],
+                        capture_output=True, text=True, timeout=h2_timeout * h2_attempts + 60,
+                    )
+                    chk_data = parse_json_strict(h2_out) if h2_out.is_file() else {"summary": {"valid": False, "gate_pass": None}, "returncode": p_chk.returncode, "stderr": p_chk.stderr[-300:]}
+                except subprocess.TimeoutExpired as tex:
+                    chk_data = {
+                        "summary": {"valid": False, "gate_pass": None},
+                        "returncode": 124,
+                        "error": f"H2_TIMEOUT: agy_judge_safe.py exceeded {tex.timeout}s",
+                    }
                 chk_data["reviewed_mp4_sha256"] = final_mp4_sha
                 chk_pass = bool((chk_data.get("summary") or {}).get("valid") and (chk_data.get("summary") or {}).get("gate_pass"))
-                chk_data["status"] = "PASS" if chk_pass else ("INVALID" if not (chk_data.get("summary") or {}).get("valid") else "FAIL")
+                chk_data["status"] = "PASS" if chk_pass else ("TIMEOUT" if chk_data.get("returncode") == 124 else ("INVALID" if not (chk_data.get("summary") or {}).get("valid") else "FAIL"))
                 _write_json(h2_out, chk_data)
 
                 def _find_baseline_html(bp_path: Path) -> Path | None:
@@ -1342,11 +1357,16 @@ def execute_pipeline(
                         sys.executable, str(judge_py), "pair",
                         "--a", str(final_mp4_path), "--b", str(bp),
                         "--html-a", html_path, "--out", str(pair_out),
+                        "--timeout", str(h2_timeout),
+                        "--max-attempts", str(h2_attempts),
                     ]
                     if b_html_cand is not None:
                         pair_cmd.extend(["--html-b", str(b_html_cand)])
-                    p_pr = subprocess.run(pair_cmd, capture_output=True, text=True, timeout=420)
-                    pr_data = parse_json_strict(pair_out) if pair_out.is_file() else {"consensus": "invalid", "returncode": p_pr.returncode, "stderr": p_pr.stderr[-300:]}
+                    try:
+                        p_pr = subprocess.run(pair_cmd, capture_output=True, text=True, timeout=h2_timeout * h2_attempts + 90)
+                        pr_data = parse_json_strict(pair_out) if pair_out.is_file() else {"consensus": "invalid", "returncode": p_pr.returncode, "stderr": p_pr.stderr[-300:]}
+                    except subprocess.TimeoutExpired as tex:
+                        pr_data = {"consensus": "invalid", "returncode": 124, "error": f"PAIR_TIMEOUT: exceeded {tex.timeout}s"}
                     pr_data["candidate_mp4_sha256"] = final_mp4_sha
                     pr_data["baseline_mp4_sha256"] = hash_artifact(bp)
                     _write_json(pair_out, pr_data)

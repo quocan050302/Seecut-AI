@@ -41,13 +41,14 @@ from .contracts import (
     transition_state,
     write_json_atomic,
 )
+from .candidates import adopt_candidate, generate_creative_candidates, rank_candidates, validate_candidate_diversity
 from .director import build_creative_plan, compile_to_kh02_overrides
 from .execution import BoundedAsyncExecutor, DAGTask, compute_resource_budget
 from .explanation import plan_explanation
 from .footage import acquire_and_bind_footage
-from .intelligence import analyze_inputs, build_semantic_graph
+from .intelligence import analyze_inputs, build_editorial_context, build_semantic_graph
 from .layout import VALID_LAYOUT_POLICIES, resolve_layout_policy
-from .qa import evaluate_kh03_editorial
+from .qa import evaluate_kh03_editorial, orchestrate_final_render_qa
 from .recommend import get_skill_contract, issue_recommendation, recommend_skills
 from .research import emit_research_summary
 from .selection import SelectionGateError, record_user_selection, validate_user_selection
@@ -271,8 +272,10 @@ def run_execute(
     max_disk_gib: float | None = None,
     max_memory_mib: int | None = None,
     queue_frames: int = 2,
-    enable_tracking: bool = False,
+    enable_tracking: bool | None = None,
     reduced_motion: bool = False,
+    compete_candidates: bool = False,
+    max_candidates: int = 3,
     offline: bool = True,
     online_opt_in: bool = False,
     run_h2: bool = False,
@@ -456,7 +459,8 @@ def run_execute(
     )
 
     eff_exec_c = dict(saved_c)
-    if enable_tracking:
+    eff_enable_tracking = bool(production_mode) if enable_tracking is None else bool(enable_tracking)
+    if eff_enable_tracking:
         eff_exec_c["enable_streaming_tracking"] = True
     if reduced_motion:
         eff_exec_c["reduced_motion"] = True
@@ -467,7 +471,20 @@ def run_execute(
     eff_music = music_policy or saved_c.get("music_policy") or "OFF"
     eff_exec_c["caption_policy"] = eff_caption
 
-    # 4. Adaptive Creative Plan + Layout Choreography + CMI-01..07 Motion/Evidence/Typography/Density
+    # PED-00 / Section 03: Universal cross-niche editorial context
+    ed_ctx = build_editorial_context(
+        inp,
+        sem,
+        skill_id=skill_id,
+        available_assets=footage_manifest.get("assets"),
+        constraints=eff_exec_c,
+        run_dir=(None if dry_run else rdir),
+    )
+    if ed_ctx["support_status"] == "UNSUPPORTED":
+        transition_state(rdir, STATE_BLOCKED, reason=f"UNSUPPORTED_INPUT: {ed_ctx['unsupported_reasons']}", run_id=run_id)
+        return {"exit_code": 2, "status": "UNSUPPORTED_INPUT", "run_id": run_id, "reasons": ed_ctx["unsupported_reasons"]}
+
+    # 4. Adaptive Creative Plan + Layout Choreography + CMI-01..07 + PED-01..07 Motion/Evidence/Typography/Density
     creative_plan = build_creative_plan(
         run_id=run_id,
         run_dir=rdir,
@@ -490,6 +507,28 @@ def run_execute(
     visual_density = parse_json_strict(vd_file) if vd_file.is_file() else None
     trk_file = rdir / "analysis" / "TRACKING_PROVENANCE.json"
     tracking_prov = parse_json_strict(trk_file) if trk_file.is_file() else None
+
+    # PED-09 Optional Multi-Candidate Creative Competition (<=3 structurally distinct candidates within user-selected skill)
+    candidate_decision = None
+    if compete_candidates and not dry_run and layout_plan is not None:
+        sat_p = rdir / "layouts" / "SUBJECT_ACTION_TRACKS.json"
+        sat_doc = parse_json_strict(sat_p) if sat_p.is_file() else {}
+        cand_list = generate_creative_candidates(
+            run_id=run_id,
+            selected_skill_id=skill_id,
+            beats=list(creative_plan.get("beats") or []),
+            canvas=dict(layout_plan.get("canvas") or {"width": 720, "height": 1280, "aspect_ratio": "9:16"}),
+            source_media=inp["media"],
+            action_tracks=sat_doc,
+            layout_policy=str(layout_plan.get("layout_policy") or "ADAPTIVE_DYNAMIC"),
+            constraints=eff_exec_c,
+            assets=footage_manifest.get("assets"),
+            max_candidates=max_candidates,
+        )
+        div_check = validate_candidate_diversity(cand_list)
+        ranking = rank_candidates(cand_list)
+        ranking["diversity_check"] = div_check
+        candidate_decision = adopt_candidate(ranking, run_dir=rdir)
 
     fps = inp["media"]["fps_num"] / float(max(1, inp["media"]["fps_den"]))
 
@@ -623,7 +662,13 @@ def run_execute(
         kh03_overrides=kh03_ov,
     )
 
-    if kh02_res.get("exit_code", 1) != 0:
+    sb_path = rdir / "SHOTBOOK_V2.json"
+    shotbook = parse_json_strict(sb_path) if sb_path.is_file() else None
+    final_mp4_raw = kh02_res.get("final_mp4_path")
+    final_mp4_exists = bool(final_mp4_raw and Path(final_mp4_raw).is_file())
+    final_mp4_sha = hash_artifact(Path(final_mp4_raw)) if final_mp4_exists else None
+
+    if kh02_res.get("exit_code", 1) != 0 and not final_mp4_exists:
         transition_state(rdir, STATE_BLOCKED, reason=f"KH-02 pipeline returned {kh02_res.get('status')}", run_id=run_id)
         return {
             "exit_code": int(kh02_res.get("exit_code", 1)),
@@ -632,12 +677,6 @@ def run_execute(
             "selected_skill_id": skill_id,
             "kh02_result": kh02_res,
         }
-
-    sb_path = rdir / "SHOTBOOK_V2.json"
-    shotbook = parse_json_strict(sb_path) if sb_path.is_file() else None
-    final_mp4_raw = kh02_res.get("final_mp4_path")
-    final_mp4_exists = bool(final_mp4_raw and Path(final_mp4_raw).is_file())
-    final_mp4_sha = hash_artifact(Path(final_mp4_raw)) if final_mp4_exists else None
 
     transition_state(rdir, STATE_COMPILED, reason="KH-03 plan compiled cleanly through KH-02 pipeline.", run_id=run_id)
     if mode in ("preview", "full") and final_mp4_exists:
@@ -679,7 +718,32 @@ def run_execute(
         run_dir=(None if dry_run else rdir),
     )
 
+    final_render_qa = None
     if not dry_run and final_mp4_exists and final_mp4_sha:
+        # PED-08 P0: Invoke ALL final pixel/audio/action/spatial/layout/export QA gates on EXACT final muxed MP4 SHA-256!
+        apw_p = rdir / "analysis" / "ACTION_PROTECTION_WINDOWS.json"
+        apw_list = (parse_json_strict(apw_p).get("windows") or []) if apw_p.is_file() else []
+        trks_p = rdir / "analysis" / "TRACKS.json"
+        trks_list = (parse_json_strict(trks_p).get("entities") or []) if trks_p.is_file() else []
+        src_for_qa = kh02_res.get("derived_source_path") or inp.get("video_path")
+        final_render_qa = orchestrate_final_render_qa(
+            run_id=run_id,
+            run_dir=rdir,
+            final_mp4=final_mp4_raw,
+            source_mp4=src_for_qa,
+            creative_plan=creative_plan,
+            shotbook=shotbook,
+            layout_plan=eff_layout_plan,
+            motion_graph=eff_motion_graph,
+            evidence_ledger=evidence_ledger,
+            action_protection_windows=apw_list,
+            tracked_entities=trks_list,
+            kh02_result=kh02_res,
+            fps=fps,
+            license_decision=eff_lic,
+            engine_kind="NATIVE_SEECUT",
+            seecut_root=seecut_root,
+        )
         (rdir / "FINAL_RENDER_SHA256.txt").write_text(f"{final_mp4_sha}  {Path(final_mp4_raw).name}\n", encoding="utf-8")
         write_json_atomic(rdir / "qc" / "FINAL_QA.json", {
             "schema_version": "kh03.final_qa.v1",
@@ -690,7 +754,9 @@ def run_execute(
             "creative_plan_sha256": creative_plan["plan_sha256"],
             "motion_graph_sha256": (eff_motion_graph or {}).get("graph_sha256"),
             "gates": qa_rep["gates"],
-            "editorial_candidate_pass": qa_rep["editorial_candidate_pass"],
+            "final_gate_matrix": final_render_qa["gate_matrix"],
+            "technical_pass": final_render_qa["technical_pass"],
+            "editorial_candidate_pass": qa_rep["editorial_candidate_pass"] and final_render_qa["technical_pass"],
             "owner_visual": "PENDING",
             "owner_audio": "PENDING",
             "commercial_release": qa_rep["gates"]["COMMERCIAL_RELEASE"],
@@ -700,6 +766,7 @@ def run_execute(
                 f"# Owner Review Checklist — `{run_id}` (`{skill_id}`)",
                 "",
                 f"- **Final MP4 SHA-256**: `{final_mp4_sha}`",
+                f"- **Technical Pixel/Audio QA**: `{final_render_qa['gate_matrix']['overall_technical_status']}`",
                 "- **OWNER_VISUAL**: `PENDING` (requires human playback inspection)",
                 "- **OWNER_AUDIO**: `PENDING` (requires human listening inspection)",
                 f"- **COMMERCIAL_RELEASE**: `{qa_rep['gates']['COMMERCIAL_RELEASE']}`",
@@ -708,7 +775,7 @@ def run_execute(
             encoding="utf-8",
         )
 
-    # R1.07: Mode-truthful status — plan mode NEVER claims RENDER_CANDIDATE_VERIFIED or OWNER_PENDING final video!
+    # R1.07 + R4 PED-08: Mode-truthful status — rendered mode requires BOTH editorial pass AND final pixel QA pass!
     if mode == "plan":
         if qa_rep["editorial_candidate_pass"]:
             final_status = "KH03_PLAN_PASS"
@@ -717,15 +784,17 @@ def run_execute(
             final_status = "KH03_QA_DEFECTS"
             exit_c = 1
     elif mode in ("preview", "full"):
+        render_qa_ok = bool(final_render_qa is not None and final_render_qa.get("technical_pass"))
+        kh02_ok = int(kh02_res.get("exit_code", 1)) == 0
         if not final_mp4_exists:
             final_status = "KH03_RENDER_INCOMPLETE"
             exit_c = 1
-        elif qa_rep["editorial_candidate_pass"]:
+        elif kh02_ok and qa_rep["editorial_candidate_pass"] and render_qa_ok:
             final_status = "KH03_RENDER_CANDIDATE_VERIFIED" if mode == "full" else "KH03_PREVIEW_VERIFIED"
             exit_c = 0
             transition_state(rdir, STATE_CANDIDATE, reason=f"Rendered & verified ({final_status}); owner approvals PENDING.", run_id=run_id)
         else:
-            final_status = "KH03_QA_DEFECTS"
+            final_status = str(kh02_res.get("status")) if not kh02_ok else "KH03_QA_DEFECTS"
             exit_c = 1
     else:
         final_status = "KH03_PLAN_PASS" if qa_rep["editorial_candidate_pass"] else "KH03_QA_DEFECTS"
@@ -740,8 +809,10 @@ def run_execute(
             "qa_report_sha256": hash_artifact(qa_rep),
             "shotbook_sha256": kh02_res.get("shotbook_sha256"),
             "final_mp4_sha256": final_mp4_sha,
+            "final_pixel_qa_sha256": hash_artifact(final_render_qa["final_pixel_qa"]) if final_render_qa else None,
         },
-        evidence_paths=[str(rdir / "qc/KH03_QA_REPORT.json")] + ([str(final_mp4_raw)] if final_mp4_exists else []),
+        evidence_paths=[str(rdir / "qc/KH03_QA_REPORT.json")]
+        + ([str(final_mp4_raw), str(rdir / "qc/FINAL_PIXEL_QA.json"), str(rdir / "qc/FINAL_GATE_MATRIX.json")] if final_mp4_exists and final_render_qa else []),
         test_only=(not production_mode),
     )
 
@@ -757,6 +828,8 @@ def run_execute(
         "final_mp4_path": final_mp4_raw if final_mp4_exists else None,
         "final_mp4_sha256": final_mp4_sha,
         "qa_report": qa_rep,
+        "final_render_qa": final_render_qa,
+        "candidate_decision": candidate_decision,
         "kh02_status": kh02_res.get("status"),
     }
 
@@ -849,6 +922,17 @@ def run_verify(*, run_root: Path, production_mode: bool = True, require_render: 
                 recorded_sha = sha_txt.read_text(encoding="utf-8").strip().split()[0]
                 if recorded_sha != mp4_sha or (mp4_paths and mp4_paths[0].is_file() and hash_artifact(mp4_paths[0]) != recorded_sha):
                     issues.append("TAMPERED_FINAL_MP4: FINAL_RENDER_SHA256.txt does not match final MP4 on disk.")
+            fpq = rdir / "qc" / "FINAL_PIXEL_QA.json"
+            fgm = rdir / "qc" / "FINAL_GATE_MATRIX.json"
+            if not fpq.is_file() or not fgm.is_file():
+                issues.append("MISSING_FINAL_PIXEL_QA: require_render=True requires FINAL_PIXEL_QA.json and FINAL_GATE_MATRIX.json.")
+            else:
+                fpq_doc = parse_json_strict(fpq)
+                fgm_doc = parse_json_strict(fgm)
+                if fpq_doc.get("final_mp4_sha256") != mp4_sha or fgm_doc.get("final_mp4_sha256") != mp4_sha:
+                    issues.append("STALE_OR_TAMPERED_FINAL_QA: FINAL_PIXEL_QA/FINAL_GATE_MATRIX SHA does not match final MP4.")
+                if not fgm_doc.get("technical_pass"):
+                    issues.append(f"FINAL_QA_GATES_FAILED: {fgm_doc.get('failing_gates') or fgm_doc.get('overall_technical_status')}")
 
     return {
         "exit_code": 0 if not issues else 1,
@@ -906,8 +990,11 @@ def main(argv: list[str] | None = None) -> int:
     p_exe.add_argument("--max-disk", type=float, default=None)
     p_exe.add_argument("--max-memory-mib", type=int, default=None)
     p_exe.add_argument("--queue-frames", type=int, default=2)
-    p_exe.add_argument("--enable-tracking", action="store_true", default=False)
+    p_exe.add_argument("--enable-tracking", action="store_true", default=None)
+    p_exe.add_argument("--disable-tracking", action="store_true", default=False)
     p_exe.add_argument("--reduced-motion", action="store_true", default=False)
+    p_exe.add_argument("--compete-candidates", action="store_true", default=False)
+    p_exe.add_argument("--max-candidates", type=int, default=3)
     p_exe.add_argument("--online-opt-in", action="store_true", default=False)
     p_exe.add_argument("--run-h2", action="store_true", default=False)
     p_exe.add_argument("--compare-baseline", action="append", type=Path, default=None)
@@ -976,8 +1063,10 @@ def main(argv: list[str] | None = None) -> int:
             max_disk_gib=args.max_disk,
             max_memory_mib=args.max_memory_mib,
             queue_frames=args.queue_frames,
-            enable_tracking=args.enable_tracking,
+            enable_tracking=(False if args.disable_tracking else args.enable_tracking),
             reduced_motion=args.reduced_motion,
+            compete_candidates=args.compete_candidates,
+            max_candidates=args.max_candidates,
             offline=(not args.online_opt_in),
             online_opt_in=args.online_opt_in,
             run_h2=args.run_h2,

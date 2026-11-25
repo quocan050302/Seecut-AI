@@ -637,25 +637,271 @@ class AtomicKeyedCache:
         }
 
 
+class CancellationToken:
+    """Thread-safe cooperative cancellation token with monotonic timestamp & reason (PED-10)."""
+
+    def __init__(self) -> None:
+        self._ev = threading.Event()
+        self._lock = threading.Lock()
+        self._reason: str | None = None
+        self._cancelled_at: str | None = None
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._ev.is_set()
+
+    @property
+    def reason(self) -> str | None:
+        with self._lock:
+            return self._reason
+
+    @property
+    def cancelled_at_utc(self) -> str | None:
+        with self._lock:
+            return self._cancelled_at
+
+    def cancel(self, reason: str = "CANCELLED") -> None:
+        with self._lock:
+            if not self._ev.is_set():
+                self._reason = str(reason)
+                self._cancelled_at = now_utc()
+                self._ev.set()
+
+    def check(self) -> None:
+        if self._ev.is_set():
+            raise CancelledTaskError(self.reason or "CANCELLED")
+
+
+class CancelledTaskError(RuntimeError):
+    """Raised cooperatively when a task's CancellationToken or lease is revoked."""
+
+
+class LateWriteRejectedError(PermissionError):
+    """Raised when a cancelled/expired worker attempts to publish to coordinator-owned outputs."""
+
+
+class TaskLease:
+    """Coordinator-owned generation lease binding a single task attempt to an isolated staging dir."""
+
+    def __init__(self, *, task_id: str, attempt: int, lease_id: str, staging_dir: Path) -> None:
+        self.task_id = sanitize_identifier(task_id)
+        self.attempt = int(attempt)
+        self.lease_id = str(lease_id)
+        self.staging_dir = staging_dir
+        self._lock = threading.Lock()
+        self._active = True
+        self._revoked_reason: str | None = None
+
+    @property
+    def is_active(self) -> bool:
+        with self._lock:
+            return self._active
+
+    @property
+    def revoked_reason(self) -> str | None:
+        with self._lock:
+            return self._revoked_reason
+
+    def revoke(self, reason: str = "LEASE_REVOKED") -> None:
+        with self._lock:
+            if self._active:
+                self._active = False
+                self._revoked_reason = str(reason)
+
+
+class CoordinatorPublisher:
+    """Single-coordinator atomic publisher enforcing active lease, no cancellation, and schema/SHA validation."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.published: list[dict[str, Any]] = []
+        self.rejected: list[dict[str, Any]] = []
+
+    def publish_staged_file(
+        self,
+        lease: TaskLease,
+        cancel_token: CancellationToken,
+        staged_path: Path,
+        final_path: Path,
+        *,
+        schema_name: str | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            if not lease.is_active or cancel_token.is_cancelled:
+                rec = {
+                    "task_id": lease.task_id,
+                    "attempt": lease.attempt,
+                    "lease_id": lease.lease_id,
+                    "final_path": str(final_path),
+                    "status": "LATE_WRITE_REJECTED",
+                    "reason": lease.revoked_reason or cancel_token.reason or "LEASE_INACTIVE",
+                    "at_utc": now_utc(),
+                }
+                self.rejected.append(rec)
+                raise LateWriteRejectedError(
+                    f"LATE_WRITE_REJECTED({lease.task_id}#{lease.attempt}): {rec['reason']}"
+                )
+            st_real = Path(os.path.realpath(str(staged_path)))
+            stage_root = Path(os.path.realpath(str(lease.staging_dir)))
+            if not str(st_real).startswith(str(stage_root) + os.sep) or not st_real.is_file():
+                raise ValueError(f"INVALID_STAGED_PATH: {staged_path} outside {lease.staging_dir}")
+            if schema_name is not None:
+                doc = parse_json_strict(st_real)
+                assert_kh03_schema(doc, schema_name)
+            sha = hash_artifact(st_real)
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_dst = final_path.parent / f".{final_path.name}.{lease.lease_id}.part"
+            shutil.copy2(st_real, tmp_dst)
+            os.replace(tmp_dst, final_path)
+            rec = {
+                "task_id": lease.task_id,
+                "attempt": lease.attempt,
+                "lease_id": lease.lease_id,
+                "final_path": str(final_path),
+                "sha256": sha,
+                "status": "PUBLISHED",
+                "at_utc": now_utc(),
+            }
+            self.published.append(rec)
+            return rec
+
+
+def run_subprocess_isolated(
+    cmd: list[str],
+    *,
+    cancel_token: CancellationToken | None = None,
+    timeout_sec: float = 120.0,
+    cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
+    poll_interval_sec: float = 0.05,
+    grace_sec: float = 0.35,
+) -> dict[str, Any]:
+    """Run external process in isolated OS process group with hard kill/reap on timeout or cancellation (PED-10)."""
+    t0 = time.monotonic()
+    popen_kw: dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "cwd": str(cwd) if cwd else None,
+        "env": env,
+    }
+    if os.name == "posix":
+        popen_kw["start_new_session"] = True
+    elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+    proc = subprocess.Popen(cmd, **popen_kw)
+    timed_out = False
+    cancelled = False
+    cleanup: dict[str, Any] = {"pid": proc.pid, "clean": True, "already_exited": False, "method": "normal_exit"}
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    def _drain(pipe: Any, sink: list[str]) -> None:
+        if pipe is None:
+            return
+        try:
+            sink.append(pipe.read())
+        except Exception:
+            pass
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+    t_out = threading.Thread(target=_drain, args=(proc.stdout, stdout_chunks), daemon=True)
+    t_err = threading.Thread(target=_drain, args=(proc.stderr, stderr_chunks), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    try:
+        while proc.poll() is None:
+            if cancel_token is not None and cancel_token.is_cancelled:
+                cancelled = True
+                cleanup = terminate_process_tree(proc, grace_sec=grace_sec)
+                break
+            if (time.monotonic() - t0) >= float(timeout_sec):
+                timed_out = True
+                cleanup = terminate_process_tree(proc, grace_sec=grace_sec)
+                break
+            time.sleep(max(0.01, float(poll_interval_sec)))
+    finally:
+        if proc.poll() is None:
+            cleanup = terminate_process_tree(proc, grace_sec=grace_sec)
+        t_out.join(timeout=1.5)
+        t_err.join(timeout=1.5)
+
+    rc = proc.returncode if proc.returncode is not None else -9
+    return {
+        "cmd": list(cmd),
+        "pid": proc.pid,
+        "returncode": rc,
+        "stdout": "".join(stdout_chunks),
+        "stderr": "".join(stderr_chunks),
+        "timed_out": timed_out,
+        "cancelled": cancelled,
+        "wall_sec": round(time.monotonic() - t0, 4),
+        "cleanup": cleanup,
+        "reaped": proc.poll() is not None,
+    }
+
+
+@dataclass
+class TaskContext:
+    """Execution context handed to cooperative 2-arg DAG tasks `fn(deps, ctx)`."""
+
+    task_id: str
+    attempt: int
+    lease: TaskLease
+    cancel_token: CancellationToken
+    staging_dir: Path
+    publisher: CoordinatorPublisher
+
+    def check_cancelled(self) -> None:
+        if self.cancel_token.is_cancelled or not self.lease.is_active:
+            raise CancelledTaskError(self.cancel_token.reason or self.lease.revoked_reason or "CANCELLED")
+
+    def stage_json(self, rel_name: str, payload: Any) -> Path:
+        self.check_cancelled()
+        safe_rel = Path(rel_name).name
+        dst = self.staging_dir / safe_rel
+        self.staging_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(dst, payload)
+        return dst
+
+    def publish_json(self, rel_name: str, payload: Any, final_path: Path, *, schema_name: str | None = None) -> dict[str, Any]:
+        st = self.stage_json(rel_name, payload)
+        return self.publisher.publish_staged_file(self.lease, self.cancel_token, st, final_path, schema_name=schema_name)
+
+    def run_subprocess(self, cmd: list[str], *, timeout_sec: float = 120.0, cwd: str | Path | None = None) -> dict[str, Any]:
+        self.check_cancelled()
+        return run_subprocess_isolated(cmd, cancel_token=self.cancel_token, timeout_sec=timeout_sec, cwd=cwd)
+
+
 @dataclass(frozen=True)
 class DAGTask:
     task_id: str
-    fn: Callable[[dict[str, Any]], Any]
+    fn: Callable[..., Any]
     deps: tuple[str, ...] = ()
     pool: str = "cpu"  # "cpu" | "network" | "heavy" | "decoder"
     timeout_sec: float = 120.0
     retries: int = 0
+    retry_backoff_sec: float = 0.08
+    fail_fast_global: bool = False
 
 
 class BoundedAsyncExecutor:
-    """Deterministic bounded async DAG executor using asyncio.Semaphore + bounded ThreadPoolExecutor.
+    """Hardened deterministic bounded async DAG executor (CMI-10 + PED-10).
 
     Guarantees:
-    - Tasks execute only after ALL dependencies succeed; any failure propagates immediately to dependents
-      (dependent tasks are marked `BLOCKED_UPSTREAM_FAIL` and never execute).
-    - Results, receipts, and trace are aggregated strictly sorted by `task_id` (NEVER completion order!),
-      so workers=1, workers=2, and workers=4 yield identical canonical hashes!
-    - Enforces per-pool semaphores (cpu/workers, network<=2, heavy=1, decoder<=2) and monitors RSS/disk high-water.
+    - Dependency DAG enforcement with cycle/missing-dep rejection and upstream fail-fast propagation.
+    - Cooperative CancellationToken + per-attempt TaskLease & isolated staging directory.
+    - Coordinator-only atomic publishing rejecting late/ghost writes (`LATE_WRITE_REJECTED`).
+    - Worker termination verification & quarantine (`BLOCKED_CANCELLATION`) when an uncooperative
+      thread refuses to stop within grace after timeout/cancel — never spawns overlapping retry.
+    - Mid-flight disk reserve check (`BLOCKED_LOW_DISK`), bounded retries with exponential backoff,
+      and canonical sorted aggregation (`workers=1 == 2 == 4`).
     """
 
     def __init__(
@@ -664,6 +910,7 @@ class BoundedAsyncExecutor:
         run_id: str,
         budget: dict[str, Any],
         run_dir: Path | None = None,
+        reap_grace_sec: float = 0.35,
     ) -> None:
         self.run_id = run_id
         self.budget = dict(budget)
@@ -672,8 +919,12 @@ class BoundedAsyncExecutor:
         self.network_workers = max(1, min(2, int(budget.get("network_workers", 2))))
         self.heavy_concurrency = 1
         self.decoder_pool = max(1, min(2, int(budget.get("decoder_pool", 2))))
+        self.reap_grace_sec = max(0.05, float(reap_grace_sec))
         self.peak_rss_mib = get_process_rss_mib()
         self.min_free_disk_gib = float(budget.get("free_disk_gib", 10.0))
+        self.disk_reserve_gib = float(budget.get("disk_reserve_gib", DEFAULT_DISK_RESERVE_GIB))
+        self.publisher = CoordinatorPublisher()
+        self.global_cancel = CancellationToken()
 
     def _validate_dag(self, tasks: list[DAGTask]) -> dict[str, DAGTask]:
         by_id: dict[str, DAGTask] = {}
@@ -682,7 +933,6 @@ class BoundedAsyncExecutor:
             if tid in by_id:
                 raise ValueError(f"DUPLICATE_DAG_TASK_ID: {tid}")
             by_id[tid] = t
-        # Cycle & missing-dependency check (Kahn's algorithm)
         indeg = {tid: 0 for tid in by_id}
         adj: dict[str, list[str]] = {tid: [] for tid in by_id}
         for tid, t in by_id.items():
@@ -704,6 +954,31 @@ class BoundedAsyncExecutor:
             raise ValueError("DAG_CYCLE_DETECTED: task graph contains a dependency cycle.")
         return by_id
 
+    @staticmethod
+    def _accepts_context(fn: Callable[..., Any]) -> bool:
+        import inspect
+        try:
+            sig = inspect.signature(fn)
+            params = [
+                p for p in sig.parameters.values()
+                if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            ]
+            has_var = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
+            return has_var or len(params) >= 2
+        except Exception:
+            return False
+
+    def _check_disk_ok(self) -> tuple[bool, float]:
+        if self.run_dir is None:
+            return True, self.min_free_disk_gib
+        try:
+            chk = self.run_dir if self.run_dir.exists() else self.run_dir.parent
+            free_gib = round(shutil.disk_usage(str(chk)).free / (1024.0 ** 3), 3)
+            self.min_free_disk_gib = min(self.min_free_disk_gib, free_gib)
+            return (free_gib >= self.disk_reserve_gib), free_gib
+        except Exception:
+            return True, self.min_free_disk_gib
+
     async def _run_async(self, tasks: list[DAGTask]) -> dict[str, Any]:
         by_id = self._validate_dag(tasks)
         semaphores = {
@@ -715,107 +990,233 @@ class BoundedAsyncExecutor:
         results: dict[str, Any] = {}
         receipts: dict[str, dict[str, Any]] = {}
         trace_events: list[dict[str, Any]] = []
+        cancellation_events: list[dict[str, Any]] = []
+        quarantined_workers: list[dict[str, Any]] = []
         done_events: dict[str, asyncio.Event] = {tid: asyncio.Event() for tid in by_id}
         t_start_all = time.monotonic()
 
-        with ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="kh03_dag") as pool:
-            loop = asyncio.get_running_loop()
+        staging_base = (self.run_dir / "staging" / "dag_attempts") if self.run_dir is not None else None
+        if staging_base is not None:
+            staging_base.mkdir(parents=True, exist_ok=True)
+            (staging_base / OWNERSHIP_MARKER).write_text(f"{self.run_id}\n", encoding="utf-8")
 
-            async def _run_one(t: DAGTask) -> None:
-                tid = t.task_id
-                try:
-                    # Wait for all upstream dependencies
-                    for dep in t.deps:
-                        await done_events[dep].wait()
-                    failed_deps = [d for d in t.deps if receipts.get(d, {}).get("status") != "PASS"]
-                    if failed_deps:
-                        receipts[tid] = {
-                            "task_id": tid,
-                            "deps": list(t.deps),
-                            "pool": t.pool,
-                            "status": "BLOCKED_UPSTREAM_FAIL",
-                            "reason": f"Upstream failed/cancelled: {failed_deps}",
-                            "output_sha256": None,
-                            "duration_sec": 0.0,
-                            "rss_mib": get_process_rss_mib(),
-                        }
-                        trace_events.append({"task_id": tid, "event": "blocked_upstream", "deps": failed_deps})
-                        return
+        # Cooperative SIGINT/SIGTERM wiring when running on main thread
+        prev_sigint = None
+        prev_sigterm = None
+        installed_sigs = False
+        if threading.current_thread() is threading.main_thread():
+            def _on_sig(signum: int, _frame: Any) -> None:
+                self.global_cancel.cancel(f"SIGNAL_{signum}")
+            try:
+                prev_sigint = signal.getsignal(signal.SIGINT)
+                prev_sigterm = signal.getsignal(signal.SIGTERM)
+                signal.signal(signal.SIGINT, _on_sig)
+                signal.signal(signal.SIGTERM, _on_sig)
+                installed_sigs = True
+            except Exception:
+                installed_sigs = False
 
-                    dep_outputs = {d: results[d] for d in sorted(t.deps)}
-                    sem = semaphores.get(t.pool, semaphores["cpu"])
-                    async with sem:
-                        t0 = time.monotonic()
-                        trace_events.append({"task_id": tid, "event": "start", "pool": t.pool})
-                        last_err: Exception | None = None
-                        for attempt in range(max(0, int(t.retries)) + 1):
+        async def _run_one(t: DAGTask) -> None:
+            tid = t.task_id
+            takes_ctx = self._accepts_context(t.fn)
+            try:
+                for dep in t.deps:
+                    await done_events[dep].wait()
+
+                if self.global_cancel.is_cancelled:
+                    receipts[tid] = {
+                        "task_id": tid, "deps": list(t.deps), "pool": t.pool,
+                        "status": "CANCELLED", "reason": self.global_cancel.reason or "GLOBAL_CANCEL",
+                        "output_sha256": None, "duration_sec": 0.0, "rss_mib": get_process_rss_mib(),
+                    }
+                    trace_events.append({"task_id": tid, "event": "cancelled_before_start", "reason": self.global_cancel.reason})
+                    return
+
+                failed_deps = [d for d in t.deps if receipts.get(d, {}).get("status") != "PASS"]
+                if failed_deps:
+                    receipts[tid] = {
+                        "task_id": tid, "deps": list(t.deps), "pool": t.pool,
+                        "status": "BLOCKED_UPSTREAM_FAIL", "reason": f"Upstream failed/cancelled: {failed_deps}",
+                        "output_sha256": None, "duration_sec": 0.0, "rss_mib": get_process_rss_mib(),
+                    }
+                    trace_events.append({"task_id": tid, "event": "blocked_upstream", "deps": failed_deps})
+                    return
+
+                disk_ok, free_gib = self._check_disk_ok()
+                if not disk_ok:
+                    self.global_cancel.cancel(f"BLOCKED_LOW_DISK({free_gib}GiB<{self.disk_reserve_gib}GiB)")
+                    receipts[tid] = {
+                        "task_id": tid, "deps": list(t.deps), "pool": t.pool,
+                        "status": "BLOCKED_LOW_DISK",
+                        "reason": f"Mid-flight free disk {free_gib:.2f} GiB below reserve {self.disk_reserve_gib:.2f} GiB.",
+                        "output_sha256": None, "duration_sec": 0.0, "rss_mib": get_process_rss_mib(),
+                    }
+                    trace_events.append({"task_id": tid, "event": "blocked_low_disk", "free_disk_gib": free_gib})
+                    return
+
+                dep_outputs = {d: results[d] for d in sorted(t.deps)}
+                sem = semaphores.get(t.pool, semaphores["cpu"])
+                async with sem:
+                    t0 = time.monotonic()
+                    trace_events.append({"task_id": tid, "event": "start", "pool": t.pool})
+                    last_err: Exception | None = None
+                    final_status: str | None = None
+                    max_attempts = max(0, int(t.retries)) + 1
+
+                    for attempt in range(1, max_attempts + 1):
+                        if self.global_cancel.is_cancelled:
+                            final_status = "CANCELLED"
+                            last_err = CancelledTaskError(self.global_cancel.reason or "GLOBAL_CANCEL")
+                            break
+
+                        lease_id = f"{sanitize_identifier(tid)}_a{attempt}_{hash_artifact([self.run_id, tid, attempt])[:8]}"
+                        stage_dir = (staging_base / lease_id) if staging_base is not None else Path(os.path.join(os.path.expanduser("~"), ".kh03_tmp_noop", lease_id))
+                        if staging_base is not None:
+                            stage_dir.mkdir(parents=True, exist_ok=True)
+                        lease = TaskLease(task_id=tid, attempt=attempt, lease_id=lease_id, staging_dir=stage_dir)
+                        tok = CancellationToken()
+                        ctx = TaskContext(
+                            task_id=tid, attempt=attempt, lease=lease,
+                            cancel_token=tok, staging_dir=stage_dir, publisher=self.publisher,
+                        )
+                        box: dict[str, Any] = {"done": False, "val": None, "err": None}
+
+                        def _worker_entry() -> None:
                             try:
-                                val = await asyncio.wait_for(
-                                    loop.run_in_executor(pool, t.fn, dep_outputs),
-                                    timeout=t.timeout_sec,
-                                )
-                                dur = round(time.monotonic() - t0, 4)
-                                rss = get_process_rss_mib()
-                                self.peak_rss_mib = max(self.peak_rss_mib, rss)
-                                results[tid] = val
-                                out_sha = hash_artifact(val) if isinstance(val, (dict, list, str, int, float, bool)) else None
-                                receipts[tid] = {
-                                    "task_id": tid,
-                                    "deps": list(t.deps),
-                                    "pool": t.pool,
-                                    "status": "PASS",
-                                    "attempts": attempt + 1,
-                                    "output_sha256": out_sha,
-                                    "duration_sec": dur,
-                                    "rss_mib": rss,
-                                }
-                                trace_events.append({"task_id": tid, "event": "pass", "duration_sec": dur, "rss_mib": rss})
-                                last_err = None
-                                break
-                            except asyncio.TimeoutError as ex:
-                                last_err = TimeoutError(f"TASK_TIMEOUT({tid}): exceeded {t.timeout_sec}s")
-                                break
-                            except asyncio.CancelledError:
-                                receipts[tid] = {
-                                    "task_id": tid,
-                                    "deps": list(t.deps),
-                                    "pool": t.pool,
-                                    "status": "CANCELLED",
-                                    "reason": "Task cancelled cleanly.",
-                                    "output_sha256": None,
-                                    "duration_sec": round(time.monotonic() - t0, 4),
-                                    "rss_mib": get_process_rss_mib(),
-                                }
-                                trace_events.append({"task_id": tid, "event": "cancelled"})
-                                raise
-                            except Exception as ex:
-                                last_err = ex
-                        if last_err is not None:
-                            dur = round(time.monotonic() - t0, 4)
-                            receipts[tid] = {
-                                "task_id": tid,
-                                "deps": list(t.deps),
-                                "pool": t.pool,
-                                "status": "TIMEOUT" if isinstance(last_err, TimeoutError) else "FAIL",
-                                "reason": str(last_err)[:300],
-                                "output_sha256": None,
-                                "duration_sec": dur,
-                                "rss_mib": get_process_rss_mib(),
-                            }
-                            trace_events.append({"task_id": tid, "event": "fail", "reason": str(last_err)[:200]})
-                finally:
-                    done_events[tid].set()
+                                if self.global_cancel.is_cancelled:
+                                    tok.cancel(self.global_cancel.reason or "GLOBAL_CANCEL")
+                                res_v = t.fn(dep_outputs, ctx) if takes_ctx else t.fn(dep_outputs)
+                                box["val"] = res_v
+                            except Exception as exc:
+                                box["err"] = exc
+                            finally:
+                                box["done"] = True
 
+                        th = threading.Thread(target=_worker_entry, name=f"kh03_{tid}_a{attempt}", daemon=True)
+                        th.start()
+                        deadline = time.monotonic() + float(t.timeout_sec)
+                        timed_out = False
+                        while th.is_alive():
+                            if self.global_cancel.is_cancelled:
+                                lease.revoke(self.global_cancel.reason or "GLOBAL_CANCEL")
+                                tok.cancel(self.global_cancel.reason or "GLOBAL_CANCEL")
+                                break
+                            if time.monotonic() >= deadline:
+                                timed_out = True
+                                lease.revoke(f"TASK_TIMEOUT({tid}:{t.timeout_sec}s)")
+                                tok.cancel(f"TASK_TIMEOUT({tid}:{t.timeout_sec}s)")
+                                break
+                            await asyncio.sleep(0.015)
+
+                        if timed_out or self.global_cancel.is_cancelled:
+                            # Wait bounded grace for worker thread to exit cleanly; NEVER silently reuse staging if still alive!
+                            grace_end = time.monotonic() + self.reap_grace_sec
+                            while th.is_alive() and time.monotonic() < grace_end:
+                                await asyncio.sleep(0.015)
+                            stopped_cleanly = not th.is_alive()
+                            ev_rec = {
+                                "task_id": tid,
+                                "attempt": attempt,
+                                "lease_id": lease_id,
+                                "reason": lease.revoked_reason or ("TIMEOUT" if timed_out else "CANCELLED"),
+                                "lease_revoked": not lease.is_active,
+                                "worker_stopped_cleanly": stopped_cleanly,
+                                "quarantined": not stopped_cleanly,
+                                "at_utc": now_utc(),
+                            }
+                            cancellation_events.append(ev_rec)
+                            if not stopped_cleanly:
+                                quarantined_workers.append(ev_rec)
+                                final_status = "BLOCKED_CANCELLATION"
+                                last_err = TimeoutError(f"BLOCKED_CANCELLATION({tid}): uncooperative worker quarantined after {t.timeout_sec}s")
+                                trace_events.append({"task_id": tid, "event": "quarantined", "attempt": attempt})
+                                # Do NOT spawn overlapping retry while old worker is still alive!
+                                break
+                            # Clean cooperative stop -> safe to clean staging dir
+                            if staging_base is not None and stage_dir.is_dir():
+                                shutil.rmtree(stage_dir, ignore_errors=True)
+                            final_status = "TIMEOUT" if timed_out else "CANCELLED"
+                            last_err = TimeoutError(f"TASK_TIMEOUT({tid}): exceeded {t.timeout_sec}s") if timed_out else CancelledTaskError("CANCELLED")
+                            if timed_out and attempt < max_attempts and not self.global_cancel.is_cancelled:
+                                trace_events.append({"task_id": tid, "event": "retry_after_clean_timeout", "attempt": attempt})
+                                await asyncio.sleep(min(1.0, t.retry_backoff_sec * (2 ** (attempt - 1))))
+                                continue
+                            break
+
+                        th.join(timeout=0.05)
+                        if box["err"] is not None:
+                            err_obj = box["err"]
+                            lease.revoke(f"TASK_ERROR({type(err_obj).__name__})")
+                            if staging_base is not None and stage_dir.is_dir():
+                                shutil.rmtree(stage_dir, ignore_errors=True)
+                            last_err = err_obj
+                            if isinstance(err_obj, (CancelledTaskError, LateWriteRejectedError, PermissionError, ValueError)):
+                                final_status = "CANCELLED" if isinstance(err_obj, CancelledTaskError) else "FAIL"
+                                break
+                            if attempt < max_attempts:
+                                trace_events.append({"task_id": tid, "event": "retry_transient", "attempt": attempt, "error": str(err_obj)[:160]})
+                                await asyncio.sleep(min(1.0, t.retry_backoff_sec * (2 ** (attempt - 1))))
+                                continue
+                            final_status = "FAIL"
+                            break
+
+                        # Worker succeeded cleanly -> verify lease still active before committing result
+                        if not lease.is_active or self.global_cancel.is_cancelled:
+                            final_status = "CANCELLED"
+                            last_err = LateWriteRejectedError(f"LATE_RESULT_DISCARDED({tid})")
+                            break
+
+                        val = box["val"]
+                        dur = round(time.monotonic() - t0, 4)
+                        rss = get_process_rss_mib()
+                        self.peak_rss_mib = max(self.peak_rss_mib, rss)
+                        results[tid] = val
+                        out_sha = hash_artifact(val) if isinstance(val, (dict, list, str, int, float, bool)) else None
+                        receipts[tid] = {
+                            "task_id": tid, "deps": list(t.deps), "pool": t.pool,
+                            "status": "PASS", "attempts": attempt, "lease_id": lease_id,
+                            "output_sha256": out_sha, "duration_sec": dur, "rss_mib": rss,
+                        }
+                        trace_events.append({"task_id": tid, "event": "pass", "attempts": attempt, "duration_sec": dur, "rss_mib": rss})
+                        lease.revoke("COMPLETED_OK")
+                        if staging_base is not None and stage_dir.is_dir():
+                            shutil.rmtree(stage_dir, ignore_errors=True)
+                        last_err = None
+                        final_status = "PASS"
+                        break
+
+                    if final_status != "PASS":
+                        dur = round(time.monotonic() - t0, 4)
+                        if t.fail_fast_global:
+                            self.global_cancel.cancel(f"FAIL_FAST({tid}): {last_err}")
+                        receipts[tid] = {
+                            "task_id": tid, "deps": list(t.deps), "pool": t.pool,
+                            "status": final_status or "FAIL",
+                            "reason": str(last_err)[:300] if last_err else "FAILED",
+                            "output_sha256": None, "duration_sec": dur, "rss_mib": get_process_rss_mib(),
+                        }
+                        trace_events.append({"task_id": tid, "event": (final_status or "fail").lower(), "reason": str(last_err)[:200]})
+            finally:
+                done_events[tid].set()
+
+        try:
             async with asyncio.TaskGroup() as tg:
                 for tid in sorted(by_id.keys()):
                     tg.create_task(_run_one(by_id[tid]))
+        finally:
+            if installed_sigs:
+                try:
+                    signal.signal(signal.SIGINT, prev_sigint)
+                    signal.signal(signal.SIGTERM, prev_sigterm)
+                except Exception:
+                    pass
 
         wall_sec = round(time.monotonic() - t_start_all, 4)
-        # Canonical sorted aggregation (order-independent across workers=1/2/4!)
         ordered_ids = sorted(by_id.keys())
         ordered_receipts = [receipts[tid] for tid in ordered_ids]
         ordered_results = {tid: results[tid] for tid in ordered_ids if tid in results}
-        all_ok = all(r["status"] == "PASS" for r in ordered_receipts)
+        blocked_cancellation = len(quarantined_workers) > 0
+        all_ok = all(r["status"] == "PASS" for r in ordered_receipts) and not blocked_cancellation
 
         dag_doc = {
             "schema_version": "kh03.task_dag.v1",
@@ -823,15 +1224,48 @@ class BoundedAsyncExecutor:
             "workers": self.workers,
             "nodes": [{"task_id": tid, "deps": list(by_id[tid].deps), "pool": by_id[tid].pool} for tid in ordered_ids],
             "all_pass": all_ok,
+            "blocked_cancellation": blocked_cancellation,
+            "quarantined_worker_count": len(quarantined_workers),
+            "late_writes_rejected": len(self.publisher.rejected),
             "canonical_output_hashes": {r["task_id"]: r["output_sha256"] for r in ordered_receipts},
         }
         dag_doc["canonical_dag_sha256"] = hash_artifact(dag_doc["canonical_output_hashes"])
+
+        cancel_proof = {
+            "schema_version": "kh03.cancellation_proof.v1",
+            "run_id": self.run_id,
+            "global_cancelled": self.global_cancel.is_cancelled,
+            "global_cancel_reason": self.global_cancel.reason,
+            "cancellation_events": cancellation_events,
+            "quarantined_workers": quarantined_workers,
+            "blocked_cancellation": blocked_cancellation,
+            "published_artifacts": self.publisher.published,
+            "late_writes_rejected": self.publisher.rejected,
+            "all_workers_reaped": len(quarantined_workers) == 0,
+        }
+
+        async_metrics = {
+            "schema_version": "kh03.async_metrics.v1",
+            "run_id": self.run_id,
+            "workers": self.workers,
+            "network_workers": self.network_workers,
+            "heavy_concurrency": self.heavy_concurrency,
+            "decoder_pool": self.decoder_pool,
+            "task_count": len(ordered_receipts),
+            "passed_tasks": sum(1 for r in ordered_receipts if r["status"] == "PASS"),
+            "wall_sec": wall_sec,
+            "peak_rss_mib": self.peak_rss_mib,
+            "min_free_disk_gib": self.min_free_disk_gib,
+            "canonical_dag_sha256": dag_doc["canonical_dag_sha256"],
+            "blocked_cancellation": blocked_cancellation,
+        }
 
         if self.run_dir is not None:
             mdir = self.run_dir / "manifests"
             mdir.mkdir(parents=True, exist_ok=True)
             write_json_atomic(mdir / "TASK_DAG.json", dag_doc)
-            # Atomic JSONL write for receipts and trace
+            write_json_atomic(mdir / "CANCELLATION_PROOF.json", cancel_proof)
+            write_json_atomic(mdir / "ASYNC_METRICS.json", async_metrics)
             rec_tmp = mdir / "TASK_RECEIPTS.jsonl.part"
             rec_tmp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in ordered_receipts) + "\n", encoding="utf-8")
             rec_tmp.replace(mdir / "TASK_RECEIPTS.jsonl")
@@ -851,12 +1285,25 @@ class BoundedAsyncExecutor:
                 "memory_budget_mib": self.budget.get("memory_budget_mib"),
                 "wall_sec": wall_sec,
             })
+            # Clean empty staging dir ONLY when zero quarantined workers remain!
+            if staging_base is not None and len(quarantined_workers) == 0:
+                try:
+                    for ch in list(staging_base.iterdir()):
+                        if ch.is_dir():
+                            shutil.rmtree(ch, ignore_errors=True)
+                except Exception:
+                    pass
 
         return {
             "pass": all_ok,
             "workers": self.workers,
             "wall_sec": wall_sec,
             "peak_rss_mib": self.peak_rss_mib,
+            "blocked_cancellation": blocked_cancellation,
+            "quarantined_workers": quarantined_workers,
+            "late_writes_rejected": self.publisher.rejected,
+            "cancellation_proof": cancel_proof,
+            "async_metrics": async_metrics,
             "dag": dag_doc,
             "receipts": ordered_receipts,
             "results": ordered_results,
@@ -867,7 +1314,6 @@ class BoundedAsyncExecutor:
         """Run DAG synchronously via a dedicated event loop (safe inside sync CLI or existing event loops)."""
         try:
             asyncio.get_running_loop()
-            # Inside an existing running loop: run cleanly on a helper thread
             with ThreadPoolExecutor(max_workers=1) as ex:
                 return ex.submit(lambda: asyncio.run(self._run_async(tasks))).result()
         except RuntimeError:

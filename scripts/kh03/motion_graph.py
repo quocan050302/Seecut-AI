@@ -42,6 +42,194 @@ _FAKE_URGENCY_RE = re.compile(
 )
 
 
+def build_hook_intent(
+    context: dict[str, Any],
+    beat: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """PED-01 universal hook intent resolver grounded strictly in content semantics (never fabricates paradoxes!)."""
+    txt = str((beat or {}).get("text") or context.get("opening_text") or "").strip()
+    has_neg = bool((beat or {}).get("has_negation") or context.get("has_negation"))
+    has_comp = bool((beat or {}).get("has_comparison") or context.get("has_comparison"))
+    has_nums = bool((beat or {}).get("numeric_claims") or context.get("has_numbers"))
+    has_causal = bool((beat or {}).get("has_causal") or context.get("has_causal"))
+    has_action = bool(context.get("has_observed_action"))
+    is_question = "?" in txt
+    skill_id = str(context.get("skill_id") or "SK-04")
+
+    if skill_id == "SK-05" and not has_neg:
+        intent_kind = "natural_presence"
+        style = "action_led" if has_action else "intentional_still"
+    elif has_neg or has_comp:
+        intent_kind = "paradox"
+        style = "typography_led"
+    elif is_question:
+        intent_kind = "question"
+        style = "typography_led"
+    elif has_causal or has_nums:
+        intent_kind = "outcome_or_mechanism"
+        style = "evidence_led" if context.get("has_real_evidence") else "spatial_led"
+    elif has_action:
+        intent_kind = "action_curiosity"
+        style = "action_led"
+    else:
+        intent_kind = "context_promise"
+        style = "spatial_led"
+
+    return {
+        "schema_version": "kh03.hook_intent.v1",
+        "intent_kind": intent_kind,
+        "visual_style": style,
+        "intentional_static": (style == "intentional_still"),
+        "opening_text": txt[:180],
+        "skill_id": skill_id,
+        "reason": f"Derived {intent_kind} ({style}) from verified opening semantics without inventing claims.",
+    }
+
+
+def plan_hook_visual(
+    intent: dict[str, Any],
+    skill_id: str,
+    constraints: dict[str, Any] | None = None,
+    *,
+    hook_roi_norm: list[float] | None = None,
+) -> dict[str, Any]:
+    """PED-01 visual hook layout/motion blueprint honoring intentional static openings and safe ROI placement."""
+    c = dict(constraints or {})
+    is_static = bool(intent.get("intentional_static") or c.get("reduced_motion") or (skill_id == "SK-05" and intent.get("intent_kind") == "natural_presence"))
+    roi = list(hook_roi_norm) if hook_roi_norm else [0.06, 0.05, 0.88, 0.16]
+    return {
+        "schema_version": "kh03.hook_visual_plan.v1",
+        "intent_kind": intent["intent_kind"],
+        "visual_style": intent["visual_style"],
+        "skill_id": skill_id,
+        "hook_roi_norm": roi,
+        "intentional_static": is_static,
+        "static_rationale": "Deliberate calm/natural opening preserves human action without ornamental motion." if is_static else None,
+        "first_frame_readable_required": True,
+        "entry_frame": 0,
+    }
+
+
+def validate_hook_reveal(
+    hook_plan: dict[str, Any],
+    timestamps: dict[str, Any] | None = None,
+    *,
+    payoff_tokens: set[str] | None = None,
+) -> dict[str, Any]:
+    """PED-01 reveal-timing & no-spoiler validator: fails if hook spoils payoff early or enters too late."""
+    issues: list[str] = []
+    ts = dict(timestamps or {})
+    opening_vis = str(hook_plan.get("opening_visual") or "").lower()
+    for tok in (payoff_tokens or set()):
+        t = str(tok).strip().lower()
+        if t and t in opening_vis:
+            issues.append(f"EARLY_PAYOFF_SPOILER: token {t!r} revealed in opening hook before payoff beat")
+
+    hook_entry = float(ts.get("hook_entry_sec", 0.0))
+    payoff_sec = ts.get("payoff_sec")
+    max_entry = float(ts.get("max_hook_entry_sec", 0.75))
+    if hook_entry > max_entry:
+        issues.append(f"HOOK_REVEAL_TOO_LATE: entry={hook_entry:.2f}s > max={max_entry:.2f}s")
+    if payoff_sec is not None and hook_plan.get("payoff_reveal_sec") is not None:
+        if float(hook_plan["payoff_reveal_sec"]) + 0.15 < float(payoff_sec):
+            issues.append(f"PAYOFF_REVEALED_BEFORE_SPEECH: {hook_plan['payoff_reveal_sec']}s < {payoff_sec}s")
+
+    return {
+        "schema_version": "kh03.hook_reveal_validation.v1",
+        "early_payoff_spoiler": any("EARLY_PAYOFF_SPOILER" in i for i in issues),
+        "issues": issues,
+        "pass": len(issues) == 0,
+    }
+
+
+def plan_motion_phases(
+    beat_start_frame: int,
+    beat_end_frame: int,
+    *,
+    skill_id: str = "SK-04",
+    fps: float = 24.0,
+    reduced_motion: bool = False,
+    quiet_natural: bool = False,
+) -> dict[str, Any]:
+    """PED-05 cinematic motion choreography organizer: anticipation -> impact -> settle -> continuity (honoring calm/reduced-motion!)."""
+    span = max(2, int(beat_end_frame) - int(beat_start_frame))
+    if reduced_motion or quiet_natural or skill_id == "SK-05":
+        settle_f = min(beat_end_frame - 1, beat_start_frame + max(1, min(4, span // 4)))
+        return {
+            "mode": "QUIET_CONTINUITY" if not reduced_motion else "REDUCED_MOTION",
+            "phases": [
+                {"phase": "gentle_entry", "start_frame": beat_start_frame, "end_frame": settle_f, "easing": "power1.out"},
+                {"phase": "continuity_hold", "start_frame": settle_f, "end_frame": beat_end_frame, "easing": "none"},
+            ],
+        }
+    antic = min(max(2, int(round(fps * 0.12))), max(1, span // 6))
+    impact = min(max(3, int(round(fps * 0.22))), max(1, span // 4))
+    settle = min(max(3, int(round(fps * 0.20))), max(1, span // 4))
+    f_a = beat_start_frame + antic
+    f_i = min(beat_end_frame - 1, f_a + impact)
+    f_s = min(beat_end_frame, f_i + settle)
+    easing = "power3.out" if skill_id in ("SK-01", "SK-04") else "power2.inOut"
+    return {
+        "mode": "CHOREOGRAPHED_4_PHASE",
+        "phases": [
+            {"phase": "anticipation", "start_frame": beat_start_frame, "end_frame": f_a, "easing": "power1.out"},
+            {"phase": "impact", "start_frame": f_a, "end_frame": f_i, "easing": easing},
+            {"phase": "settle", "start_frame": f_i, "end_frame": f_s, "easing": "power2.out"},
+            {"phase": "continuity", "start_frame": f_s, "end_frame": beat_end_frame, "easing": "none"},
+        ],
+    }
+
+
+def compile_motion_to_existing_timeline(
+    motion_graph: dict[str, Any],
+    *,
+    fps: float = 24.0,
+) -> list[dict[str, Any]]:
+    """PED-05 deterministic adapter projecting motion-graph nodes/phases onto the single native GSAP master timeline."""
+    compiled: list[dict[str, Any]] = []
+    for nd in sorted(motion_graph.get("nodes") or [], key=lambda x: (int(x["start_frame"]), str(x["node_id"]))):
+        sf, ef = int(nd["start_frame"]), int(nd["end_frame"])
+        compiled.append({
+            "node_id": nd["node_id"],
+            "component_id": nd["component_id"],
+            "parent_id": nd.get("parent_id"),
+            "primitive": nd["primitive"],
+            "start_sec": round(sf / max(1.0, fps), 4),
+            "end_sec": round(ef / max(1.0, fps), 4),
+            "keyframes": list(nd.get("keyframes") or []),
+            "timeline_target": "window.__timelines.master",
+        })
+    return compiled
+
+
+def validate_motion_continuity(
+    motion_graph: dict[str, Any],
+    *,
+    layout_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """PED-05 motion continuity validator combining morph coverage, out-of-range keyframe check & non-empty timeline check."""
+    seam = verify_morph_semantic_coverage(motion_graph, layout_plan=layout_plan)
+    issues = list(seam.get("issues") or [])
+    total_f = int(motion_graph.get("total_frames") or 1)
+    for nd in motion_graph.get("nodes") or []:
+        sf, ef = int(nd["start_frame"]), int(nd["end_frame"])
+        if sf < 0 or ef > total_f or ef <= sf:
+            issues.append(f"NODE_SPAN_OUT_OF_RANGE({nd['node_id']}): [{sf},{ef}) vs total={total_f}")
+        prev_kf = -1
+        for kf in nd.get("keyframes") or []:
+            f = int(kf["frame"])
+            if f < prev_kf:
+                issues.append(f"NON_MONOTONIC_KEYFRAME({nd['node_id']}): f{f} < f{prev_kf}")
+            prev_kf = f
+    return {
+        "schema_version": "kh03.motion_continuity_qa.v1",
+        "nodes_checked": len(motion_graph.get("nodes") or []),
+        "seam_coverage": seam,
+        "issues": issues,
+        "pass": len(issues) == 0,
+    }
+
+
 def _extract_payoff_tokens(semantic_graph: dict[str, Any], explanation_graph: dict[str, Any]) -> set[str]:
     """Identify payoff numbers/conclusions from final beats so opening hooks NEVER spoil the payoff!"""
     tokens: set[str] = set()

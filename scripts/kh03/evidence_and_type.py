@@ -707,3 +707,201 @@ def plan_dynamic_captions_r3(
             "pass": out["pass"],
         })
     return out
+
+
+# ======================================================================
+# PED-06 — EVIDENCE DEMONSTRATION (HONEST PROOF RESOLUTION & CLAIM AUDIT)
+# ======================================================================
+
+
+def resolve_evidence_asset(
+    need: dict[str, Any],
+    available_assets: list[dict[str, Any]],
+    *,
+    intended_purpose: str = "NONCOMMERCIAL_ONLY",
+) -> dict[str, Any]:
+    """Resolve a single semantic evidence need against real rights-cleared assets (zero fake UI / competitor renders)."""
+    need_type = str(need.get("need_type") or "none_needed")
+    if need_type == "none_needed":
+        return {"status": "NOT_APPLICABLE", "proof_tier": "NONE_NEEDED", "asset": None, "reason": "No external proof needed."}
+
+    for asset in available_assets:
+        if asset.get("analysis_only_competitor") or asset.get("reference_only"):
+            continue
+        lic = str(asset.get("license_status") or "UNKNOWN").upper()
+        if not lic.startswith("APPROVED_"):
+            continue
+        if intended_purpose == "COMMERCIAL_AND_NONCOMMERCIAL" and "NONCOMMERCIAL" in lic:
+            continue
+        lp = asset.get("local_path")
+        if lp and not Path(lp).is_file():
+            continue
+        mtype = str(asset.get("media_type") or "image").lower()
+        if need_type == "screen_capture" and mtype in ("screen_capture", "screen_recording", "image"):
+            return {
+                "status": "RESOLVED",
+                "proof_tier": "ACTUAL_RECORDING" if mtype == "screen_recording" else "ACTUAL_SCREENSHOT",
+                "asset": asset,
+                "reason": f"Matched verified real {mtype} asset {asset.get('asset_id')}.",
+            }
+        if need_type in ("real_product_demo", "document_page", "image_detail", "licensed_archival_media") and mtype in ("image", "document_page", "video", "screen_capture", "screen_recording"):
+            return {
+                "status": "RESOLVED",
+                "proof_tier": "ORIGINAL_SOURCE" if "OWNER" in lic else "THIRD_PARTY_LICENSED",
+                "asset": asset,
+                "reason": f"Matched rights-verified asset {asset.get('asset_id')}.",
+            }
+
+    if need.get("priority") == "required":
+        return {
+            "status": "BLOCKED_EVIDENCE",
+            "proof_tier": "MISSING_EVIDENCE",
+            "asset": None,
+            "reason": f"Required proof missing for {need_type}; refusing fabricated screenshot or mock data.",
+        }
+    return {
+        "status": "CONCEPTUAL_ILLUSTRATION_ONLY",
+        "proof_tier": "ILLUSTRATIVE_DIAGRAM",
+        "asset": None,
+        "reason": f"No real recording/capture supplied for optional {need_type}; disclose conceptual illustration honestly.",
+    }
+
+
+def plan_evidence_demonstration(
+    resolved: dict[str, Any],
+    *,
+    claim_text: str = "",
+    focus_region_norm: list[float] | None = None,
+) -> dict[str, Any]:
+    """Plan honest visual demonstration: feature zoom/callout on real assets; never fake interaction on stills!"""
+    status = resolved.get("status")
+    asset = resolved.get("asset")
+    if status == "BLOCKED_EVIDENCE":
+        return {"status": "BLOCKED_EVIDENCE", "technique": "NONE", "requires_disclosure": True, "disclosure": resolved.get("reason")}
+    if status == "NOT_APPLICABLE":
+        return {"status": "NOT_APPLICABLE", "technique": "A_ROLL_DIRECT", "requires_disclosure": False, "disclosure": None}
+    if asset is None:
+        return {
+            "status": "CONCEPTUAL_ONLY",
+            "technique": "DISCLOSED_CONCEPTUAL_DIAGRAM",
+            "simulated_interaction": False,
+            "requires_disclosure": True,
+            "disclosure": "Illustrative diagram only — not a live product recording or verified dataset.",
+        }
+    mtype = str(asset.get("media_type") or "image").lower()
+    is_recording = mtype in ("screen_recording", "video")
+    return {
+        "status": "READY",
+        "asset_id": asset.get("asset_id"),
+        "asset_sha256": asset.get("sha256"),
+        "proof_tier": resolved.get("proof_tier"),
+        "technique": "REAL_RECORDING_FEATURE_ZOOM" if is_recording else "STILL_CROP_WITH_HONEST_HIGHLIGHT",
+        "focus_region_norm": list(focus_region_norm or [0.08, 0.12, 0.84, 0.72]),
+        "simulated_interaction": False,
+        "requires_disclosure": not is_recording,
+        "disclosure": None if is_recording else "Real asset preview (still frame with highlight; no simulated clicks).",
+        "claim_scope": sanitize_untrusted_text(claim_text, max_len=140),
+    }
+
+
+def validate_evidence_claims(evidence_ledger: dict[str, Any]) -> dict[str, Any]:
+    """PED-06 claim/provenance auditor: rejects fake real labels, missing hashes, and competitor render leaks."""
+    issues: list[str] = []
+    for b in evidence_ledger.get("bindings") or []:
+        tier = str(b.get("proof_tier") or "")
+        if tier in ("ORIGINAL_SOURCE", "ACTUAL_SCREENSHOT", "ACTUAL_RECORDING", "THIRD_PARTY_LICENSED"):
+            if not b.get("sha256"):
+                issues.append(f"MISSING_EVIDENCE_HASH({b.get('need_id')})")
+            if not b.get("source_url_or_path"):
+                issues.append(f"MISSING_EVIDENCE_PROVENANCE({b.get('need_id')})")
+            if "COMPETITOR" in str(b.get("rights_status") or "").upper():
+                issues.append(f"COMPETITOR_REFERENCE_IN_RENDER({b.get('need_id')})")
+    if evidence_ledger.get("status") == "EVIDENCE_BLOCKED_MISSING_REQUIRED":
+        issues.append("REQUIRED_EVIDENCE_MISSING")
+    return {
+        "schema_version": "kh03.evidence_claims_qa.v1",
+        "bindings_checked": len(evidence_ledger.get("bindings") or []),
+        "issues": issues,
+        "pass": len(issues) == 0,
+    }
+
+
+# ======================================================================
+# PED-07 — PREMIUM ART DIRECTION (HIERARCHY & DESIGN TOKEN VALIDATION)
+# ======================================================================
+
+
+def resolve_art_direction(
+    skill_id: str,
+    *,
+    brand_tokens: dict[str, Any] | None = None,
+    caption_policy: str = "OFF",
+    language: str = "en",
+) -> dict[str, Any]:
+    """Resolve skill-faithful art direction respecting brand tokens and avoiding default website-banner/dashboard look."""
+    bt = dict(brand_tokens or {})
+    by_skill = {
+        "SK-01": {"visual_mode": "typography_led_kinetic", "max_simultaneous_cards": 1, "negative_space_floor": 0.48, "allow_minimal_still": False},
+        "SK-02": {"visual_mode": "editorial_collage_and_choreography", "max_simultaneous_cards": 2, "negative_space_floor": 0.52, "allow_minimal_still": True},
+        "SK-03": {"visual_mode": "spatial_cinematic_storytelling", "max_simultaneous_cards": 1, "negative_space_floor": 0.62, "allow_minimal_still": True},
+        "SK-04": {"visual_mode": "structured_visual_explainer", "max_simultaneous_cards": 2, "negative_space_floor": 0.45, "allow_minimal_still": False},
+        "SK-05": {"visual_mode": "natural_human_minimal", "max_simultaneous_cards": 1, "negative_space_floor": 0.72, "allow_minimal_still": True},
+    }
+    cfg = dict(by_skill.get(skill_id, by_skill["SK-04"]))
+    return {
+        "schema_version": "kh03.art_direction_resolved.v1",
+        "skill_id": skill_id,
+        "language": language,
+        "caption_policy": caption_policy,
+        "forbid_disguised_captions_when_off": (caption_policy == "OFF"),
+        "avoid_generic_banner_default": True,
+        "brand_palette_override": bt.get("palette"),
+        **cfg,
+    }
+
+
+def build_visual_hierarchy(type_system: dict[str, Any], *, skill_id: str = "SK-04") -> dict[str, Any]:
+    """Validate typographic scale ratios and hierarchy separation (display > subtitle > body > micro)."""
+    h = type_system.get("hierarchy") or {}
+    disp = float(h.get("display_px", 56))
+    sub = float(h.get("subtitle_px", 36))
+    cap = float(h.get("caption_px", 38))
+    mic = float(h.get("micro_px", 24))
+    ratio_ok = (disp >= sub * 1.15) and (sub >= mic * 1.15)
+    return {
+        "schema_version": "kh03.visual_hierarchy.v1",
+        "skill_id": skill_id,
+        "display_to_subtitle_ratio": round(disp / max(1.0, sub), 3),
+        "subtitle_to_micro_ratio": round(sub / max(1.0, mic), 3),
+        "caption_mobile_360px": float(h.get("caption_mobile_360px", round(cap * 0.333, 1))),
+        "hierarchy_valid": ratio_ok,
+        "pass": ratio_ok,
+    }
+
+
+def validate_design_tokens(
+    art_direction: dict[str, Any],
+    type_system: dict[str, Any],
+    *,
+    components: list[dict[str, Any]] | None = None,
+    caption_policy: str = "OFF",
+) -> dict[str, Any]:
+    """PED-07 design token validator: contrast, hierarchy, script support, and no disguised captions when OFF."""
+    issues: list[str] = []
+    if not type_system.get("contrast_aa_pass", False):
+        issues.append(f"LOW_WCAG_CONTRAST({type_system.get('wcag_contrast_ratio')}<4.5)")
+    hier = build_visual_hierarchy(type_system, skill_id=str(art_direction.get("skill_id") or "SK-04"))
+    if not hier["hierarchy_valid"]:
+        issues.append("FLAT_TYPOGRAPHIC_HIERARCHY")
+    if caption_policy == "OFF":
+        for c in (components or []):
+            if str(c.get("kind") or "").lower() in ("caption", "subtitle", "srt_caption"):
+                issues.append(f"DISGUISED_CAPTION_WHILE_OFF({c.get('component_id')})")
+    return {
+        "schema_version": "kh03.design_tokens_qa.v1",
+        "contrast_ratio": type_system.get("wcag_contrast_ratio"),
+        "hierarchy": hier,
+        "script_profile": type_system.get("script_profile"),
+        "issues": issues,
+        "pass": len(issues) == 0,
+    }
