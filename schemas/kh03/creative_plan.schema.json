@@ -34,6 +34,9 @@
     "components": { "type": "array", "items": { "type": "object" } },
     "sound_plan_ref": { "type": "string" },
     "layout_constraints": { "type": "object" },
+    "layout_plan_ref": { "type": ["string", "null"] },
+    "layout_plan_sha256": { "type": ["string", "null"] },
+    "caption_layout_ref": { "type": ["string", "null"] },
     "plan_sha256": { "type": "string", "minLength": 16 }
   }
 }

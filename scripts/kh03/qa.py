@@ -13,6 +13,7 @@ from typing import Any
 
 from .contracts import assert_kh03_schema, write_json_atomic
 from .explanation import evaluate_comprehension, verify_explanation_coverage
+from .layout import compute_anti_repetition_report
 
 
 def compute_plan_similarity(plan_a: dict[str, Any], plan_b: dict[str, Any]) -> dict[str, Any]:
@@ -57,6 +58,7 @@ def evaluate_kh03_editorial(
     sound_plan: dict[str, Any],
     visual_qa: dict[str, Any],
     shotbook: dict[str, Any] | None = None,
+    layout_plan: dict[str, Any] | None = None,
     license_decision: str = "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED",
     reviewer_type: str = "DETERMINISTIC_OBJECTIVE",
     evidence_paths: list[str] | None = None,
@@ -65,6 +67,15 @@ def evaluate_kh03_editorial(
     """Compute heuristic 100-pt editorial rubric + hard-defect overrides + separated Section 15 gates."""
     skill_id = creative_plan["selected_skill_id"]
     hard_defects: list[dict[str, str]] = []
+    anti_rep = (
+        compute_anti_repetition_report(layout_plan, creative_plan, run_dir=run_dir)
+        if layout_plan is not None else None
+    )
+    if anti_rep is not None and not anti_rep["pass"]:
+        hard_defects.append({
+            "code": "REPEATED_TOP_BANNER_LOOP",
+            "message": "; ".join(anti_rep.get("findings") or ["Unjustified layout repetition detected."]),
+        })
 
     exp_cov = verify_explanation_coverage(explanation_graph)
     comp_eval = evaluate_comprehension(

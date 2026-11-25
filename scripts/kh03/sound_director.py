@@ -51,12 +51,14 @@ def derive_sound_events(
     *,
     fps: float = 24.0,
     has_source_audio: bool = True,
+    layout_plan: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Derive motivated sound events with explicit ADD/KEEP_NATURAL/SILENCE/MERGE statuses (zero spam)."""
+    """Derive motivated sound events anchored to visual reveals & spatial layout morphs (ADL-06, zero spam)."""
     skill_id = creative_plan["selected_skill_id"]
     prof = SKILL_SOUND_PROFILES.get(skill_id, SKILL_SOUND_PROFILES["SK-04"])
     min_gap = float(prof["min_spacing_sec"])
     beat_fn_map = {b["beat_id"]: b.get("semantic_function", "context") for b in creative_plan.get("beats", [])}
+    tr_by_to_beat = {t["to_beat_id"]: t for t in ((layout_plan or {}).get("transitions") or [])}
 
     events: list[dict[str, Any]] = []
     last_added_sec = -99.0
@@ -67,12 +69,18 @@ def derive_sound_events(
         bid = comp["beat_id"]
         bfn = beat_fn_map.get(bid, "context")
         fam, reason = _family_for_event(comp, bfn, skill_id)
+        tr = tr_by_to_beat.get(bid)
+        layout_tid = tr["transition_id"] if tr else None
+        motion_anchor = "morph_start" if tr else ("hook_impact" if bfn == "hook" else ("payoff_settle" if bfn in ("payoff", "cta") else "reveal_onset"))
+        if tr and fam not in ("impact", "chime"):
+            fam = "whoosh"
+            reason = f"Spatial morph transition {tr['from_mode']} -> {tr['to_mode']} + {reason}"
 
         # Calm / natural skills keep quiet context beats purely natural without clutter
-        if skill_id == "SK-05" and bfn in ("context", "breath", "intentional_silence"):
+        if skill_id == "SK-05" and bfn in ("context", "breath", "intentional_silence") and not tr:
             status = "KEEP_NATURAL" if has_source_audio else "SILENCE"
             prio = 2
-        elif (t_sec - last_added_sec) < min_gap and idx > 0 and bfn not in ("payoff", "cta"):
+        elif (t_sec - last_added_sec) < min_gap and idx > 0 and bfn not in ("payoff", "cta") and not tr:
             status = "MERGE"
             prio = 2
         else:
@@ -92,6 +100,8 @@ def derive_sound_events(
             "target_gain_db": float(prof["base_rel_db"]),
             "status": status,
             "priority": prio,
+            "layout_transition_id": layout_tid,
+            "motion_anchor": motion_anchor,
             "variation": {"pitch_semitones": 0.0, "avoid_immediate_repeat": True},
         })
     return events
@@ -183,6 +193,7 @@ def plan_soundscape_for_skill(
     run_id: str,
     run_dir: Path,
     creative_plan: dict[str, Any],
+    layout_plan: dict[str, Any] | None = None,
     shotbook: dict[str, Any] | None = None,
     fps: float = 24.0,
     voice_policy: str = "LOCK_VOICE",
@@ -197,12 +208,12 @@ def plan_soundscape_for_skill(
     allow_test_only_sfx: bool = False,
     speech_spans: list[tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
-    """Build KH-03 SOUND_DIRECTOR_PLAN.json + AUDIO_COMFORT_REPORT.md & bind into KH-02 plan_soundscape."""
+    """Build KH-03 SOUND_DIRECTOR_PLAN.json + LAYOUT_SOUND_ANCHORS.json + AUDIO_COMFORT_REPORT.md."""
     skill_id = creative_plan["selected_skill_id"]
     prof = SKILL_SOUND_PROFILES.get(skill_id, SKILL_SOUND_PROFILES["SK-04"])
     energy = prof["energy_mode"]
 
-    events = derive_sound_events(creative_plan, fps=fps, has_source_audio=True)
+    events = derive_sound_events(creative_plan, fps=fps, has_source_audio=True, layout_plan=layout_plan)
     acq = acquire_licensed_sounds(
         events,
         run_dir=run_dir,
@@ -270,6 +281,24 @@ def plan_soundscape_for_skill(
     stems_dir = run_dir / "stems"
     stems_dir.mkdir(parents=True, exist_ok=True)
     write_json_atomic(stems_dir / "SOUND_DIRECTOR_PLAN.json", plan)
+    write_json_atomic(stems_dir / "LAYOUT_SOUND_ANCHORS.json", {
+        "schema_version": "kh03.layout_sound_anchors.v1",
+        "run_id": run_id,
+        "selected_skill_id": skill_id,
+        "anchors": [
+            {
+                "event_id": e["event_id"],
+                "beat_id": e["beat_id"],
+                "layout_transition_id": e.get("layout_transition_id"),
+                "motion_anchor": e.get("motion_anchor"),
+                "onset_frame": e["onset_frame"],
+                "onset_sec": e["onset_sec"],
+                "requested_family": e["requested_family"],
+                "status": e["status"],
+            }
+            for e in events
+        ],
+    })
     report_md = [
         f"# KH-03 Audio Comfort & Soundscape Report — `{run_id}` (`{skill_id}`)",
         "",

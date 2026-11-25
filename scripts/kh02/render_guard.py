@@ -93,6 +93,10 @@ def compute_cache_identity(
         "time_map_sha": time_map_sha or "identity",
         "renderer_sha256": sha256_file(render_mjs_path) if render_mjs_path.is_file() else None,
         "project_cfg_sha256": hash_artifact(project_cfg),
+        "kh02_edl_sha256": project_cfg.get("kh02_edl_sha256"),
+        "kh03_selected_skill_id": project_cfg.get("kh03_selected_skill_id"),
+        "kh03_layout_policy": project_cfg.get("kh03_layout_policy"),
+        "kh03_layout_plan_sha256": project_cfg.get("kh03_layout_plan_sha256"),
         "html_sha256": sha256_file(html_p) if html_p.is_file() else None,
         "assets_sha256": assets_shas,
     }

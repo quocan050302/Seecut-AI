@@ -249,6 +249,10 @@ def export_project_config(
     prov = shotbook.get("provenance") or {}
     if prov.get("kh03_selected_skill_id"):
         proj["kh03_selected_skill_id"] = prov["kh03_selected_skill_id"]
+    if prov.get("kh03_layout_policy"):
+        proj["kh03_layout_policy"] = prov["kh03_layout_policy"]
+    if prov.get("kh03_layout_plan_sha256"):
+        proj["kh03_layout_plan_sha256"] = prov["kh03_layout_plan_sha256"]
     if prov.get("kh03_plan_sha256"):
         proj["kh03_plan_sha256"] = prov["kh03_plan_sha256"]
     if pres_lay:
@@ -977,6 +981,10 @@ def compile_shotbook(
             "main_scale_from": float(c.get("main_canvas_scale_from", 1.0)),
             "main_scale_to": float(c.get("main_canvas_scale_to", 1.0)),
             "easing": str(c.get("easing", "power2.inOut")),
+            "reframe_dur": float(c.get("reframe_duration_sec", 0.0)),
+            "transition_id": str(c.get("transition_id", "")),
+            "camera_id": str(c.get("camera_id", "")),
+            "beat_id": str(c.get("beat_id", "")),
             "fixed_pip": is_fixed_pip,
         })
 
@@ -1300,17 +1308,21 @@ def compile_shotbook(
     for (let i = 0; i < CAMS.length; i++) {{
       const c = CAMS[i];
       const dur = Math.max(0.15, c.end - c.start);
-      const reframeDur = Math.min(0.24, dur * 0.35);
+      const reframeDur = (c.reframe_dur && c.reframe_dur > 0) ? Math.min(c.reframe_dur, dur * 0.65) : Math.min(0.24, dur * 0.35);
       if (i > 0 && !FIXED_PIP) {{
         const prevOp = CAMS[i - 1].opacity;
         const opDur = (prevOp !== c.opacity) ? 0.08 : reframeDur;
         tl.to(pw, {{
           left: c.left, top: c.top, width: c.width, height: c.height,
+          zIndex: c.z_order,
           borderRadius: c.radius,
           border: c.border ? c.border + 'px solid {th["card_bg"]}' : '0px solid transparent',
           duration: reframeDur, ease: c.easing
         }}, c.start);
         tl.to(pw, {{ opacity: c.opacity, duration: opDur, ease: 'power1.inOut' }}, c.start);
+        if (c.object_position) {{
+          tl.set(pi, {{ objectPosition: c.object_position }}, c.start);
+        }}
       }}
       if (!FIXED_PIP) {{
         tl.to(pi, {{
@@ -1477,6 +1489,33 @@ def compile_shotbook(
     )
     compile_map_path = bdir.parent / "COMPILE_MAP.json"
     compile_map_path.write_text(json.dumps(compile_map, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    layout_compile_map = {
+        "schema_version": "kh03.layout_compile_map.v1",
+        "plan_sha256": compile_map["plan_sha256"],
+        "presenter_mode": pres_mode,
+        "layout_policy": (shotbook.get("provenance") or {}).get("kh03_layout_policy") or pres_mode,
+        "layout_plan_sha256": (shotbook.get("provenance") or {}).get("kh03_layout_plan_sha256"),
+        "person_wrap_selector": "#personWrap",
+        "person_img_selector": "#person",
+        "master_timeline": "window.__timelines.master",
+        "camera_states": [
+            {
+                "camera_id": c["camera_id"],
+                "beat_id": c["beat_id"],
+                "transition_id": c["transition_id"] or None,
+                "start_sec": c["start"],
+                "end_sec": c["end"],
+                "reframe_dur_sec": c["reframe_dur"],
+                "pixel_box": [c["left"], c["top"], c["width"], c["height"]],
+                "border_radius_px": c["radius"],
+                "z_order": c["z_order"],
+                "object_position": c["object_position"],
+            }
+            for c in cam_specs
+        ],
+    }
+    layout_compile_path = bdir.parent / "LAYOUT_COMPILE_MAP.json"
+    layout_compile_path.write_text(json.dumps(layout_compile_map, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     return {
         "build_dir": str(bdir),
@@ -1484,6 +1523,8 @@ def compile_shotbook(
         "project_json_path": str(bdir / "project.json"),
         "fp_manifest_path": str(bdir / "fp-manifest.txt"),
         "compile_map_path": str(compile_map_path),
+        "layout_compile_map_path": str(layout_compile_path),
         "compile_map": compile_map,
+        "layout_compile_map": layout_compile_map,
         "project_config": proj,
     }

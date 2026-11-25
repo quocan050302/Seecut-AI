@@ -43,7 +43,7 @@ For every new editing request, `seecut-ai` **MUST** route through the KH-03 two-
 python -m scripts.kh03 preflight
 
 # 1. Analyze raw video + script and issue 5-skill menu (STOPS in AWAITING_USER_SELECTION):
-python -m scripts.kh03 recommend --video <raw_source.mp4> --script <script.txt> --run-root <isolated_run_dir> [--layout-lock FULLSCREEN_9_16] [--cut-policy PRESERVE_SCRIPT_TRIM]
+python -m scripts.kh03 recommend --video <raw_source.mp4> --script <script.txt> --run-root <isolated_run_dir> [--layout-policy ADAPTIVE_DYNAMIC | --layout-lock FULLSCREEN_9_16] [--cut-policy PRESERVE_SCRIPT_TRIM] [--caption-policy ON_REQUESTED]
 
 # 2. Explicit owner choice (binding receipt for this exact run & input hashes):
 python -m scripts.kh03 select --run-root <isolated_run_dir> --skill SK-04
@@ -88,7 +88,7 @@ Shared rules: [references/kh03/shared-doctrine.md](./references/kh03/shared-doct
 
 ## Authoritative Schemas & References
 
-- **KH-03 Schemas (10 strict versioned JSON schemas)**: `schemas/kh03/{input_analysis,skill_registry,recommendation,selection,footage_manifest,explanation_graph,creative_plan,component_spec,sound_plan,qa_report}.schema.json`
-- **KH-03 Subskills & Doctrine**: `references/kh03/{shared-doctrine,SK-01-viral-dynamic,SK-02-premium-motion,SK-03-cinematic-storytelling,SK-04-visual-explainer,SK-05-natural-retention}.md`
+- **KH-03 Schemas (11 strict versioned JSON schemas)**: `schemas/kh03/{input_analysis,skill_registry,recommendation,selection,footage_manifest,explanation_graph,creative_plan,component_spec,sound_plan,qa_report,layout_plan}.schema.json`
+- **KH-03 Subskills & Doctrine**: `references/kh03/{shared-doctrine,adaptive-layout-motion,SK-01-viral-dynamic,SK-02-premium-motion,SK-03-cinematic-storytelling,SK-04-visual-explainer,SK-05-natural-retention}.md`
 - **KH-03 Archived Research Snapshot (`METADATA_ONLY`)**: `research/kh03/vidiq_snapshot_20261124.json`
 - **KH-02.R2 Legacy Pipeline & Compliance References**: [references/gates-and-compliance.md](./references/gates-and-compliance.md), [references/kh02-r2-live-pipeline.md](./references/kh02-r2-live-pipeline.md), [references/kh02-r2-presenter-policy.md](./references/kh02-r2-presenter-policy.md), [references/upstream-index.md](./references/upstream-index.md).

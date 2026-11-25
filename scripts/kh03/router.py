@@ -45,6 +45,7 @@ from .director import build_creative_plan, compile_to_kh02_overrides
 from .explanation import plan_explanation
 from .footage import acquire_and_bind_footage
 from .intelligence import analyze_inputs, build_semantic_graph
+from .layout import VALID_LAYOUT_POLICIES, resolve_layout_policy
 from .qa import evaluate_kh03_editorial
 from .recommend import get_skill_contract, issue_recommendation, recommend_skills
 from .research import emit_research_summary
@@ -120,6 +121,7 @@ def run_recommend(
     commercial_permission_evidence: str | None = None,
     language: str | None = None,
     layout_lock: str | None = None,
+    layout_policy: str | None = None,
     cut_policy: str = "LOCK_VOICE",
     caption_policy: str = "OFF",
     music_policy: str = "OFF",
@@ -127,6 +129,15 @@ def run_recommend(
     test_only: bool = False,
 ) -> dict[str, Any]:
     """Step 1: Read-only source/script analysis + 5-skill recommendation -> STOP at AWAITING_USER_SELECTION."""
+    # Validate layout policy / lock conflict BEFORE writing run state (ADL-01 fail-closed!)
+    pol_check = resolve_layout_policy(
+        constraints={
+            "layout_lock": layout_lock,
+            "layout_policy": layout_policy,
+            "fullscreen_lock": (layout_lock == "FULLSCREEN_9_16"),
+        }
+    )
+
     rdir = ensure_run_tree(run_root)
     run_id = rdir.name
     init_state_machine(rdir, run_id)
@@ -144,7 +155,8 @@ def run_recommend(
     tr_json = parse_json_strict(transcript_path) if (transcript_path and Path(transcript_path).is_file()) else None
     constraints = {
         "layout_lock": layout_lock,
-        "fullscreen_lock": (layout_lock == "FULLSCREEN_9_16"),
+        "layout_policy": pol_check["layout_policy"],
+        "fullscreen_lock": bool(pol_check["fullscreen_lock"]),
         "cut_policy": cut_policy,
         "caption_policy": caption_policy,
         "music_policy": music_policy,
@@ -247,6 +259,7 @@ def run_execute(
     cut_policy: str | None = None,
     caption_policy: str | None = None,
     presenter_mode: str | None = None,
+    layout_policy: str | None = None,
     sfx_policy: str = "OPTIONAL_LICENSED",
     music_policy: str | None = None,
     sfx_library_dirs: list[str | Path] | None = None,
@@ -287,7 +300,17 @@ def run_execute(
 
     skill_id = sel_val["selected_skill_id"]
     sel_sha = sel_val["receipt_sha256"]
-    saved_c = inp.get("constraints") or {}
+    saved_c = dict(inp.get("constraints") or {})
+    if layout_policy is not None:
+        req_lp = str(layout_policy).strip().upper()
+        bound_lp = str(saved_c.get("layout_policy") or ("FULLSCREEN_LOCK" if saved_c.get("fullscreen_lock") else "LEGACY_DYNAMIC")).upper()
+        if req_lp != bound_lp:
+            return {
+                "exit_code": 2,
+                "status": "BLOCKED_SELECTION_GATE",
+                "run_id": run_id,
+                "reason": f"LAYOUT_POLICY_DRIFT: requested layout_policy={req_lp!r} differs from selection-bound {bound_lp!r}; re-run recommend and select.",
+            }
     saved_lic = str(saved_c.get("license_decision") or "BLOCKED_LICENSE_UNRESOLVED")
     saved_purpose = str(saved_c.get("intended_purpose") or "NONCOMMERCIAL_ENGINEERING").upper()
     saved_evid = str(saved_c.get("commercial_permission_evidence") or "").strip()
@@ -383,7 +406,7 @@ def run_execute(
     explanation_graph = plan_explanation(sem, inp, skill_id=skill_id, run_dir=rdir)
     reg = build_registry()
 
-    # 4. Adaptive Creative Plan + Component Collision Resolution
+    # 4. Adaptive Creative Plan + Layout Choreography + Component Collision Resolution
     creative_plan = build_creative_plan(
         run_id=run_id,
         run_dir=rdir,
@@ -396,17 +419,20 @@ def run_execute(
         registry=reg,
         constraints=saved_c,
     )
+    lp_file = rdir / "layouts" / "LAYOUT_PLAN.json"
+    layout_plan = parse_json_strict(lp_file) if lp_file.is_file() else None
 
     fps = inp["media"]["fps_num"] / float(max(1, inp["media"]["fps_den"]))
     eff_cut = cut_policy or saved_c.get("cut_policy") or "LOCK_VOICE"
     eff_caption = caption_policy or saved_c.get("caption_policy") or "OFF"
     eff_music = music_policy or saved_c.get("music_policy") or "OFF"
 
-    # 5. Multi-Layer Sound Director
+    # 5. Multi-Layer Sound Director (anchored to spatial layout transitions & visual reveals!)
     snd_res = plan_soundscape_for_skill(
         run_id=run_id,
         run_dir=rdir,
         creative_plan=creative_plan,
+        layout_plan=layout_plan,
         fps=fps,
         voice_policy=eff_cut,
         sfx_policy=sfx_policy,
@@ -420,9 +446,11 @@ def run_execute(
         allow_test_only_sfx=allow_test_only_sfx,
     )
 
-    # 6. Build KH-02 Brief & Invoke Normal KH-02 Pipeline (passing authoritative hook + sound_plan + fullscreen_lock!)
+    # 6. Build KH-02 Brief & Invoke Normal KH-02 Pipeline (passing authoritative layout_plan + hook + sound_plan!)
     sk = get_skill_contract(skill_id)
-    kh03_ov = compile_to_kh02_overrides(creative_plan, fps=fps, sound_plan=snd_res["sound_plan"])
+    kh03_ov = compile_to_kh02_overrides(
+        creative_plan, fps=fps, sound_plan=snd_res["sound_plan"], layout_plan=layout_plan,
+    )
 
     sources_list = [{
         "asset_id": "primary_aroll",
@@ -442,8 +470,9 @@ def run_execute(
             "label": fa["source_label"],
         })
 
-    # R1.02: Explicit FULLSCREEN_9_16 lock propagated to camera.py & SHOTBOOK_V2 (never weakens PIP modes when unlocked!)
+    # R1.02 / R2 ADL-01: Explicit FULLSCREEN_9_16 lock OR ADAPTIVE_DYNAMIC propagated cleanly to camera.py & SHOTBOOK_V2
     fs_lock = bool(saved_c.get("fullscreen_lock"))
+    eff_layout_pol = str(saved_c.get("layout_policy") or ("FULLSCREEN_LOCK" if fs_lock else "LEGACY_DYNAMIC"))
     pres_pol: dict[str, Any]
     if fs_lock:
         pres_pol = {
@@ -452,6 +481,16 @@ def run_execute(
             "allow_hide": False,
             "allow_fullscreen": True,
             "fullscreen_lock": True,
+            "layout_policy": "FULLSCREEN_LOCK",
+        }
+    elif eff_layout_pol == "ADAPTIVE_DYNAMIC":
+        pres_pol = {
+            "mode": "LEGACY_DYNAMIC",
+            "visibility": "ALWAYS_VISIBLE",
+            "allow_hide": False,
+            "allow_fullscreen": True,
+            "fullscreen_lock": False,
+            "layout_policy": "ADAPTIVE_DYNAMIC",
         }
     elif presenter_mode:
         pres_pol = {"mode": presenter_mode}
@@ -534,6 +573,8 @@ def run_execute(
         creative_plan, inp, shotbook=shotbook, require_shotbook=(not dry_run), run_dir=(None if dry_run else rdir),
     )
     transition_state(rdir, STATE_QA, reason="Executing KH-03 editorial & comprehension QA.", run_id=run_id)
+    # Reload post-EDL remapped layout_plan from disk if written during Stage E/F
+    eff_layout_plan = parse_json_strict(lp_file) if lp_file.is_file() else layout_plan
     qa_rep = evaluate_kh03_editorial(
         run_id=run_id,
         creative_plan=creative_plan,
@@ -542,6 +583,7 @@ def run_execute(
         sound_plan=snd_res["sound_plan"],
         visual_qa=vis_qa,
         shotbook=shotbook,
+        layout_plan=eff_layout_plan,
         license_decision=eff_lic,
         evidence_paths=[
             str(rdir / "manifests/CREATIVE_PLAN.json"),
@@ -658,6 +700,16 @@ def run_verify(*, run_root: Path, production_mode: bool = True, require_render: 
             issues.append("CREATIVE_PLAN SHA mismatch in SHOTBOOK_V2 provenance.")
         if prov.get("kh03_clock_domain") != "OUTPUT_EDL_MAPPED":
             issues.append(f"SHOTBOOK_V2 missing OUTPUT_EDL_MAPPED clock provenance ({prov.get('kh03_clock_domain')!r}).")
+        lp_pol = (plan.get("layout_constraints") or {}).get("layout_policy")
+        if lp_pol == "ADAPTIVE_DYNAMIC":
+            lp_f = rdir / "layouts" / "LAYOUT_PLAN.json"
+            ar_f = rdir / "qc" / "ANTI_REPETITION_REPORT.json"
+            if not lp_f.is_file():
+                issues.append("MISSING_REQUIRED_ARTIFACT: LAYOUT_PLAN.json")
+            if not ar_f.is_file():
+                issues.append("MISSING_REQUIRED_ARTIFACT: ANTI_REPETITION_REPORT.json")
+            if prov.get("kh03_layout_policy") != "ADAPTIVE_DYNAMIC":
+                issues.append(f"SHOTBOOK_V2 missing kh03_layout_policy=ADAPTIVE_DYNAMIC ({prov.get('kh03_layout_policy')!r}).")
 
     rec4 = rdir / "STAGE_RECEIPTS" / "KH03_04_execute_and_qa.json"
     if require_render:
@@ -694,6 +746,7 @@ def main(argv: list[str] | None = None) -> int:
     p_rec.add_argument("--transcript", type=Path, default=None)
     p_rec.add_argument("--language", default=None)
     p_rec.add_argument("--layout-lock", default=None)
+    p_rec.add_argument("--layout-policy", choices=list(VALID_LAYOUT_POLICIES), default=None)
     p_rec.add_argument("--cut-policy", default="LOCK_VOICE")
     p_rec.add_argument("--caption-policy", choices=["OFF", "ON_REQUESTED", "KEYWORDS_ONLY"], default="OFF")
     p_rec.add_argument("--music-policy", choices=["OFF", "OPTIONAL_LICENSED", "REQUIRED_LICENSED"], default="OFF")
@@ -717,6 +770,7 @@ def main(argv: list[str] | None = None) -> int:
     p_exe.add_argument("--cut-policy", default=None)
     p_exe.add_argument("--caption-policy", choices=["OFF", "ON_REQUESTED", "KEYWORDS_ONLY"], default=None)
     p_exe.add_argument("--presenter-mode", default=None)
+    p_exe.add_argument("--layout-policy", choices=list(VALID_LAYOUT_POLICIES), default=None)
     p_exe.add_argument("--sfx-policy", default="OPTIONAL_LICENSED")
     p_exe.add_argument("--music-policy", choices=["OFF", "OPTIONAL_LICENSED", "REQUIRED_LICENSED"], default=None)
     p_exe.add_argument("--sfx-library", action="append", default=None)
@@ -750,6 +804,7 @@ def main(argv: list[str] | None = None) -> int:
             transcript_path=args.transcript,
             language=args.language,
             layout_lock=args.layout_lock,
+            layout_policy=args.layout_policy,
             cut_policy=args.cut_policy,
             caption_policy=args.caption_policy,
             music_policy=args.music_policy,
@@ -781,6 +836,7 @@ def main(argv: list[str] | None = None) -> int:
             cut_policy=args.cut_policy,
             caption_policy=args.caption_policy,
             presenter_mode=args.presenter_mode,
+            layout_policy=args.layout_policy,
             sfx_policy=args.sfx_policy,
             music_policy=args.music_policy,
             sfx_library_dirs=args.sfx_library,

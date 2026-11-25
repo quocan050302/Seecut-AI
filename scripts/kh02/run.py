@@ -734,6 +734,8 @@ def execute_pipeline(
                 "clock_domain": eff_kh03_overrides.get("clock_domain", "OUTPUT_EDL_MAPPED"),
                 "time_map_sha256": eff_kh03_overrides.get("time_map_sha256", edl_sha),
                 "sound_plan_sha256": eff_kh03_overrides.get("sound_plan_sha256"),
+                "layout_policy": eff_kh03_overrides.get("layout_policy"),
+                "layout_plan_sha256": eff_kh03_overrides.get("layout_plan_sha256"),
             }
             if eff_kh03_overrides else None
         )
@@ -746,6 +748,7 @@ def execute_pipeline(
             custom_beats=(eff_kh03_overrides.get("custom_beats") if eff_kh03_overrides else None),
             custom_visual_events=(eff_kh03_overrides.get("custom_visual_events") if eff_kh03_overrides else None),
             creative_direction_override=(eff_kh03_overrides.get("creative_direction_override") if eff_kh03_overrides else None),
+            adaptive_layout_plan=(eff_kh03_overrides.get("layout_plan") if eff_kh03_overrides else None),
             kh03_metadata=kh03_meta,
             status="TEST_ONLY" if (dry_run or not production_mode) else "PLANNED",
         )
@@ -1213,6 +1216,15 @@ def execute_pipeline(
             if presenter_policy["mode"] in ("FIXED_PIP", "ADAPTIVE_PIP", "DYNAMIC_HYBRID"):
                 pres_qa = verify_presenter_frames(
                     final_mp4_path, derived_source_path, shotbook, run_dir,
+                )
+            elif eff_kh03_overrides and isinstance(eff_kh03_overrides.get("layout_plan"), dict) and eff_kh03_overrides["layout_plan"].get("layout_policy") == "ADAPTIVE_DYNAMIC":
+                from scripts.kh03.visual_qa import verify_adaptive_layout_frames
+                pres_qa = verify_adaptive_layout_frames(
+                    derived_source_path,
+                    final_mp4_path,
+                    layout_plan=eff_kh03_overrides["layout_plan"],
+                    compile_map=compiled.get("layout_compile_map"),
+                    out_dir=run_dir / "qc",
                 )
             eff_ledger = build_effect_application_ledger(
                 shotbook, compiled["compile_map"], registry=registry,

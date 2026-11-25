@@ -21,8 +21,17 @@ from .components import (
 from .contracts import (
     assert_kh03_schema,
     hash_artifact,
+    parse_json_strict,
     sanitize_identifier,
     write_json_atomic,
+)
+from .layout import (
+    audit_layout_motion,
+    build_subject_action_tracks,
+    plan_adaptive_captions,
+    remap_layout_and_transitions_to_edl,
+    resolve_layout_policy,
+    solve_layout_sequence,
 )
 from .recommend import get_skill_contract
 
@@ -392,7 +401,13 @@ def build_creative_plan(
 
     eff_constraints = dict(input_analysis.get("constraints") or {})
     eff_constraints.update(constraints or {})
-    fs_lock = bool(eff_constraints.get("fullscreen_lock") or eff_constraints.get("layout_lock") == "FULLSCREEN_9_16")
+    pol_info = resolve_layout_policy(
+        constraints=eff_constraints,
+        selected_skill=selected_skill_id,
+        source_media=media,
+    )
+    layout_policy = pol_info["layout_policy"]
+    fs_lock = bool(pol_info["fullscreen_lock"])
 
     selected_dir, all_dirs = choose_direction(
         selected_skill_id, semantic_graph, explanation_graph, footage_manifest, constraints=eff_constraints,
@@ -456,6 +471,68 @@ def build_creative_plan(
     prot_zones = input_analysis["safe_regions"]["protected_zones"]
     default_box = list(clear_zones[0]["bbox_norm"]) if clear_zones else [0.06, 0.07, 0.80, 0.14]
 
+    # KH-03.R2 ADL-01/02: Solve spatial layout sequence BEFORE component placement
+    tr_path = run_dir / "analysis" / "TRANSCRIPT_NORMALIZED.json"
+    tr_doc = parse_json_strict(tr_path) if tr_path.is_file() else None
+    act_path = run_dir / "analysis" / "SOURCE_ACTION_MAP.json"
+    act_doc = parse_json_strict(act_path) if act_path.is_file() else None
+    action_tracks = build_subject_action_tracks(media, transcript=tr_doc, action_map=act_doc)
+
+    pre_beats: list[dict[str, Any]] = []
+    for idx, ph in enumerate(merged_phrases):
+        bid = f"beat_{idx + 1:02d}"
+        orig_i = int(ph.get("_orig_idx", idx))
+        fbind = bind_map.get(f"beat_{orig_i + 1:02d}") or bind_map.get(bid)
+        asset_ref = fbind["asset_id"] if (fbind and fbind.get("asset_id")) else None
+        role = ph.get("semantic_role", "context")
+        kh02_fn = role if role in (
+            "hook", "question", "context", "problem", "tension", "demonstration",
+            "mechanism", "evidence", "proof", "comparison", "step", "reaction",
+            "turning_point", "reveal", "payoff", "cta", "breath", "intentional_silence",
+        ) else "context"
+        pre_beats.append({
+            "beat_id": bid,
+            "start_frame": int(ph["start_frame"]),
+            "end_frame": int(ph["end_frame"]),
+            "semantic_function": kh02_fn,
+            "proof_status": "VERIFIED_REAL_EVIDENCE" if asset_ref else "SOURCE_FOOTAGE_DIRECT",
+            "has_numeric_claims": bool(ph.get("numeric_claims")),
+            "content_refs": ["primary_aroll"] + ([asset_ref] if asset_ref else []),
+        })
+
+    layout_plan = solve_layout_sequence(
+        pre_beats,
+        run_id=run_id,
+        skill_id=selected_skill_id,
+        skill_contract=sk,
+        layout_policy=layout_policy,
+        canvas={"width": c_w, "height": c_h, "aspect_ratio": aspect},
+        source_media=media,
+        action_tracks=action_tracks,
+        constraints=eff_constraints,
+        assets=footage_manifest.get("assets"),
+        fps_num=int(media.get("fps_num") or 24),
+        fps_den=int(media.get("fps_den") or 1),
+        platform="reels" if aspect == "9:16" else "youtube",
+        run_dir=run_dir,
+    )
+    audit_layout_motion(layout_plan, run_dir=run_dir)
+    lay_by_beat = {lb["beat_id"]: lb for lb in layout_plan["beats"]}
+
+    # ADL-05: Adaptive caption placement (respects explicit caption_policy; never flips OFF default)
+    cap_pol = str(eff_constraints.get("caption_policy") or "OFF")
+    words_src = list((tr_doc or {}).get("words") or [])
+    caption_plan = plan_adaptive_captions(
+        words_src,
+        layout_plan,
+        caption_policy=cap_pol,
+        platform="reels" if aspect == "9:16" else "youtube",
+        language=str(input_analysis.get("language") or "en"),
+        fps_num=int(media.get("fps_num") or 24),
+        fps_den=int(media.get("fps_den") or 1),
+        run_dir=run_dir,
+    )
+
     beats: list[dict[str, Any]] = []
     raw_specs: list[dict[str, Any]] = []
     attention_curve: list[dict[str, Any]] = []
@@ -469,6 +546,9 @@ def build_creative_plan(
         erep = exp_reps.get(enode["node_id"], {})
         fbind = bind_map.get(f"beat_{orig_i + 1:02d}") or bind_map.get(bid)
         asset_ref = fbind["asset_id"] if (fbind and fbind.get("asset_id")) else None
+        lb = lay_by_beat[bid]
+        beat_box = list(lb["graphic_box_norm"]) if layout_policy == "ADAPTIVE_DYNAMIC" else list(default_box)
+        beat_z = int(lb["graphic_z_order"]) if layout_policy == "ADAPTIVE_DYNAMIC" else (32 + idx)
 
         req_cap, comp_params = _select_component_for_beat(
             idx=idx,
@@ -494,6 +574,7 @@ def build_creative_plan(
             comp_params["subtitle"] = _trim_words(comp_params["subtitle"], 56)
         comp_params["theme"] = art["theme"]
         comp_params["skill_id"] = selected_skill_id
+        comp_params["layout_mode"] = lb["layout_mode"]
         if idx == 0:
             comp_params["selected_hook_id"] = hook_plan["selected_hook_id"]
 
@@ -504,16 +585,16 @@ def build_creative_plan(
             role=ph.get("semantic_role", "context"),
             start_frame=sf,
             end_frame=ef,
-            normalized_bbox=list(default_box),
+            normalized_bbox=beat_box,
             params=comp_params,
             semantic_anchor=f"{selected_skill_id}:{enode['node_id']}:{ph['phrase_id']}",
             registry=reg,
             aspect_ratio=aspect,
             fps=fps,
             profile=sk["preferred_profile"],
-            z_order=32 + idx,
+            z_order=beat_z,
             asset_ref=asset_ref,
-            data_bindings={"explanation_node_id": enode["node_id"], "phrase_id": ph["phrase_id"]},
+            data_bindings={"explanation_node_id": enode["node_id"], "phrase_id": ph["phrase_id"], "layout_id": lb["layout_id"]},
             easing=art["default_easing"],
         )
         used_caps.append(spec["capability_id"])
@@ -537,12 +618,15 @@ def build_creative_plan(
             "priority": 5 if kh02_fn in ("hook", "payoff", "cta", "evidence") else 4,
             "content_refs": ["primary_aroll"] + ([asset_ref] if asset_ref else []),
             "proof_status": "VERIFIED_REAL_EVIDENCE" if asset_ref else ("CONCEPT_ILLUSTRATION" if enode.get("illustrative") else "SOURCE_FOOTAGE_DIRECT"),
-            "visual_mode": "fullscreen_top_overlay" if fs_lock else f"{selected_skill_id.lower()}_adaptive_stage",
+            "visual_mode": (
+                "fullscreen_top_overlay" if fs_lock
+                else (f"adaptive_{lb['layout_mode'].lower()}" if layout_policy == "ADAPTIVE_DYNAMIC" else f"{selected_skill_id.lower()}_adaptive_stage")
+            ),
             "focus_subject": ph["text"][:56].strip() or f"Beat {idx + 1}",
             "continuity_in": "open_frame" if idx == 0 else "editorial_spine",
             "continuity_out": "clean_settle" if idx == len(merged_phrases) - 1 else "editorial_spine",
-            "planned_information_change": f"Deliver {spec['capability_id']} ({enode['node_type']}) anchored to {ph['phrase_id']}.",
-            "why": f"KH-03 {selected_skill_id} ({selected_dir['direction_id']}) binding {enode['node_id']} -> {spec['capability_id']}.",
+            "planned_information_change": f"Deliver {spec['capability_id']} ({enode['node_type']}) in {lb['layout_mode']} anchored to {ph['phrase_id']}.",
+            "why": f"KH-03 {selected_skill_id} ({selected_dir['direction_id']}) binding {enode['node_id']} -> {spec['capability_id']} ({lb['layout_mode']}).",
             "read_time_frames": min(max(1, ef - sf), compute_min_read_frames(ph["text"][:56], fps)),
             "intentional_hold": bool(selected_skill_id in ("SK-03", "SK-05") and kh02_fn in ("payoff", "context")),
             "explanation_node_id": enode["node_id"],
@@ -560,15 +644,19 @@ def build_creative_plan(
             "note": "Editorial attention plan only — NOT a measured audience retention curve.",
         })
 
-    # Solve swept bounding-box collisions against face/hands/objects & platform rails
-    solved = solve_visual_collisions(
-        raw_specs,
-        protected_zones=prot_zones,
-        clear_zones=clear_zones,
-        canvas_width=c_w,
-        canvas_height=c_h,
-    )
-    final_specs = solved["components"]
+    # Solve swept bounding-box collisions against face/hands/objects (in ADAPTIVE_DYNAMIC, graphic_box already cleared presenter!)
+    if layout_policy == "ADAPTIVE_DYNAMIC":
+        final_specs = list(raw_specs)
+        solved = {"ok": True, "components": final_specs, "reflows": []}
+    else:
+        solved = solve_visual_collisions(
+            raw_specs,
+            protected_zones=prot_zones,
+            clear_zones=clear_zones,
+            canvas_width=c_w,
+            canvas_height=c_h,
+        )
+        final_specs = solved["components"]
 
     plan_core = {
         "schema_version": "kh03.creative_plan.v1",
@@ -589,12 +677,17 @@ def build_creative_plan(
         "beats": beats,
         "components": final_specs,
         "sound_plan_ref": "stems/SOUND_DIRECTOR_PLAN.json",
+        "layout_plan_ref": "layouts/LAYOUT_PLAN.json",
+        "layout_plan_sha256": layout_plan["layout_plan_sha256"],
+        "caption_layout_ref": "layouts/CAPTION_LAYOUT_PLAN.json",
         "layout_constraints": {
             "aspect_ratio": aspect,
+            "layout_policy": layout_policy,
             "fullscreen_lock": fs_lock,
-            "collision_ok": solved["ok"],
+            "collision_ok": solved["ok"] and caption_plan["collision_ok"],
             "reflow_count": len(solved["reflows"]),
             "total_frames": total_frames,
+            "unique_layout_modes": sorted({lb["layout_mode"] for lb in layout_plan["beats"]}),
         },
     }
     plan_core["plan_sha256"] = hash_artifact(plan_core)
@@ -603,6 +696,23 @@ def build_creative_plan(
     # Emit Section 13 creative direction & component artifacts
     write_json_atomic(run_dir / "manifests" / "CREATIVE_PLAN.json", plan_core)
     write_json_atomic(run_dir / "manifests" / "SELECTED_DIRECTION.json", selected_dir)
+    write_json_atomic(run_dir / "layouts" / "COMPONENT_LAYOUT_BINDINGS.json", {
+        "schema_version": "kh03.component_layout_bindings.v1",
+        "run_id": run_id,
+        "layout_policy": layout_policy,
+        "bindings": [
+            {
+                "component_id": s["component_id"],
+                "beat_id": s["beat_id"],
+                "capability_id": s["capability_id"],
+                "layout_id": (s.get("data_bindings") or {}).get("layout_id"),
+                "layout_mode": (s.get("params") or {}).get("layout_mode"),
+                "bbox_norm": s["normalized_bbox"],
+                "z_order": s["z_order"],
+            }
+            for s in final_specs
+        ],
+    })
     write_json_atomic(run_dir / "manifests" / "COMPONENT_MANIFEST.json", {
         "schema_version": "kh03.component_manifest.v1",
         "run_id": run_id,
@@ -636,6 +746,7 @@ def compile_to_kh02_overrides(
     *,
     fps: float = 24.0,
     sound_plan: dict[str, Any] | None = None,
+    layout_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Translate KH-03 CREATIVE_PLAN into authoritative KH-02 overrides (clock_domain=SOURCE_CLOCK until Stage F EDL remap)."""
     sk = get_skill_contract(creative_plan["selected_skill_id"])
@@ -655,6 +766,7 @@ def compile_to_kh02_overrides(
     payoff_bid = kh02_beats[-1]["beat_id"] if kh02_beats else "beat_01"
     lc = creative_plan.get("layout_constraints") or {}
     fs_lock = bool(lc.get("fullscreen_lock"))
+    layout_policy = str(lc.get("layout_policy") or ("FULLSCREEN_LOCK" if fs_lock else "LEGACY_DYNAMIC"))
 
     selected_hook_override = {
         "selected_option_id": hp.get("selected_hook_id", f"{creative_plan['selected_skill_id'].lower()}_hook_01"),
@@ -665,6 +777,7 @@ def compile_to_kh02_overrides(
         "start_frame": 0,
         "presenter_mode": "LEGACY_DYNAMIC",
         "fullscreen_lock": fs_lock,
+        "layout_policy": layout_policy,
         "payoff_beat_id": payoff_bid,
         "truthful_no_spoiler_verified": bool(hp.get("truthful_no_spoiler_verified", True)),
         "spoils_payoff": bool(sel_hook_opt.get("spoils_payoff", False)),
@@ -678,6 +791,9 @@ def compile_to_kh02_overrides(
         "clock_domain": "SOURCE_CLOCK",
         "time_map_sha256": None,
         "fullscreen_lock": fs_lock,
+        "layout_policy": layout_policy,
+        "layout_plan": layout_plan,
+        "layout_plan_sha256": (layout_plan or {}).get("layout_plan_sha256") or creative_plan.get("layout_plan_sha256"),
         "profile": sk["preferred_profile"],
         "energy_mode": sk["preferred_energy"],
         "custom_beats": kh02_beats,
@@ -909,6 +1025,31 @@ def remap_kh03_plan_to_output_clock(
         sp_in["time_map_sha256"] = edl_sha
         remapped_sound = sp_in
 
+    # 4b. Remap KH-03.R2 adaptive layout_plan + morph transitions + captions onto exact output EDL clock (ADL-03/05)
+    remapped_layout: dict[str, Any] | None = None
+    remapped_captions: dict[str, Any] | None = None
+    if kh03_overrides.get("layout_plan"):
+        remapped_layout = remap_layout_and_transitions_to_edl(
+            kh03_overrides["layout_plan"], edl, run_dir=run_dir,
+        )
+        # Re-anchor any layout-transition sound cues to remapped morph start frame
+        if remapped_sound and remapped_layout.get("transitions"):
+            tr_start_by_id = {t["transition_id"]: int(t["start_frame"]) for t in remapped_layout["transitions"]}
+            for sev in remapped_sound.get("events", []):
+                tid = sev.get("layout_transition_id")
+                if tid and tid in tr_start_by_id:
+                    sev["onset_frame"] = tr_start_by_id[tid]
+                    sev["onset_sec"] = round(float(Fraction(sev["onset_frame"]) / fps_frac), 4)
+        if mapped_words:
+            remapped_captions = plan_adaptive_captions(
+                mapped_words,
+                remapped_layout,
+                caption_policy="ON_REQUESTED",
+                fps_num=int(edl["fps_num"]),
+                fps_den=int(edl["fps_den"]),
+                run_dir=run_dir,
+            )
+
     remap_report = {
         "schema_version": "kh03.timeline_remap_report.v1",
         "clock_domain": "OUTPUT_EDL_MAPPED",
@@ -925,6 +1066,8 @@ def remap_kh03_plan_to_output_clock(
         "visual_events_removed": removed_vis,
         "sound_cues_remapped": len((remapped_sound or {}).get("events", [])),
         "sound_cues_removed": removed_cues,
+        "layout_beats_remapped": len((remapped_layout or {}).get("beats", [])),
+        "layout_transitions_remapped": len((remapped_layout or {}).get("transitions", [])),
         "mapped_words_count": len(mapped_words),
         "pass": True,
     }
@@ -948,5 +1091,8 @@ def remap_kh03_plan_to_output_clock(
     out_ov["selected_hook_override"] = hook_ov or out_ov.get("selected_hook_override")
     out_ov["sound_plan"] = remapped_sound
     out_ov["sound_plan_sha256"] = hash_artifact(remapped_sound) if remapped_sound else None
+    out_ov["layout_plan"] = remapped_layout
+    out_ov["layout_plan_sha256"] = (remapped_layout or {}).get("layout_plan_sha256")
+    out_ov["caption_layout_plan"] = remapped_captions
     out_ov["timeline_remap_report"] = remap_report
     return out_ov

@@ -191,7 +191,7 @@ def ensure_run_tree(run_dir: Path) -> Path:
     r = Path(os.path.realpath(str(run_dir.expanduser())))
     for sub in (
         "logs", "evidence", "analysis", "selection", "research", "assets",
-        "build", "qc", "tests", "stems", "exports", "manifests", "cache",
+        "layouts", "build", "qc", "tests", "stems", "exports", "manifests", "cache",
         "staging", "STAGE_RECEIPTS",
     ):
         (r / sub).mkdir(parents=True, exist_ok=True)

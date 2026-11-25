@@ -1055,6 +1055,7 @@ def resolve_editorial_plan(
     custom_camera_events: list[dict[str, Any]] | None = None,
     custom_claim_evidence: list[dict[str, Any]] | None = None,
     creative_direction_override: dict[str, Any] | None = None,
+    adaptive_layout_plan: dict[str, Any] | None = None,
     kh03_metadata: dict[str, Any] | None = None,
     status: str = "PLANNED",
 ) -> dict[str, Any]:
@@ -1269,7 +1270,7 @@ def resolve_editorial_plan(
 
     visual_events = plan_motion(raw_visual_events, fps=fps, profile=brief["profile"])
 
-    # 5. Camera path (honoring explicit presenter_policy & source rotation)
+    # 5. Camera path (honoring explicit presenter_policy, ADAPTIVE_DYNAMIC layout plan & source rotation)
     camera_events = custom_camera_events if custom_camera_events is not None else plan_camera_path(
         beats,
         mode=brief["mode"],
@@ -1282,7 +1283,18 @@ def resolve_editorial_plan(
         rotation_deg=rotation_deg,
         platform=brief.get("platform", "reels"),
         aspect_ratio=brief["aspect_ratio"],
+        adaptive_layout_plan=adaptive_layout_plan,
     )
+    if adaptive_layout_plan is not None and adaptive_layout_plan.get("layout_policy") == "ADAPTIVE_DYNAMIC" and presenter_layout is None:
+        presenter_layout = {
+            "mode": "ADAPTIVE_DYNAMIC",
+            "visibility": presenter_policy.get("visibility", "ALWAYS_VISIBLE"),
+            "layout_plan_sha256": adaptive_layout_plan.get("layout_plan_sha256"),
+            "subject_tracking_mode": adaptive_layout_plan.get("subject_tracking_mode", "STATIC_FALLBACK_VERIFIED"),
+            "unique_layout_modes": sorted({lb["layout_mode"] for lb in adaptive_layout_plan.get("beats", [])}),
+            "transition_count": len(adaptive_layout_plan.get("transitions", [])),
+            "safe_zone": aspect_cfg["safe_zone"],
+        }
 
     # 6. Transitions between every adjacent beat
     transitions = [
@@ -1421,6 +1433,8 @@ def resolve_editorial_plan(
                 **({"kh03_clock_domain": kh03_metadata["clock_domain"]} if kh03_metadata.get("clock_domain") else {}),
                 **({"kh03_time_map_sha256": kh03_metadata["time_map_sha256"]} if kh03_metadata.get("time_map_sha256") else {}),
                 **({"kh03_sound_plan_sha256": kh03_metadata["sound_plan_sha256"]} if kh03_metadata.get("sound_plan_sha256") else {}),
+                **({"kh03_layout_policy": kh03_metadata["layout_policy"]} if kh03_metadata.get("layout_policy") else {}),
+                **({"kh03_layout_plan_sha256": kh03_metadata["layout_plan_sha256"]} if kh03_metadata.get("layout_plan_sha256") else {}),
             } if kh03_metadata else {}),
         },
     }

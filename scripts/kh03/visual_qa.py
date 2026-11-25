@@ -319,6 +319,228 @@ def verify_fullscreen_frames(
     return report
 
 
+def verify_adaptive_layout_frames(
+    source_mp4: str | Path,
+    final_mp4: str | Path,
+    *,
+    layout_plan: dict[str, Any],
+    edl: dict[str, Any] | None = None,
+    compile_map: dict[str, Any] | None = None,
+    out_dir: str | Path | None = None,
+    max_mean_diff: float = 28.0,
+    probe_w: int = 180,
+    probe_h: int = 320,
+) -> dict[str, Any]:
+    """Stream EVERY decoded frame (0..N-1) verifying live presenter geometry, crop, motion & continuity (ADL-07).
+
+    Evaluates exact `interpolate_presenter_geometry(frame)` at every frame (including morph midpoints!),
+    transforms the corresponding EDL source frame into the expected presenter box via aspect-preserving
+    object-fit:cover math, and detects missing presenter, freeze, black flash, crop/aspect drift, or
+    wrong frame order without dumping full-res PNGs to disk.
+    """
+    import csv as _csv
+    from .layout import compute_source_crop_for_box, interpolate_presenter_geometry
+
+    src_p = Path(source_mp4).resolve()
+    fin_p = Path(final_mp4).resolve()
+    if not src_p.is_file() or not fin_p.is_file():
+        return {
+            "schema_version": "kh03.adaptive_layout_frame_qa.v1",
+            "verification_scope": "DECODED_RENDER",
+            "status": "FAIL_MISSING_MEDIA",
+            "pass": False,
+            "issues": ["Source or final MP4 missing for adaptive layout decoded frame verification."],
+        }
+
+    def _probe(p: Path) -> dict[str, Any]:
+        pr = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height,r_frame_rate,nb_frames", "-of", "json", str(p)],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        st = json.loads(pr.stdout)["streams"][0]
+        num, den = (int(x) for x in str(st.get("r_frame_rate", "24/1")).split("/"))
+        return {
+            "width": int(st["width"]), "height": int(st["height"]),
+            "fps_num": num, "fps_den": max(1, den),
+            "nb_frames": int(st["nb_frames"]) if str(st.get("nb_frames", "")).isdigit() else None,
+        }
+
+    src_m = _probe(src_p)
+    fin_m = _probe(fin_p)
+    issues: list[str] = []
+
+    if edl and edl.get("segments"):
+        expected_src_frames: list[int] = []
+        for seg in edl["segments"]:
+            expected_src_frames.extend(range(int(seg["src_start_frame"]), int(seg["src_end_frame"])))
+    else:
+        n_est = fin_m["nb_frames"] or src_m["nb_frames"] or 0
+        expected_src_frames = list(range(n_est))
+
+    def _decode_rgb(p: Path, w: int, h: int) -> bytes:
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(p), "-vf", f"scale={w}:{h}:flags=bilinear", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=180,
+        )
+        return proc.stdout
+
+    frame_bytes = probe_w * probe_h * 3
+    src_buf = _decode_rgb(src_p, probe_w, probe_h)
+    fin_buf = _decode_rgb(fin_p, probe_w, probe_h)
+    src_n = len(src_buf) // frame_bytes
+    fin_n = len(fin_buf) // frame_bytes
+    if not expected_src_frames:
+        expected_src_frames = list(range(fin_n))
+    if fin_n != len(expected_src_frames):
+        issues.append(f"FRAME_COUNT_MISMATCH: final {fin_n} != expected EDL {len(expected_src_frames)}")
+
+    n_check = min(fin_n, len(expected_src_frames))
+    trs = layout_plan.get("transitions") or []
+    beats_by_id = {b["beat_id"]: b for b in layout_plan.get("beats", [])}
+    fail_frames: list[dict[str, Any]] = []
+    csv_rows: list[dict[str, Any]] = []
+    max_diff = 0.0
+    sum_diff = 0.0
+    prev_pres_crop: Image.Image | None = None
+    freeze_streak = 0
+    max_freeze_streak = 0
+    black_frames = 0
+    morph_checked = 0
+
+    for out_idx in range(n_check):
+        src_idx = expected_src_frames[out_idx]
+        if src_idx >= src_n:
+            fail_frames.append({"frame": out_idx, "reason": "SRC_INDEX_OUT_OF_RANGE"})
+            continue
+        im_s = Image.frombytes("RGB", (probe_w, probe_h), src_buf[src_idx * frame_bytes : (src_idx + 1) * frame_bytes])
+        im_f = Image.frombytes("RGB", (probe_w, probe_h), fin_buf[out_idx * frame_bytes : (out_idx + 1) * frame_bytes])
+
+        st = interpolate_presenter_geometry(out_idx, layout_plan, trs)
+        if st["in_transition"]:
+            morph_checked += 1
+        bx, by, bw, bh = st["presenter_box_norm"]
+        px0 = max(0, int(round(bx * probe_w)))
+        py0 = max(0, int(round(by * probe_h)))
+        pw = max(8, min(probe_w - px0, int(round(bw * probe_w))))
+        ph = max(8, min(probe_h - py0, int(round(bh * probe_h))))
+
+        # Compute aspect-preserving cover crop of expected source frame into (pw, ph)
+        lb = beats_by_id.get(st["beat_id"]) or (layout_plan.get("beats") or [{}])[0]
+        fc = tuple(lb.get("anchor") or [0.5, 0.36])
+        crop_info = compute_source_crop_for_box(src_m["width"], src_m["height"], pw, ph, focus_center=(fc[0], fc[1]))
+        cx, cy, cw_n, ch_n = crop_info["crop_rect_norm"]
+        sx0 = max(0, int(round(cx * probe_w)))
+        sy0 = max(0, int(round(cy * probe_h)))
+        sx1 = max(sx0 + 4, min(probe_w, int(round((cx + cw_n) * probe_w))))
+        sy1 = max(sy0 + 4, min(probe_h, int(round((cy + ch_n) * probe_h))))
+        exp_pres = im_s.crop((sx0, sy0, sx1, sy1)).resize((pw, ph), Image.BILINEAR)
+        act_pres = im_f.crop((px0, py0, px0 + pw, py0 + ph))
+
+        # Check inner safe core of presenter box (avoid rounded corner edge pixels & full-screen top hook card)
+        is_full = (bw > 0.95 and bh > 0.95)
+        ix0 = max(0, int(pw * 0.14))
+        ix1 = min(pw, max(ix0 + 4, int(pw * 0.86)))
+        iy0 = max(0, int(ph * (0.26 if is_full else 0.14)))
+        iy1 = min(ph, max(iy0 + 4, int(ph * (0.68 if is_full else 0.86))))
+
+        exp_core = exp_pres.crop((ix0, iy0, ix1, iy1))
+        act_core = act_pres.crop((ix0, iy0, ix1, iy1))
+        md = round(sum(ImageStat.Stat(ImageChops.difference(exp_core, act_core)).mean) / 3.0, 3)
+        act_luma = sum(ImageStat.Stat(act_core).mean) / 3.0
+        exp_luma = sum(ImageStat.Stat(exp_core).mean) / 3.0
+        is_black = (act_luma < 6.0 and exp_luma > 18.0)
+        if is_black:
+            black_frames += 1
+
+        # Detect live presenter freeze when source itself is changing
+        if prev_pres_crop is not None and prev_pres_crop.size == act_core.size and out_idx > 0:
+            src_prev = Image.frombytes("RGB", (probe_w, probe_h), src_buf[expected_src_frames[out_idx - 1] * frame_bytes : (expected_src_frames[out_idx - 1] + 1) * frame_bytes])
+            src_delta = sum(ImageStat.Stat(ImageChops.difference(src_prev, im_s)).mean) / 3.0
+            act_delta = sum(ImageStat.Stat(ImageChops.difference(prev_pres_crop, act_core)).mean) / 3.0
+            if src_delta > 2.5 and act_delta < 0.15:
+                freeze_streak += 1
+                max_freeze_streak = max(max_freeze_streak, freeze_streak)
+            else:
+                freeze_streak = 0
+        else:
+            freeze_streak = 0
+        prev_pres_crop = act_core
+
+        max_diff = max(max_diff, md)
+        sum_diff += md
+        row_fail = (md > max_mean_diff) or is_black
+        if row_fail:
+            fail_frames.append({
+                "frame": out_idx,
+                "expected_src_frame": src_idx,
+                "layout_mode": st["layout_mode"],
+                "in_transition": st["in_transition"],
+                "mean_abs_diff": md,
+                "black_flash": is_black,
+                "reason": "BLACK_FLASH" if is_black else "PRESENTER_GEOMETRY_OR_OCCLUSION_DRIFT",
+            })
+        if out_idx == 0 or out_idx == n_check - 1 or out_idx % max(1, n_check // 40) == 0 or st["in_transition"] or row_fail:
+            csv_rows.append({
+                "frame": out_idx,
+                "src_frame": src_idx,
+                "layout_mode": st["layout_mode"],
+                "in_transition": st["in_transition"],
+                "mean_abs_diff": md,
+                "black_flash": is_black,
+                "pass": not row_fail,
+            })
+
+    if fail_frames:
+        issues.append(f"ADAPTIVE_LAYOUT_FRAME_DRIFT: {len(fail_frames)}/{n_check} frames failed (max_diff={max_diff}, black={black_frames})")
+    if max_freeze_streak >= 8:
+        issues.append(f"PRESENTER_FREEZE_DETECTED: {max_freeze_streak} consecutive static presenter frames while source moved")
+
+    report = {
+        "schema_version": "kh03.adaptive_layout_frame_qa.v1",
+        "verification_scope": "DECODED_RENDER",
+        "source_mp4_sha256": hash_artifact(src_p),
+        "final_mp4_sha256": hash_artifact(fin_p),
+        "layout_plan_sha256": layout_plan.get("layout_plan_sha256"),
+        "compile_map_sha256": hash_artifact(compile_map) if compile_map else None,
+        "layout_policy": layout_plan.get("layout_policy"),
+        "source_resolution": f"{src_m['width']}x{src_m['height']}",
+        "final_resolution": f"{fin_m['width']}x{fin_m['height']}",
+        "fps": f"{fin_m['fps_num']}/{fin_m['fps_den']}",
+        "frames_checked": n_check,
+        "frames_expected": len(expected_src_frames),
+        "morph_frames_checked": morph_checked,
+        "max_mean_abs_diff": round(max_diff, 3),
+        "avg_mean_abs_diff": round(sum_diff / float(max(1, n_check)), 3),
+        "tolerance_mean_abs_diff": max_mean_diff,
+        "black_flash_frames": black_frames,
+        "max_freeze_streak": max_freeze_streak,
+        "fail_frame_count": len(fail_frames),
+        "fail_frames_sample": fail_frames[:12],
+        "issues": issues,
+        "status": "DECODED_ADAPTIVE_PASS" if not issues else "DECODED_ADAPTIVE_FAIL",
+        "pass": len(issues) == 0,
+    }
+    if out_dir is not None:
+        od = Path(out_dir)
+        od.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(od / "ADAPTIVE_LAYOUT_FRAME_QA.json", report)
+        write_json_atomic(od / "MOTION_CHOREOGRAPHY_QA.json", {
+            "schema_version": "kh03.motion_choreography_qa.v1",
+            "final_mp4_sha256": report["final_mp4_sha256"],
+            "morph_frames_checked": morph_checked,
+            "black_flash_frames": black_frames,
+            "max_freeze_streak": max_freeze_streak,
+            "pass": report["pass"],
+            "issues": issues,
+        })
+        with (od / "ADAPTIVE_LAYOUT_FRAME_QA.csv").open("w", encoding="utf-8", newline="") as fh:
+            w = _csv.DictWriter(fh, fieldnames=["frame", "src_frame", "layout_mode", "in_transition", "mean_abs_diff", "black_flash", "pass"])
+            w.writeheader()
+            w.writerows(csv_rows)
+    return report
+
+
 def _create_minimal_gsap_shim(dest: Path) -> None:
     """Create a deterministic pure-JS subset shim of gsap.timeline().set/.to/.time/.progress ONLY for offline headless gallery probes when HyperFrames vendor GSAP is absent."""
     shim = r"""

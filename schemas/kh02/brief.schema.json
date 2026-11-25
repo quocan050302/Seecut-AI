@@ -120,6 +120,7 @@
         "allow_anchor_switch": { "type": "boolean" },
         "allow_hide": { "type": "boolean" },
         "fullscreen_lock": { "type": "boolean" },
+        "layout_policy": { "type": "string", "enum": ["ADAPTIVE_DYNAMIC", "FULLSCREEN_LOCK", "LEGACY_DYNAMIC"] },
         "border_radius_px": { "type": "integer", "minimum": 0, "maximum": 999 },
         "guard_margin_ratio": { "type": "number", "minimum": 0.0, "maximum": 0.12 }
       }
