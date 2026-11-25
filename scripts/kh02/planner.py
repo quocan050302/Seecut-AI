@@ -1418,6 +1418,9 @@ def resolve_editorial_plan(
             **({
                 "kh03_selected_skill_id": kh03_metadata["selected_skill_id"],
                 "kh03_plan_sha256": kh03_metadata["kh03_plan_sha256"],
+                **({"kh03_clock_domain": kh03_metadata["clock_domain"]} if kh03_metadata.get("clock_domain") else {}),
+                **({"kh03_time_map_sha256": kh03_metadata["time_map_sha256"]} if kh03_metadata.get("time_map_sha256") else {}),
+                **({"kh03_sound_plan_sha256": kh03_metadata["sound_plan_sha256"]} if kh03_metadata.get("sound_plan_sha256") else {}),
             } if kh03_metadata else {}),
         },
     }

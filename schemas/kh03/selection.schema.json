@@ -24,6 +24,11 @@
     "approval_evidence": { "type": "string", "minLength": 5 },
     "test_only": { "type": "boolean" },
     "selected_at_utc": { "type": "string", "minLength": 10 },
-    "binding": { "type": "boolean", "const": true }
+    "binding": { "type": "boolean", "const": true },
+    "raw_script_sha256": { "type": ["string", "null"] },
+    "script_source_path": { "type": ["string", "null"] },
+    "asr_sha256": { "type": ["string", "null"] },
+    "constraints_sha256": { "type": ["string", "null"] },
+    "trust_model": { "type": "string" }
   }
 }

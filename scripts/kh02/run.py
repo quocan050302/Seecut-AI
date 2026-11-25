@@ -317,7 +317,7 @@ def execute_pipeline(
             "reason": str(ex),
         }
 
-    # KH-03 fail-closed receipt check when KH-03 overrides are passed
+    # KH-03 fail-closed receipt verification via single shared verifier (R1.06)
     if kh03_overrides is not None:
         valid_sk = {"SK-01", "SK-02", "SK-03", "SK-04", "SK-05"}
         if not isinstance(kh03_selection_receipt, dict) or kh03_selection_receipt.get("selected_skill_id") not in valid_sk:
@@ -332,17 +332,51 @@ def execute_pipeline(
                 "exit_code": 2,
                 "reason": "KH-03 override skill_id does not match validated SELECTION_RECEIPT.",
             }
+        try:
+            from scripts.kh03.selection import validate_user_selection as _kh03_validate_selection
+            _kh03_validate_selection(
+                run_dir=run_dir,
+                production_mode=production_mode,
+                expected_skill_id=str(kh03_overrides.get("selected_skill_id")),
+                supplied_receipt=kh03_selection_receipt,
+            )
+        except Exception as ex:
+            return {
+                "status": "BLOCKED_KH03_SELECTION_INVALID",
+                "exit_code": 2,
+                "reason": f"Direct KH-02 ingress rejected KH-03 selection receipt: {ex}",
+            }
 
-    # Hard License Gate BEFORE any SeeCut execution
-    lic = brief["license_decision"]
-    if lic in ("BLOCKED_COMMERCIAL_LICENSE", "BLOCKED_LICENSE_UNRESOLVED"):
+    # Hard License Gate BEFORE any SeeCut execution (P0 hardened)
+    valid_lics = {
+        "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED",
+        "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED",
+        "BLOCKED_COMMERCIAL_LICENSE",
+        "BLOCKED_LICENSE_UNRESOLVED",
+    }
+    lic = brief.get("license_decision")
+    if lic not in valid_lics or lic in ("BLOCKED_COMMERCIAL_LICENSE", "BLOCKED_LICENSE_UNRESOLVED"):
         return {
-            "status": lic,
+            "status": lic if lic in valid_lics else "BLOCKED_LICENSE_UNRESOLVED",
             "exit_code": 2,
             "reason": (
                 f"License gate blocked execution ({lic}); PolyForm Noncommercial 1.0.0 requires "
                 "noncommercial confirmation or written commercial permission from aiesecxuanli@gmail.com."
             ),
+        }
+    intended_purpose = str(brief.get("intended_purpose") or "").strip().upper()
+    comm_evid = str(brief.get("commercial_permission_evidence") or "").strip()
+    if intended_purpose == "COMMERCIAL_MARKETING" and (lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" or len(comm_evid) < 8):
+        return {
+            "status": "BLOCKED_COMMERCIAL_LICENSE",
+            "exit_code": 2,
+            "reason": "COMMERCIAL_MARKETING requires WRITTEN_COMMERCIAL_PERMISSION_VERIFIED plus verified commercial_permission_evidence.",
+        }
+    if lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" and kh03_overrides is not None and len(comm_evid) < 8:
+        return {
+            "status": "BLOCKED_COMMERCIAL_LICENSE",
+            "exit_code": 2,
+            "reason": "Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED rejected: missing commercial_permission_evidence.",
         }
 
     if not dry_run:
@@ -590,14 +624,75 @@ def execute_pipeline(
     derived_source_sha = st_d["derived_sha256"]
 
     # ------------------------------------------------------------------
-    # STAGE E: Semantic Strategy, Hook Candidates & Pacing Budget
+    # STAGE E: Semantic Strategy, Hook Candidates & Pacing Budget (R1.04 KH-03 hook fidelity)
     # ------------------------------------------------------------------
+    eff_kh03_overrides: dict[str, Any] | None = None
+    if kh03_overrides is not None:
+        from scripts.kh03.director import remap_kh03_plan_to_output_clock
+        if kh03_overrides.get("clock_domain") == "OUTPUT_EDL_MAPPED":
+            if kh03_overrides.get("time_map_sha256") != edl_sha:
+                return {
+                    "status": "BLOCKED_TIMELINE_MISMATCH",
+                    "exit_code": 1,
+                    "run_id": run_id,
+                    "reason": "Pre-mapped kh03_overrides time_map_sha256 does not match authoritative Stage C EDL SHA.",
+                }
+            eff_kh03_overrides = dict(kh03_overrides)
+        else:
+            try:
+                eff_kh03_overrides = remap_kh03_plan_to_output_clock(
+                    kh03_overrides, edl, transcript=transcript, run_dir=(None if dry_run else run_dir),
+                )
+            except Exception as ex:
+                return {
+                    "status": "TIMELINE_REMAP_FAIL",
+                    "exit_code": 1,
+                    "run_id": run_id,
+                    "reason": f"Authoritative KH-03 EDL remapping failed: {ex}",
+                }
+
     def _stage_e() -> dict[str, Any]:
         h_opts = build_hook_candidates(
             brief, inventory, transcript=transcript,
             cut_policy=cut_info["cut_policy"], presenter_policy=presenter_policy,
         )
-        h_dec = choose_opening(h_opts, brief=brief)
+        if eff_kh03_overrides and isinstance(eff_kh03_overrides.get("selected_hook_override"), dict):
+            kh_hook = dict(eff_kh03_overrides["selected_hook_override"])
+            if kh_hook.get("spoils_payoff") or kh_hook.get("deceptive_urgency"):
+                raise ValueError("HOOK_FIDELITY_REJECTED: KH-03 hook override flagged spoiler or deceptive urgency.")
+            base_dec = choose_opening(h_opts, brief=brief)
+            kh_opt_id = str(kh_hook.get("selected_option_id") or "kh03_hook_01")
+            opts_out = [dict(o) for o in base_dec.get("options", [])]
+            if opts_out:
+                opts_out[0] = dict(opts_out[0])
+                opts_out[0]["option_id"] = kh_opt_id
+                opts_out[0]["strategy"] = str(kh_hook.get("strategy") or opts_out[0].get("strategy", "kh03_semantic_hook"))
+                if kh_hook.get("opening_visual"):
+                    opts_out[0]["first_frame_visual"] = str(kh_hook["opening_visual"])[:180]
+                opts_out[0]["selected"] = True
+                for rest in opts_out[1:]:
+                    rest["selected"] = False
+            h_dec = dict(base_dec)
+            h_dec.update({
+                "selected_option_id": kh_opt_id,
+                "selection_rationale": (
+                    f"KH-03 authoritative hook ({kh_hook.get('strategy', 'semantic')}, "
+                    f"plan={str(kh_hook.get('kh03_plan_sha256') or '')[:12]}): "
+                    f"{str(kh_hook.get('opening_visual') or 'Truthful opening frame')}"
+                ),
+                "options": opts_out,
+                "strategy": str(kh_hook.get("strategy") or "kh03_semantic_hook"),
+                "opening_line": str(kh_hook.get("opening_line") or ""),
+                "opening_visual": str(kh_hook.get("opening_visual") or ""),
+                "first_frame_visual_id": str(kh_hook.get("first_frame_visual_id") or "kh03_comp_01_beat_01"),
+                "start_frame": int(kh_hook.get("start_frame", 0)),
+                "presenter_mode": presenter_policy["mode"],
+                "payoff_beat_id": str(kh_hook.get("payoff_beat_id") or "beat_01"),
+                "authoritative_source": "KH03_CREATIVE_PLAN",
+                "kh03_plan_sha256": kh_hook.get("kh03_plan_sha256"),
+            })
+        else:
+            h_dec = choose_opening(h_opts, brief=brief)
         out_dur_sec = float(edl["total_output_frames"]) / fps
         p_budget = resolve_pacing_budget(brief, total_duration_sec=out_dur_sec)
         dirs = propose_directions(brief, inventory, transcript)
@@ -634,10 +729,13 @@ def execute_pipeline(
     def _stage_f() -> dict[str, Any]:
         kh03_meta = (
             {
-                "selected_skill_id": kh03_overrides["selected_skill_id"],
-                "kh03_plan_sha256": kh03_overrides["kh03_plan_sha256"],
+                "selected_skill_id": eff_kh03_overrides["selected_skill_id"],
+                "kh03_plan_sha256": eff_kh03_overrides["kh03_plan_sha256"],
+                "clock_domain": eff_kh03_overrides.get("clock_domain", "OUTPUT_EDL_MAPPED"),
+                "time_map_sha256": eff_kh03_overrides.get("time_map_sha256", edl_sha),
+                "sound_plan_sha256": eff_kh03_overrides.get("sound_plan_sha256"),
             }
-            if kh03_overrides else None
+            if eff_kh03_overrides else None
         )
         sb = resolve_editorial_plan(
             brief, inventory, run_id=run_id,
@@ -645,9 +743,9 @@ def execute_pipeline(
             edl_override=edl,
             hook_decision=hook_dec,
             presenter_policy_override=presenter_policy,
-            custom_beats=(kh03_overrides.get("custom_beats") if kh03_overrides else None),
-            custom_visual_events=(kh03_overrides.get("custom_visual_events") if kh03_overrides else None),
-            creative_direction_override=(kh03_overrides.get("creative_direction_override") if kh03_overrides else None),
+            custom_beats=(eff_kh03_overrides.get("custom_beats") if eff_kh03_overrides else None),
+            custom_visual_events=(eff_kh03_overrides.get("custom_visual_events") if eff_kh03_overrides else None),
+            creative_direction_override=(eff_kh03_overrides.get("creative_direction_override") if eff_kh03_overrides else None),
             kh03_metadata=kh03_meta,
             status="TEST_ONLY" if (dry_run or not production_mode) else "PLANNED",
         )
@@ -713,7 +811,15 @@ def execute_pipeline(
             tool_invoker=sfx_tool_invoker,
         )
         cache_root = Path(sfx_cache_dir).resolve() if sfx_cache_dir else (run_dir / "cache/sfx")
-        cue_reqs = _build_sfx_cue_requests(shotbook, pacing_budget["energy_mode"]) if brief["sfx_policy"] != "OFF" else []
+        kh03_sp = eff_kh03_overrides.get("sound_plan") if (eff_kh03_overrides and isinstance(eff_kh03_overrides.get("sound_plan"), dict)) else None
+        if brief["sfx_policy"] == "OFF":
+            cue_reqs = []
+        elif kh03_sp is not None:
+            # R1.03: Honor KH-03 sound director events cleanly without regenerating duplicate legacy cues
+            from scripts.kh03.sound_director import build_cue_requests as _kh03_build_reqs
+            cue_reqs = _kh03_build_reqs(kh03_sp.get("events", []), pacing_budget["energy_mode"])
+        else:
+            cue_reqs = _build_sfx_cue_requests(shotbook, pacing_budget["energy_mode"])
 
         acquired_assets: list[dict[str, Any]] = []
         acq_log: list[dict[str, Any]] = []
@@ -771,6 +877,28 @@ def execute_pipeline(
             _write_json(run_dir / "sfx_plan.json", soundscape)
             _write_json(run_dir / "AUDIO_GRAPH.json", soundscape)
             evid_paths.extend([str(run_dir / "sfx_plan.json"), str(run_dir / "AUDIO_GRAPH.json")])
+            if kh03_sp is not None:
+                resolved_sp = {
+                    "schema_version": "kh03.resolved_sound_plan.v1",
+                    "run_id": run_id,
+                    "clock_domain": kh03_sp.get("clock_domain", "OUTPUT_EDL_MAPPED"),
+                    "time_map_sha256": kh03_sp.get("time_map_sha256", edl_sha),
+                    "planned_sound_plan_sha256": hash_artifact(kh03_sp),
+                    "planned_add_events": sum(1 for e in kh03_sp.get("events", []) if e.get("status") == "ADD"),
+                    "resolved_verified_cues": len(verified_non_voice),
+                    "cues": soundscape["cues"],
+                    "deltas": [
+                        {"cue_id": c["cue_id"], "status": c.get("status"), "onset_sec": c.get("start_sec")}
+                        for c in soundscape["cues"] if c.get("kind") != "voice"
+                    ],
+                }
+                _write_json(run_dir / "stems/RESOLVED_SOUND_PLAN.json", resolved_sp)
+                _write_json(run_dir / "stems/SFX_APPLIED.json", {
+                    "schema_version": "kh03.sfx_applied.v1",
+                    "verified_non_voice_cues": verified_non_voice,
+                    "count": len(verified_non_voice),
+                })
+                evid_paths.extend([str(run_dir / "stems/RESOLVED_SOUND_PLAN.json"), str(run_dir / "stems/SFX_APPLIED.json")])
             sfx_paths = emit_sfx_asset_artifacts(
                 run_dir,
                 assets=acquired_assets,

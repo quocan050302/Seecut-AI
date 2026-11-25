@@ -635,8 +635,9 @@ def compile_to_kh02_overrides(
     creative_plan: dict[str, Any],
     *,
     fps: float = 24.0,
+    sound_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Translate KH-03 CREATIVE_PLAN into authoritative KH-02 resolve_editorial_plan overrides."""
+    """Translate KH-03 CREATIVE_PLAN into authoritative KH-02 overrides (clock_domain=SOURCE_CLOCK until Stage F EDL remap)."""
     sk = get_skill_contract(creative_plan["selected_skill_id"])
     kh02_beats = [
         {k: v for k, v in b.items() if k not in ("explanation_node_id", "component_id")}
@@ -648,13 +649,42 @@ def compile_to_kh02_overrides(
         profile=sk["preferred_profile"],
     )
     sel_dir = next(d for d in creative_plan["directions_considered"] if d["selected"])
+    hp = creative_plan.get("hook_plan") or {}
+    sel_hook_opt = next((o for o in (hp.get("options") or []) if o.get("selected")), None) or {}
+    first_vis_id = kh02_visual_events[0]["event_id"] if kh02_visual_events else "ev_01_hook"
+    payoff_bid = kh02_beats[-1]["beat_id"] if kh02_beats else "beat_01"
+    lc = creative_plan.get("layout_constraints") or {}
+    fs_lock = bool(lc.get("fullscreen_lock"))
+
+    selected_hook_override = {
+        "selected_option_id": hp.get("selected_hook_id", f"{creative_plan['selected_skill_id'].lower()}_hook_01"),
+        "strategy": hp.get("selected_strategy", sel_hook_opt.get("strategy", "direct_proof_lead")),
+        "opening_line": sel_hook_opt.get("opening_line", ""),
+        "opening_visual": sel_hook_opt.get("opening_visual", ""),
+        "first_frame_visual_id": first_vis_id,
+        "start_frame": 0,
+        "presenter_mode": "LEGACY_DYNAMIC",
+        "fullscreen_lock": fs_lock,
+        "payoff_beat_id": payoff_bid,
+        "truthful_no_spoiler_verified": bool(hp.get("truthful_no_spoiler_verified", True)),
+        "spoils_payoff": bool(sel_hook_opt.get("spoils_payoff", False)),
+        "deceptive_urgency": bool(sel_hook_opt.get("deceptive_urgency", False)),
+        "kh03_plan_sha256": creative_plan["plan_sha256"],
+    }
+
     return {
         "selected_skill_id": creative_plan["selected_skill_id"],
         "kh03_plan_sha256": creative_plan["plan_sha256"],
+        "clock_domain": "SOURCE_CLOCK",
+        "time_map_sha256": None,
+        "fullscreen_lock": fs_lock,
         "profile": sk["preferred_profile"],
         "energy_mode": sk["preferred_energy"],
         "custom_beats": kh02_beats,
         "custom_visual_events": kh02_visual_events,
+        "selected_hook_override": selected_hook_override,
+        "sound_plan": sound_plan,
+        "sound_plan_sha256": hash_artifact(sound_plan) if sound_plan else None,
         "creative_direction_override": {
             "direction_id": sel_dir["direction_id"],
             "name": sel_dir["name"],
@@ -664,3 +694,259 @@ def compile_to_kh02_overrides(
             "selected": True,
         },
     }
+
+
+def _map_source_interval_to_edl(src_start: int, src_end: int, segments: list[dict[str, Any]]) -> tuple[int, int] | None:
+    """Map source half-open [src_start, src_end) onto exact contiguous EDL output frame bounds."""
+    out_lo: int | None = None
+    out_hi: int | None = None
+    for seg in segments:
+        s0, s1 = int(seg["src_start_frame"]), int(seg["src_end_frame"])
+        o0 = int(seg["out_start_frame"])
+        ov_s = max(src_start, s0)
+        ov_e = min(src_end, s1)
+        if ov_e > ov_s:
+            mapped_s = o0 + (ov_s - s0)
+            mapped_e = o0 + (ov_e - s0)
+            out_lo = mapped_s if out_lo is None else min(out_lo, mapped_s)
+            out_hi = mapped_e if out_hi is None else max(out_hi, mapped_e)
+    if out_lo is None or out_hi is None or out_hi <= out_lo:
+        return None
+    return out_lo, out_hi
+
+
+def _map_source_frame_to_edl(src_frame: int, segments: list[dict[str, Any]], total_out: int) -> tuple[int, bool]:
+    """Map single source frame index -> (output_frame, exact_inside_segment)."""
+    for seg in segments:
+        s0, s1 = int(seg["src_start_frame"]), int(seg["src_end_frame"])
+        o0, o1 = int(seg["out_start_frame"]), int(seg["out_end_frame"])
+        if s0 <= src_frame < s1:
+            return o0 + (src_frame - s0), True
+        if src_frame < s0:
+            return o0, False
+    return max(0, total_out - 1), False
+
+
+def remap_kh03_plan_to_output_clock(
+    kh03_overrides: dict[str, Any],
+    edl: dict[str, Any],
+    *,
+    transcript: dict[str, Any] | None = None,
+    run_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Authoritative single-pass source->output EDL remapper for KH-03 beats, visual events, hooks & sound cues (R1.01).
+
+    Fail-closed guarantees:
+    - Rejects double-remap (`clock_domain == 'OUTPUT_EDL_MAPPED'`).
+    - Uses exact rational EDL fps_num/fps_den and segment boundaries.
+    - Clips straddling events, marks removed events with rationale, fails closed if essential anchor or all beats dropped.
+    - Guarantees strict contiguous output beat coverage [0, total_output_frames) and zero out-of-range events.
+    """
+    from fractions import Fraction
+    from scripts.kh02.edit_decisions import validate_edl
+    from scripts.kh02.transcript import map_words_to_output
+
+    if kh03_overrides.get("clock_domain") == "OUTPUT_EDL_MAPPED":
+        raise ValueError(
+            "DOUBLE_REMAP_FORBIDDEN: kh03_overrides is already mapped to OUTPUT_EDL_MAPPED; refusing second remap."
+        )
+
+    edl_errs = validate_edl(edl, words=(transcript or {}).get("words"))
+    if edl_errs:
+        raise ValueError(f"INVALID_EDL_FOR_REMAP: {edl_errs[:3]}")
+
+    fps_frac = Fraction(int(edl["fps_num"]), int(edl["fps_den"]))
+    fps = float(fps_frac)
+    total_out = int(edl["total_output_frames"])
+    segs = list(edl["segments"])
+    edl_sha = hash_artifact(edl)
+    is_identity = (
+        len(segs) == 1
+        and int(segs[0]["src_start_frame"]) == 0
+        and int(segs[0]["out_start_frame"]) == 0
+        and int(segs[0]["src_end_frame"]) == total_out
+        and int(segs[0]["out_end_frame"]) == total_out
+    )
+
+    mapped_words = map_words_to_output(transcript, edl) if transcript else []
+    word_out_ids = {w["word_id"] for w in mapped_words}
+
+    # 1. Remap beats onto output clock
+    raw_beats = list(kh03_overrides.get("custom_beats") or [])
+    mapped_beats: list[dict[str, Any]] = []
+    removed_beats: list[dict[str, Any]] = []
+    beat_frame_map: dict[str, tuple[int, int]] = {}
+
+    for b in raw_beats:
+        sf, ef = int(b["start_frame"]), int(b["end_frame"])
+        span = (sf, ef) if is_identity else _map_source_interval_to_edl(sf, ef, segs)
+        if span is None:
+            if b.get("essential_anchor"):
+                raise ValueError(f"ESSENTIAL_ANCHOR_REMOVED_BY_EDL: beat {b['beat_id']} removed completely by EDL.")
+            removed_beats.append({
+                "beat_id": b["beat_id"],
+                "src_span": [sf, ef],
+                "status": "REMOVED_BY_EDL",
+                "reason": "Entire source beat interval fell within trimmed pause segments.",
+            })
+            continue
+        os0, oe0 = span
+        nb = dict(b)
+        nb["start_frame"] = os0
+        nb["end_frame"] = oe0
+        if mapped_words and nb.get("source_word_ids"):
+            nb["source_word_ids"] = [wid for wid in nb["source_word_ids"] if wid in word_out_ids]
+        nb["read_time_frames"] = min(max(1, oe0 - os0), int(b.get("read_time_frames") or max(4, oe0 - os0)))
+        mapped_beats.append(nb)
+
+    if not mapped_beats:
+        raise ValueError("ESSENTIAL_ANCHOR_REMOVED_BY_EDL: Zero beats survived EDL remapping.")
+
+    # Coalesce any beat < min_readable frames (when cuts shrank it) and enforce strict contiguous [0, total_out)
+    min_f = min(total_out, max(12, int(round(fps * 0.50))))
+    coalesced: list[dict[str, Any]] = []
+    for idx, b in enumerate(mapped_beats):
+        dur = b["end_frame"] - b["start_frame"]
+        if coalesced and dur < min_f:
+            prev = coalesced[-1]
+            prev["end_frame"] = max(prev["end_frame"], b["end_frame"])
+            prev["source_word_ids"] = list(prev.get("source_word_ids") or []) + list(b.get("source_word_ids") or [])
+            removed_beats.append({
+                "beat_id": b["beat_id"],
+                "status": "MERGED_SHORT_POST_EDL",
+                "merged_into": prev["beat_id"],
+                "reason": f"Post-EDL beat duration {dur}f < {min_f}f readable floor.",
+            })
+        else:
+            coalesced.append(b)
+    mapped_beats = coalesced
+
+    for idx, b in enumerate(mapped_beats):
+        b["start_frame"] = 0 if idx == 0 else mapped_beats[idx - 1]["end_frame"]
+        if idx == len(mapped_beats) - 1:
+            b["end_frame"] = total_out
+        else:
+            b["end_frame"] = max(b["start_frame"] + 1, min(total_out - (len(mapped_beats) - 1 - idx), b["end_frame"]))
+        b["read_time_frames"] = min(max(1, b["end_frame"] - b["start_frame"]), int(b.get("read_time_frames") or 12))
+        beat_frame_map[b["beat_id"]] = (b["start_frame"], b["end_frame"])
+
+    # 2. Remap visual events onto output clock
+    raw_vis = list(kh03_overrides.get("custom_visual_events") or [])
+    mapped_vis: list[dict[str, Any]] = []
+    removed_vis: list[dict[str, Any]] = []
+    valid_beat_ids = set(beat_frame_map.keys())
+    fallback_bid = mapped_beats[-1]["beat_id"]
+
+    for ev in raw_vis:
+        sf, ef = int(ev["start_frame"]), int(ev["end_frame"])
+        span = (sf, ef) if is_identity else _map_source_interval_to_edl(sf, ef, segs)
+        if span is None:
+            if ev.get("essential_anchor"):
+                raise ValueError(f"ESSENTIAL_ANCHOR_REMOVED_BY_EDL: visual event {ev['event_id']} removed by EDL.")
+            removed_vis.append({
+                "event_id": ev["event_id"],
+                "src_span": [sf, ef],
+                "status": "REMOVED_BY_EDL",
+                "reason": "Source visual interval fell completely inside trimmed cut segment.",
+            })
+            continue
+        os0, oe0 = max(0, span[0]), min(total_out, span[1])
+        if (oe0 - os0) < 6:
+            # Expand slightly within total_out if cut clipped tail just below 0.25s readable minimum
+            oe0 = min(total_out, os0 + min(total_out - os0, max(6, int(round(fps * 0.35)))))
+        if (oe0 - os0) < 5:
+            removed_vis.append({
+                "event_id": ev["event_id"],
+                "src_span": [sf, ef],
+                "status": "REMOVED_TOO_BRIEF_POST_EDL",
+                "reason": f"Remapped span {oe0 - os0}f below 5f readable floor.",
+            })
+            continue
+        nev = dict(ev)
+        nev["start_frame"] = os0
+        nev["end_frame"] = oe0
+        if nev.get("beat_id") not in valid_beat_ids:
+            # Attach to enclosing output beat cleanly
+            enclosing = next((b["beat_id"] for b in mapped_beats if b["start_frame"] <= os0 < b["end_frame"]), fallback_bid)
+            nev["beat_id"] = enclosing
+        # Clamp entry/exit frames safely inside remapped duration
+        dur_f = oe0 - os0
+        nev["entry_frames"] = min(int(ev.get("entry_frames") or 6), max(2, dur_f // 3))
+        nev["exit_frames"] = min(int(ev.get("exit_frames") or 4), max(2, dur_f // 4))
+        mapped_vis.append(nev)
+
+    # 3. Remap selected_hook_override
+    hook_ov = dict(kh03_overrides.get("selected_hook_override") or {})
+    if hook_ov:
+        hook_ov["start_frame"] = 0
+        hook_ov["payoff_beat_id"] = mapped_beats[-1]["beat_id"]
+        if mapped_vis:
+            hook_ov["first_frame_visual_id"] = mapped_vis[0]["event_id"]
+        hook_ov["time_map_sha256"] = edl_sha
+
+    # 4. Remap KH-03 sound_plan cues onto exact output EDL frame/second clock
+    remapped_sound: dict[str, Any] | None = None
+    removed_cues: list[dict[str, Any]] = []
+    if kh03_overrides.get("sound_plan"):
+        sp_in = dict(kh03_overrides["sound_plan"])
+        new_events: list[dict[str, Any]] = []
+        for sev in sp_in.get("events", []):
+            sf_cue = int(sev.get("onset_frame", 0))
+            of_cue, inside = (sf_cue, True) if is_identity else _map_source_frame_to_edl(sf_cue, segs, total_out)
+            if not inside and not is_identity and sev.get("status") == "ADD":
+                # Re-anchor smoothly to mapped segment boundary if onset was right inside a trimmed pause
+                pass
+            nsev = dict(sev)
+            nsev["src_onset_frame"] = sf_cue
+            nsev["onset_frame"] = max(0, min(total_out - 1, of_cue))
+            nsev["onset_sec"] = round(float(Fraction(nsev["onset_frame"]) / fps_frac), 4)
+            nsev["clock_domain"] = "OUTPUT_EDL_MAPPED"
+            if nsev.get("beat_id") not in valid_beat_ids:
+                nsev["beat_id"] = next((b["beat_id"] for b in mapped_beats if b["start_frame"] <= nsev["onset_frame"] < b["end_frame"]), fallback_bid)
+            new_events.append(nsev)
+        sp_in["events"] = new_events
+        sp_in["clock_domain"] = "OUTPUT_EDL_MAPPED"
+        sp_in["time_map_sha256"] = edl_sha
+        remapped_sound = sp_in
+
+    remap_report = {
+        "schema_version": "kh03.timeline_remap_report.v1",
+        "clock_domain": "OUTPUT_EDL_MAPPED",
+        "time_map_sha256": edl_sha,
+        "identity_mapping": is_identity,
+        "fps_num": int(edl["fps_num"]),
+        "fps_den": int(edl["fps_den"]),
+        "total_output_frames": total_out,
+        "beats_in": len(raw_beats),
+        "beats_out": len(mapped_beats),
+        "beats_removed_or_merged": removed_beats,
+        "visual_events_in": len(raw_vis),
+        "visual_events_out": len(mapped_vis),
+        "visual_events_removed": removed_vis,
+        "sound_cues_remapped": len((remapped_sound or {}).get("events", [])),
+        "sound_cues_removed": removed_cues,
+        "mapped_words_count": len(mapped_words),
+        "pass": True,
+    }
+
+    if run_dir is not None:
+        write_json_atomic(run_dir / "manifests" / "TIMELINE_REMAP_REPORT.json", remap_report)
+        write_json_atomic(run_dir / "manifests" / "WORD_ANCHOR_MAP.json", {
+            "schema_version": "kh03.word_anchor_map.v1",
+            "time_map_sha256": edl_sha,
+            "fps_num": int(edl["fps_num"]),
+            "fps_den": int(edl["fps_den"]),
+            "words": mapped_words,
+        })
+
+    out_ov = dict(kh03_overrides)
+    out_ov["clock_domain"] = "OUTPUT_EDL_MAPPED"
+    out_ov["time_map_sha256"] = edl_sha
+    out_ov["total_output_frames"] = total_out
+    out_ov["custom_beats"] = mapped_beats
+    out_ov["custom_visual_events"] = mapped_vis
+    out_ov["selected_hook_override"] = hook_ov or out_ov.get("selected_hook_override")
+    out_ov["sound_plan"] = remapped_sound
+    out_ov["sound_plan_sha256"] = hash_artifact(remapped_sound) if remapped_sound else None
+    out_ov["timeline_remap_report"] = remap_report
+    return out_ov

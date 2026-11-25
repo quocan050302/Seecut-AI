@@ -94,6 +94,19 @@ def run_preflight(*, run_dir: Path | None = None) -> dict[str, Any]:
     return rep
 
 
+_VALID_LICENSE_DECISIONS = frozenset({
+    "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED",
+    "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED",
+    "BLOCKED_COMMERCIAL_LICENSE",
+    "BLOCKED_LICENSE_UNRESOLVED",
+})
+_VALID_PURPOSES = frozenset({
+    "NONCOMMERCIAL_ENGINEERING",
+    "NONCOMMERCIAL_PERSONAL",
+    "COMMERCIAL_MARKETING",
+})
+
+
 def run_recommend(
     *,
     video_path: Path,
@@ -103,9 +116,13 @@ def run_recommend(
     transcript_path: Path | None = None,
     video_rights: str = "OWNER_SUPPLIED_NONCOMMERCIAL",
     license_decision: str = "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED",
+    intended_purpose: str = "NONCOMMERCIAL_ENGINEERING",
+    commercial_permission_evidence: str | None = None,
     language: str | None = None,
     layout_lock: str | None = None,
     cut_policy: str = "LOCK_VOICE",
+    caption_policy: str = "OFF",
+    music_policy: str = "OFF",
     run_asr: bool = False,
     test_only: bool = False,
 ) -> dict[str, Any]:
@@ -114,12 +131,26 @@ def run_recommend(
     run_id = rdir.name
     init_state_machine(rdir, run_id)
 
+    eff_purpose = str(intended_purpose or "NONCOMMERCIAL_ENGINEERING").strip().upper()
+    if eff_purpose not in _VALID_PURPOSES:
+        eff_purpose = "COMMERCIAL_MARKETING"
+    eff_lic = str(license_decision or "BLOCKED_LICENSE_UNRESOLVED").strip().upper()
+    if eff_lic not in _VALID_LICENSE_DECISIONS:
+        eff_lic = "BLOCKED_LICENSE_UNRESOLVED"
+    comm_evid = str(commercial_permission_evidence or "").strip() or None
+    if eff_purpose == "COMMERCIAL_MARKETING" and (eff_lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" or not comm_evid or len(comm_evid) < 8):
+        eff_lic = "BLOCKED_COMMERCIAL_LICENSE"
+
     tr_json = parse_json_strict(transcript_path) if (transcript_path and Path(transcript_path).is_file()) else None
     constraints = {
         "layout_lock": layout_lock,
         "fullscreen_lock": (layout_lock == "FULLSCREEN_9_16"),
         "cut_policy": cut_policy,
-        "license_decision": license_decision,
+        "caption_policy": caption_policy,
+        "music_policy": music_policy,
+        "intended_purpose": eff_purpose,
+        "license_decision": eff_lic,
+        "commercial_permission_evidence": comm_evid,
     }
     res_in = analyze_inputs(
         video_path=video_path,
@@ -148,7 +179,7 @@ def run_recommend(
         test_only=test_only,
     )
 
-    rec = recommend_skills(inp, sem, constraints=constraints, license_decision=license_decision)
+    rec = recommend_skills(inp, sem, constraints=constraints, license_decision=eff_lic)
     issued = issue_recommendation(rec, rdir)
     persist_kh03_stage_receipt(
         rdir, "KH03_02_recommend_skills", run_id=run_id, status="AWAITING_USER_SELECTION",
@@ -211,10 +242,13 @@ def run_execute(
     mode: str = "plan",
     dry_run: bool = False,
     license_decision: str | None = None,
+    intended_purpose: str | None = None,
+    commercial_permission_evidence: str | None = None,
     cut_policy: str | None = None,
+    caption_policy: str | None = None,
     presenter_mode: str | None = None,
     sfx_policy: str = "OPTIONAL_LICENSED",
-    music_policy: str = "OFF",
+    music_policy: str | None = None,
     sfx_library_dirs: list[str | Path] | None = None,
     sfx_config_path: Path | None = None,
     footage_library_dirs: list[Path] | None = None,
@@ -222,20 +256,24 @@ def run_execute(
     workers: int = 2,
     max_disk_gib: float | None = None,
     offline: bool = True,
+    online_opt_in: bool = False,
+    run_h2: bool = False,
+    compare_baselines: list[Path] | None = None,
+    export_layers: bool = False,
     production_mode: bool = True,
     allow_test_only_sfx: bool = False,
     seecut_root: Path | None = None,
     tools_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Step 3: Validate mandatory user selection + license gate -> run full KH-03 intelligence -> KH-02 pipeline."""
+    """Step 3: Validate mandatory user selection + P0 license gate -> KH-03 intelligence -> KH-02 pipeline."""
     rdir = Path(os.path.realpath(str(run_root.expanduser())))
     run_id = rdir.name
+    eff_offline = False if online_opt_in else bool(offline)
 
-    # 1. Fail-closed mandatory user selection gate (direct execute CANNOT bypass!)
+    # 1. Fail-closed mandatory user selection gate (fresh disk re-hash of video + raw script + constraints!)
     try:
         inp = parse_json_strict(rdir / "analysis" / "INPUT_ANALYSIS.json")
         sem = parse_json_strict(rdir / "analysis" / "SEMANTIC_GRAPH.json")
-        # Re-hash current video on disk to catch modified input after recommendation
         vp = Path(inp["video_path"])
         cur_vid_sha = hash_artifact(vp) if vp.is_file() else "MISSING_VIDEO"
         sel_val = validate_user_selection(
@@ -249,9 +287,53 @@ def run_execute(
 
     skill_id = sel_val["selected_skill_id"]
     sel_sha = sel_val["receipt_sha256"]
-    eff_lic = license_decision or (inp.get("constraints") or {}).get("license_decision") or "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED"
+    saved_c = inp.get("constraints") or {}
+    saved_lic = str(saved_c.get("license_decision") or "BLOCKED_LICENSE_UNRESOLVED")
+    saved_purpose = str(saved_c.get("intended_purpose") or "NONCOMMERCIAL_ENGINEERING").upper()
+    saved_evid = str(saved_c.get("commercial_permission_evidence") or "").strip()
 
-    # 2. Fail-closed PROBLEM-01 License Gate before any SeeCut planning/rendering
+    eff_purpose = str(intended_purpose or saved_purpose).strip().upper()
+    eff_evid = str(commercial_permission_evidence if commercial_permission_evidence is not None else saved_evid).strip()
+    eff_lic = str(license_decision or saved_lic).strip().upper()
+
+    # 2. P0 Fail-Closed PROBLEM-01 License Gate (rejects invalid status, commercial override bypass, or unsubstantiated permission!)
+    if eff_lic not in _VALID_LICENSE_DECISIONS or eff_purpose not in _VALID_PURPOSES:
+        transition_state(rdir, STATE_BLOCKED, reason=f"Invalid license/purpose: {eff_lic!r}/{eff_purpose!r}", run_id=run_id)
+        return {
+            "exit_code": 2,
+            "status": "BLOCKED_LICENSE_UNRESOLVED",
+            "run_id": run_id,
+            "selected_skill_id": skill_id,
+            "reason": f"Fail-closed: invalid license_decision={eff_lic!r} or intended_purpose={eff_purpose!r}.",
+        }
+    # Block attempting to downgrade a previously blocked commercial recommendation into NONCOMMERCIAL!
+    if saved_lic in ("BLOCKED_COMMERCIAL_LICENSE", "BLOCKED_LICENSE_UNRESOLVED") and eff_lic == "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED":
+        transition_state(rdir, STATE_BLOCKED, reason="Blocked override from BLOCKED_COMMERCIAL_LICENSE to NONCOMMERCIAL.", run_id=run_id)
+        return {
+            "exit_code": 2,
+            "status": "BLOCKED_COMMERCIAL_LICENSE",
+            "run_id": run_id,
+            "selected_skill_id": skill_id,
+            "reason": "Cannot override a BLOCKED_COMMERCIAL_LICENSE recommendation with NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED.",
+        }
+    if eff_purpose == "COMMERCIAL_MARKETING" and (eff_lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" or len(eff_evid) < 8):
+        transition_state(rdir, STATE_BLOCKED, reason="COMMERCIAL_MARKETING lacks verified written permission evidence.", run_id=run_id)
+        return {
+            "exit_code": 2,
+            "status": "BLOCKED_COMMERCIAL_LICENSE",
+            "run_id": run_id,
+            "selected_skill_id": skill_id,
+            "reason": "COMMERCIAL_MARKETING requires WRITTEN_COMMERCIAL_PERMISSION_VERIFIED with substantiated commercial_permission_evidence.",
+        }
+    if eff_lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" and len(eff_evid) < 8:
+        transition_state(rdir, STATE_BLOCKED, reason="Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED.", run_id=run_id)
+        return {
+            "exit_code": 2,
+            "status": "BLOCKED_COMMERCIAL_LICENSE",
+            "run_id": run_id,
+            "selected_skill_id": skill_id,
+            "reason": "Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED rejected: provide commercial_permission_evidence.",
+        }
     if eff_lic in ("BLOCKED_COMMERCIAL_LICENSE", "BLOCKED_LICENSE_UNRESOLVED"):
         transition_state(rdir, STATE_BLOCKED, reason=f"PROBLEM-01 license gate: {eff_lic}", run_id=run_id)
         return {
@@ -272,7 +354,7 @@ def run_execute(
         return {"exit_code": 2, "status": "BLOCKED_LOW_DISK", "run_id": run_id, "free_disk_gib": pf["free_disk_gib"]}
 
     transition_state(rdir, STATE_PLANNING, reason=f"Starting KH-03 planning for selected skill {skill_id}.", run_id=run_id)
-    intended_purpose = (
+    asset_purpose = (
         "COMMERCIAL_AND_NONCOMMERCIAL" if eff_lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED"
         else ("TEST_ONLY" if not production_mode else "NONCOMMERCIAL_ONLY")
     )
@@ -284,12 +366,12 @@ def run_execute(
         run_dir=rdir,
         semantic_graph=sem,
         skill_id=skill_id,
-        constraints=inp.get("constraints"),
+        constraints=saved_c,
         local_libraries=footage_library_dirs,
         supplied_assets=supplied_assets,
-        intended_purpose=intended_purpose,
+        intended_purpose=asset_purpose,
         workers=workers,
-        offline=offline,
+        offline=eff_offline,
     )
     transition_state(
         rdir,
@@ -312,11 +394,13 @@ def run_execute(
         explanation_graph=explanation_graph,
         footage_manifest=footage_manifest,
         registry=reg,
-        constraints=inp.get("constraints"),
+        constraints=saved_c,
     )
 
     fps = inp["media"]["fps_num"] / float(max(1, inp["media"]["fps_den"]))
-    eff_cut = cut_policy or (inp.get("constraints") or {}).get("cut_policy") or "LOCK_VOICE"
+    eff_cut = cut_policy or saved_c.get("cut_policy") or "LOCK_VOICE"
+    eff_caption = caption_policy or saved_c.get("caption_policy") or "OFF"
+    eff_music = music_policy or saved_c.get("music_policy") or "OFF"
 
     # 5. Multi-Layer Sound Director
     snd_res = plan_soundscape_for_skill(
@@ -326,19 +410,19 @@ def run_execute(
         fps=fps,
         voice_policy=eff_cut,
         sfx_policy=sfx_policy,
-        bgm_policy=music_policy,
+        bgm_policy=eff_music,
         sfx_library_dirs=sfx_library_dirs,
         sfx_config_path=sfx_config_path,
-        intended_purpose=intended_purpose,
-        offline=offline,
+        intended_purpose=asset_purpose,
+        offline=eff_offline,
         workers=workers,
         production_mode=production_mode,
         allow_test_only_sfx=allow_test_only_sfx,
     )
 
-    # 6. Build KH-02 Brief & Invoke Normal KH-02 Pipeline (preserving engine & stage receipts!)
+    # 6. Build KH-02 Brief & Invoke Normal KH-02 Pipeline (passing authoritative hook + sound_plan + fullscreen_lock!)
     sk = get_skill_contract(skill_id)
-    kh03_ov = compile_to_kh02_overrides(creative_plan, fps=fps)
+    kh03_ov = compile_to_kh02_overrides(creative_plan, fps=fps, sound_plan=snd_res["sound_plan"])
 
     sources_list = [{
         "asset_id": "primary_aroll",
@@ -354,15 +438,21 @@ def run_execute(
             "asset_id": fa["asset_id"],
             "path": fa["local_path"],
             "kind": "still_asset" if fa["media_type"] in ("image", "screen_capture", "diagram_asset") else "b_roll",
-            "rights": "LICENSED_COMMERCIAL" if intended_purpose == "COMMERCIAL_AND_NONCOMMERCIAL" else "OWNER_SUPPLIED_NONCOMMERCIAL",
+            "rights": "LICENSED_COMMERCIAL" if asset_purpose == "COMMERCIAL_AND_NONCOMMERCIAL" else "OWNER_SUPPLIED_NONCOMMERCIAL",
             "label": fa["source_label"],
         })
 
-    # Respect explicit layout lock — NEVER override fullscreen lock with PIP!
-    fs_lock = bool((inp.get("constraints") or {}).get("fullscreen_lock"))
+    # R1.02: Explicit FULLSCREEN_9_16 lock propagated to camera.py & SHOTBOOK_V2 (never weakens PIP modes when unlocked!)
+    fs_lock = bool(saved_c.get("fullscreen_lock"))
     pres_pol: dict[str, Any]
     if fs_lock:
-        pres_pol = {"mode": "LEGACY_DYNAMIC", "visibility": "ALWAYS_VISIBLE", "allow_hide": False, "allow_fullscreen": True}
+        pres_pol = {
+            "mode": "LEGACY_DYNAMIC",
+            "visibility": "ALWAYS_VISIBLE",
+            "allow_hide": False,
+            "allow_fullscreen": True,
+            "fullscreen_lock": True,
+        }
     elif presenter_mode:
         pres_pol = {"mode": presenter_mode}
     else:
@@ -384,9 +474,11 @@ def run_execute(
         "voice_policy": eff_cut,
         "cut_policy": eff_cut,
         "energy_mode": kh03_ov["energy_mode"],
-        "caption_policy": "OFF",
-        "music_policy": music_policy,
+        "caption_policy": eff_caption,
+        "music_policy": eff_music,
         "sfx_policy": sfx_policy,
+        "intended_purpose": eff_purpose,
+        "commercial_permission_evidence": eff_evid or None,
         "license_decision": eff_lic,
         "creative_theme": creative_plan["art_direction"]["theme"],
         "presenter_policy": pres_pol,
@@ -404,10 +496,13 @@ def run_execute(
         max_disk_gib=max_disk_gib,
         sfx_library_dirs=sfx_library_dirs,
         sfx_config_path=sfx_config_path,
-        offline=offline,
+        offline=eff_offline,
         transcript_json_path=tr_file if tr_file.is_file() else None,
         seecut_root=seecut_root,
         tools_root=tools_root,
+        run_h2=run_h2,
+        compare_baselines=compare_baselines,
+        export_layers=export_layers,
         production_mode=production_mode,
         allow_test_only_sfx=allow_test_only_sfx,
         kh03_selection_receipt=sel_val["receipt"],
@@ -426,12 +521,18 @@ def run_execute(
 
     sb_path = rdir / "SHOTBOOK_V2.json"
     shotbook = parse_json_strict(sb_path) if sb_path.is_file() else None
-    transition_state(rdir, STATE_COMPILED, reason="KH-03 plan compiled cleanly through KH-02 pipeline.", run_id=run_id)
-    if mode in ("preview", "full") and kh02_res.get("final_mp4_path"):
-        transition_state(rdir, STATE_RENDERED, reason=f"Rendered {kh02_res['final_mp4_path']}", run_id=run_id)
+    final_mp4_raw = kh02_res.get("final_mp4_path")
+    final_mp4_exists = bool(final_mp4_raw and Path(final_mp4_raw).is_file())
+    final_mp4_sha = hash_artifact(Path(final_mp4_raw)) if final_mp4_exists else None
 
-    # 7. KH-03 Visual & Editorial QA
-    vis_qa = audit_fullscreen_and_collisions(creative_plan, inp, shotbook=shotbook)
+    transition_state(rdir, STATE_COMPILED, reason="KH-03 plan compiled cleanly through KH-02 pipeline.", run_id=run_id)
+    if mode in ("preview", "full") and final_mp4_exists:
+        transition_state(rdir, STATE_RENDERED, reason=f"Rendered {final_mp4_raw}", run_id=run_id)
+
+    # 7. KH-03 Visual & Editorial QA (strict shotbook requirement; separates PLAN vs RENDER!)
+    vis_qa = audit_fullscreen_and_collisions(
+        creative_plan, inp, shotbook=shotbook, require_shotbook=(not dry_run), run_dir=(None if dry_run else rdir),
+    )
     transition_state(rdir, STATE_QA, reason="Executing KH-03 editorial & comprehension QA.", run_id=run_id)
     qa_rep = evaluate_kh03_editorial(
         run_id=run_id,
@@ -448,30 +549,57 @@ def run_execute(
             str(rdir / "assets/FOOTAGE_MANIFEST.json"),
             str(rdir / "stems/SOUND_DIRECTOR_PLAN.json"),
         ] + ([str(sb_path)] if sb_path.is_file() else []),
-        run_dir=rdir,
+        run_dir=(None if dry_run else rdir),
     )
-    if qa_rep["editorial_candidate_pass"]:
-        transition_state(rdir, STATE_CANDIDATE, reason=f"KH-03 editorial candidate passed ({qa_rep['total_score']}/100); owner approvals PENDING.", run_id=run_id)
+
+    # R1.07: Mode-truthful status — plan mode NEVER claims RENDER_CANDIDATE_VERIFIED or OWNER_PENDING final video!
+    if mode == "plan":
+        if qa_rep["editorial_candidate_pass"]:
+            final_status = "KH03_PLAN_PASS"
+            exit_c = 0
+        else:
+            final_status = "KH03_QA_DEFECTS"
+            exit_c = 1
+    elif mode in ("preview", "full"):
+        if not final_mp4_exists:
+            final_status = "KH03_RENDER_INCOMPLETE"
+            exit_c = 1
+        elif qa_rep["editorial_candidate_pass"]:
+            final_status = "KH03_RENDER_CANDIDATE_VERIFIED" if mode == "full" else "KH03_PREVIEW_VERIFIED"
+            exit_c = 0
+            transition_state(rdir, STATE_CANDIDATE, reason=f"Rendered & verified ({final_status}); owner approvals PENDING.", run_id=run_id)
+        else:
+            final_status = "KH03_QA_DEFECTS"
+            exit_c = 1
+    else:
+        final_status = "KH03_PLAN_PASS" if qa_rep["editorial_candidate_pass"] else "KH03_QA_DEFECTS"
+        exit_c = 0 if qa_rep["editorial_candidate_pass"] else 1
 
     persist_kh03_stage_receipt(
         rdir, "KH03_04_execute_and_qa", run_id=run_id,
-        status="PASS" if qa_rep["editorial_candidate_pass"] else "FAIL",
-        reason=f"Skill={skill_id}, score={qa_rep['total_score']}/100, kh02={kh02_res.get('status')}, owner=PENDING.",
+        status="PASS" if exit_c == 0 else "FAIL",
+        reason=f"mode={mode}, status={final_status}, skill={skill_id}, score={qa_rep['total_score']}/100, final_mp4={bool(final_mp4_exists)}.",
         input_hashes={"selection_receipt_sha256": sel_sha, "kh03_plan_sha256": creative_plan["plan_sha256"]},
-        output_hashes={"qa_report_sha256": hash_artifact(qa_rep), "shotbook_sha256": kh02_res.get("shotbook_sha256")},
-        evidence_paths=[str(rdir / "qc/KH03_QA_REPORT.json")],
+        output_hashes={
+            "qa_report_sha256": hash_artifact(qa_rep),
+            "shotbook_sha256": kh02_res.get("shotbook_sha256"),
+            "final_mp4_sha256": final_mp4_sha,
+        },
+        evidence_paths=[str(rdir / "qc/KH03_QA_REPORT.json")] + ([str(final_mp4_raw)] if final_mp4_exists else []),
         test_only=(not production_mode),
     )
 
     return {
-        "exit_code": 0,
-        "status": "KH03_CANDIDATE_PENDING_OWNER" if qa_rep["editorial_candidate_pass"] else "KH03_QA_DEFECTS",
+        "exit_code": exit_c,
+        "status": final_status,
+        "mode": mode,
         "run_id": run_id,
         "selected_skill_id": skill_id,
         "selection_receipt_sha256": sel_sha,
         "creative_plan_sha256": creative_plan["plan_sha256"],
         "shotbook_sha256": kh02_res.get("shotbook_sha256"),
-        "final_mp4_path": kh02_res.get("final_mp4_path"),
+        "final_mp4_path": final_mp4_raw if final_mp4_exists else None,
+        "final_mp4_sha256": final_mp4_sha,
         "qa_report": qa_rep,
         "kh02_status": kh02_res.get("status"),
     }
@@ -492,7 +620,8 @@ def run_status(*, run_root: Path) -> dict[str, Any]:
     }
 
 
-def run_verify(*, run_root: Path, production_mode: bool = True) -> dict[str, Any]:
+def run_verify(*, run_root: Path, production_mode: bool = True, require_render: bool = False) -> dict[str, Any]:
+    """Fail-closed verifier requiring full KH-03 + KH-02 artifact presence and SHA linkage (R1.07)."""
     rdir = Path(os.path.realpath(str(run_root.expanduser())))
     issues: list[str] = []
     try:
@@ -500,6 +629,20 @@ def run_verify(*, run_root: Path, production_mode: bool = True) -> dict[str, Any
     except Exception as ex:
         issues.append(str(ex))
         sel = None
+
+    required_files = [
+        rdir / "analysis" / "INPUT_ANALYSIS.json",
+        rdir / "selection" / "SKILL_RECOMMENDATION.json",
+        rdir / "selection" / "SELECTION_RECEIPT.json",
+        rdir / "manifests" / "CREATIVE_PLAN.json",
+        rdir / "SHOTBOOK_V2.json",
+        rdir / "qc" / "KH03_QA_REPORT.json",
+        rdir / "STAGE_RECEIPTS" / "F_canonical_shotbook.json",
+    ]
+    for rf in required_files:
+        if not rf.is_file():
+            issues.append(f"MISSING_REQUIRED_ARTIFACT: {rf.name}")
+
     cp = rdir / "manifests" / "CREATIVE_PLAN.json"
     sb = rdir / "SHOTBOOK_V2.json"
     if cp.is_file() and sb.is_file():
@@ -507,9 +650,28 @@ def run_verify(*, run_root: Path, production_mode: bool = True) -> dict[str, Any
         shot = parse_json_strict(sb)
         if sel and plan["selected_skill_id"] != sel["selected_skill_id"]:
             issues.append("Skill mismatch between SELECTION_RECEIPT and CREATIVE_PLAN.")
-        prov_skill = (shot.get("provenance") or {}).get("kh03_selected_skill_id")
+        prov = shot.get("provenance") or {}
+        prov_skill = prov.get("kh03_selected_skill_id")
         if sel and prov_skill != sel["selected_skill_id"]:
             issues.append(f"Skill propagation missing in SHOTBOOK_V2 provenance ({prov_skill!r} != {sel['selected_skill_id']!r}).")
+        if prov.get("kh03_plan_sha256") != plan.get("plan_sha256"):
+            issues.append("CREATIVE_PLAN SHA mismatch in SHOTBOOK_V2 provenance.")
+        if prov.get("kh03_clock_domain") != "OUTPUT_EDL_MAPPED":
+            issues.append(f"SHOTBOOK_V2 missing OUTPUT_EDL_MAPPED clock provenance ({prov.get('kh03_clock_domain')!r}).")
+
+    rec4 = rdir / "STAGE_RECEIPTS" / "KH03_04_execute_and_qa.json"
+    if require_render:
+        if not rec4.is_file():
+            issues.append("MISSING_RENDER_RECEIPT: KH03_04_execute_and_qa.json absent.")
+        else:
+            r4 = parse_json_strict(rec4)
+            mp4_sha = (r4.get("output_hashes") or {}).get("final_mp4_sha256")
+            mp4_paths = [Path(p) for p in (r4.get("evidence_paths") or []) if str(p).lower().endswith(".mp4")]
+            if not mp4_sha or not mp4_paths or not mp4_paths[0].is_file():
+                issues.append("MISSING_FINAL_MP4: require_render=True but final rendered MP4 missing.")
+            elif hash_artifact(mp4_paths[0]) != mp4_sha:
+                issues.append("TAMPERED_FINAL_MP4: final MP4 SHA on disk does not match stage receipt.")
+
     return {
         "exit_code": 0 if not issues else 1,
         "status": "VERIFY_PASS" if not issues else "VERIFY_FAIL",
@@ -533,7 +695,11 @@ def main(argv: list[str] | None = None) -> int:
     p_rec.add_argument("--language", default=None)
     p_rec.add_argument("--layout-lock", default=None)
     p_rec.add_argument("--cut-policy", default="LOCK_VOICE")
+    p_rec.add_argument("--caption-policy", choices=["OFF", "ON_REQUESTED", "KEYWORDS_ONLY"], default="OFF")
+    p_rec.add_argument("--music-policy", choices=["OFF", "OPTIONAL_LICENSED", "REQUIRED_LICENSED"], default="OFF")
+    p_rec.add_argument("--purpose", choices=sorted(_VALID_PURPOSES), default="NONCOMMERCIAL_ENGINEERING")
     p_rec.add_argument("--license-decision", default="NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED")
+    p_rec.add_argument("--commercial-permission-evidence", default=None)
     p_rec.add_argument("--run-asr", action="store_true")
 
     p_sel = sub.add_parser("select", help="Record explicit user selection of ONE universal skill (SK-01..SK-05)")
@@ -546,21 +712,29 @@ def main(argv: list[str] | None = None) -> int:
     p_exe.add_argument("--mode", choices=["plan", "preview", "full", "verify"], default="plan")
     p_exe.add_argument("--dry-run", action="store_true")
     p_exe.add_argument("--license-decision", default=None)
+    p_exe.add_argument("--purpose", choices=sorted(_VALID_PURPOSES), default=None)
+    p_exe.add_argument("--commercial-permission-evidence", default=None)
     p_exe.add_argument("--cut-policy", default=None)
+    p_exe.add_argument("--caption-policy", choices=["OFF", "ON_REQUESTED", "KEYWORDS_ONLY"], default=None)
     p_exe.add_argument("--presenter-mode", default=None)
     p_exe.add_argument("--sfx-policy", default="OPTIONAL_LICENSED")
-    p_exe.add_argument("--music-policy", default="OFF")
+    p_exe.add_argument("--music-policy", choices=["OFF", "OPTIONAL_LICENSED", "REQUIRED_LICENSED"], default=None)
     p_exe.add_argument("--sfx-library", action="append", default=None)
+    p_exe.add_argument("--sfx-config", type=Path, default=None)
     p_exe.add_argument("--footage-library", action="append", type=Path, default=None)
     p_exe.add_argument("--workers", type=int, default=2)
     p_exe.add_argument("--max-disk", type=float, default=None)
-    p_exe.add_argument("--offline", action="store_true", default=True)
+    p_exe.add_argument("--online-opt-in", action="store_true", default=False)
+    p_exe.add_argument("--run-h2", action="store_true", default=False)
+    p_exe.add_argument("--compare-baseline", action="append", type=Path, default=None)
+    p_exe.add_argument("--export-layers", action="store_true", default=False)
 
     p_st = sub.add_parser("status", help="Inspect KH-03 state machine and binding receipt")
     p_st.add_argument("--run-root", required=True, type=Path)
 
     p_vf = sub.add_parser("verify", help="Verify selection receipt and KH-03 -> KH-02 SHA propagation")
     p_vf.add_argument("--run-root", required=True, type=Path)
+    p_vf.add_argument("--require-render", action="store_true", default=False)
 
     args = ap.parse_args(argv)
     if args.cmd == "preflight":
@@ -577,7 +751,11 @@ def main(argv: list[str] | None = None) -> int:
             language=args.language,
             layout_lock=args.layout_lock,
             cut_policy=args.cut_policy,
+            caption_policy=args.caption_policy,
+            music_policy=args.music_policy,
+            intended_purpose=args.purpose,
             license_decision=args.license_decision,
+            commercial_permission_evidence=args.commercial_permission_evidence,
             run_asr=args.run_asr,
         )
         print(out["menu_text"])
@@ -598,15 +776,23 @@ def main(argv: list[str] | None = None) -> int:
             mode=args.mode,
             dry_run=args.dry_run,
             license_decision=args.license_decision,
+            intended_purpose=args.purpose,
+            commercial_permission_evidence=args.commercial_permission_evidence,
             cut_policy=args.cut_policy,
+            caption_policy=args.caption_policy,
             presenter_mode=args.presenter_mode,
             sfx_policy=args.sfx_policy,
             music_policy=args.music_policy,
             sfx_library_dirs=args.sfx_library,
+            sfx_config_path=args.sfx_config,
             footage_library_dirs=args.footage_library,
             workers=args.workers,
             max_disk_gib=args.max_disk,
-            offline=args.offline,
+            offline=(not args.online_opt_in),
+            online_opt_in=args.online_opt_in,
+            run_h2=args.run_h2,
+            compare_baselines=args.compare_baseline,
+            export_layers=args.export_layers,
         )
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return int(out["exit_code"])
@@ -614,6 +800,6 @@ def main(argv: list[str] | None = None) -> int:
         out = run_status(run_root=args.run_root)
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return int(out["exit_code"])
-    out = run_verify(run_root=args.run_root)
+    out = run_verify(run_root=args.run_root, require_render=args.require_render)
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return int(out["exit_code"])

@@ -77,14 +77,20 @@ def validate_structural(
     if expect_audio and not media["has_audio"]:
         issues.append({"severity": "P0", "code": "MP4_MISSING_AUDIO", "message": "Required audio stream missing"})
 
-    # 3. Monotonic PTS check via ffprobe packets
+    # 3. Monotonic PTS check via ffprobe JSON (cross-version FFmpeg 6/7/8/9 safe; rejects corrupt values)
     pts_proc = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
          "-show_entries", "frame=best_effort_timestamp_time",
-         "-of", "csv=p=0", str(p)],
+         "-of", "json", str(p)],
         capture_output=True, text=True, timeout=60,
     )
-    pts_vals = [float(x) for x in pts_proc.stdout.splitlines() if x.strip() and x.strip() != "N/A"]
+    pts_vals: list[float] = []
+    if pts_proc.returncode == 0 and pts_proc.stdout.strip():
+        pts_doc = json.loads(pts_proc.stdout)
+        for fr in pts_doc.get("frames", []):
+            raw_ts = fr.get("best_effort_timestamp_time")
+            if raw_ts is not None and str(raw_ts).strip() not in ("", "N/A"):
+                pts_vals.append(float(raw_ts))
     non_mono = sum(1 for i in range(1, len(pts_vals)) if pts_vals[i] <= pts_vals[i - 1])
     if non_mono > 0:
         issues.append({"severity": "P0", "code": "MP4_NON_MONOTONIC_PTS", "message": f"{non_mono} non-monotonic video PTS entries"})

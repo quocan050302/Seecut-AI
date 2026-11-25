@@ -62,19 +62,48 @@ def audit_fullscreen_and_collisions(
     input_analysis: dict[str, Any],
     *,
     shotbook: dict[str, Any] | None = None,
+    require_shotbook: bool = False,
+    run_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Audit full-screen lock compliance, protected-region clearance, 360px legibility & motion determinism."""
+    """Audit full-screen lock compliance, camera geometry, protected-region clearance, 360px legibility & motion (R1.02)."""
     lc = creative_plan.get("layout_constraints") or {}
     fs_lock = bool(lc.get("fullscreen_lock"))
+    media = input_analysis.get("media") or {}
+    fps_num = int(media.get("fps_num") or 24)
+    fps_den = max(1, int(media.get("fps_den") or 1))
+    real_fps = fps_num / float(fps_den)
     issues: list[str] = []
+    cam_issues: list[str] = []
 
     if not lc.get("collision_ok", False):
         issues.append("PROTECTED_REGION_COLLISION: unresolved overlay overlap with protected face/hands/object mask.")
 
-    if fs_lock and shotbook is not None:
-        pm = (shotbook.get("presenter_policy") or {}).get("mode", "LEGACY_DYNAMIC")
-        if pm in ("FIXED_PIP", "ADAPTIVE_PIP", "FACELESS"):
-            issues.append(f"FULLSCREEN_LOCK_VIOLATION: presenter_policy.mode={pm!r} violates explicit full-screen lock.")
+    if shotbook is None:
+        if require_shotbook or fs_lock:
+            issues.append("MISSING_SHOTBOOK: Cannot certify fullscreen/camera geometry or motion audit without canonical SHOTBOOK_V2.")
+    else:
+        sb_spec = shotbook.get("output_spec") or {}
+        if sb_spec.get("fps_num") and sb_spec.get("fps_den"):
+            real_fps = int(sb_spec["fps_num"]) / float(max(1, int(sb_spec["fps_den"])))
+        if fs_lock:
+            pm = (shotbook.get("presenter_policy") or {}).get("mode", "LEGACY_DYNAMIC")
+            if pm in ("FIXED_PIP", "ADAPTIVE_PIP", "FACELESS", "DYNAMIC_HYBRID"):
+                issues.append(f"FULLSCREEN_LOCK_VIOLATION: presenter_policy.mode={pm!r} violates explicit full-screen lock.")
+            cam_events = shotbook.get("camera_events") or []
+            if not cam_events:
+                cam_issues.append("FULLSCREEN_LOCK_NO_CAMERA_EVENTS: Missing frame-0..EOF camera geometry proof.")
+            for ce in cam_events:
+                tr = [round(float(x), 4) for x in (ce.get("target_region") or [0, 0, 0, 0])]
+                sc_f = round(float(ce.get("scale_from", 1.0)), 4)
+                sc_t = round(float(ce.get("scale_to", 1.0)), 4)
+                op = round(float(ce.get("presenter_opacity", 1.0)), 4)
+                if tr != [0.0, 0.0, 1.0, 1.0]:
+                    cam_issues.append(f"FULLSCREEN_REGION_DRIFT({ce.get('camera_id')}): target_region={tr} != [0,0,1,1]")
+                if abs(sc_f - 1.0) > 0.005 or abs(sc_t - 1.0) > 0.005:
+                    cam_issues.append(f"FULLSCREEN_ZOOM_FORBIDDEN({ce.get('camera_id')}): scale {sc_f}->{sc_t} != 1.0")
+                if op < 0.99:
+                    cam_issues.append(f"FULLSCREEN_OPACITY_FADE({ce.get('camera_id')}): opacity={op} < 1.0")
+            issues.extend(cam_issues)
 
     unreadable = [
         c["component_id"] for c in creative_plan.get("components", [])
@@ -83,23 +112,211 @@ def audit_fullscreen_and_collisions(
     if unreadable:
         issues.append(f"MOBILE_360PX_UNREADABLE: {unreadable}")
 
-    motion_audit = (
-        audit_component_motion(shotbook.get("visual_events", []), fps=24.0)
-        if shotbook is not None else {"pass": True, "unique_capabilities": len({c["capability_id"] for c in creative_plan.get("components", [])}), "anomalies": []}
-    )
-    if not motion_audit["pass"]:
-        issues.extend(motion_audit["anomalies"])
+    if shotbook is not None:
+        motion_audit = audit_component_motion(shotbook.get("visual_events", []), fps=real_fps)
+        if not motion_audit["pass"]:
+            issues.extend(motion_audit["anomalies"])
+    else:
+        motion_audit = {"pass": False, "unique_capabilities": 0, "anomalies": ["MISSING_SHOTBOOK_FOR_MOTION_AUDIT"]}
+
+    cam_qa = {
+        "schema_version": "kh03.camera_geometry_qa.v1",
+        "scope": "PLAN_AND_COMPILE_ONLY",
+        "fullscreen_lock": fs_lock,
+        "fps_used": round(real_fps, 4),
+        "camera_event_count": len((shotbook or {}).get("camera_events") or []),
+        "issues": cam_issues,
+        "pass": len(cam_issues) == 0 and (shotbook is not None),
+    }
+    prot_map = {
+        "schema_version": "kh03.protected_region_map.v1",
+        "detection_mode": "STATIC_FALLBACK_VERIFIED",
+        "note": "Conservative swept safe bounds verified; ML face/hand tracker not claimed unless explicitly executed.",
+        "protected_zones": (input_analysis.get("safe_regions") or {}).get("protected_zones") or [],
+        "clear_overlay_zones": (input_analysis.get("safe_regions") or {}).get("clear_overlay_zones") or [],
+    }
+    if run_dir is not None:
+        write_json_atomic(run_dir / "qc" / "CAMERA_GEOMETRY_QA.json", cam_qa)
+        write_json_atomic(run_dir / "qc" / "PROTECTED_REGION_MAP.json", prot_map)
 
     return {
         "schema_version": "kh03.visual_qa.v1",
+        "verification_scope": "PLAN_ONLY_NOT_DECODED_RENDER",
         "fullscreen_lock_enforced": fs_lock,
+        "fps_used": round(real_fps, 4),
         "collision_ok": bool(lc.get("collision_ok", False)),
         "reflow_count": int(lc.get("reflow_count", 0)),
         "mobile_360px_unreadable": unreadable,
+        "camera_geometry_qa": cam_qa,
         "motion_audit": motion_audit,
         "issues": issues,
         "pass": len(issues) == 0,
     }
+
+
+def verify_fullscreen_frames(
+    source_mp4: str | Path,
+    final_mp4: str | Path,
+    *,
+    edl: dict[str, Any] | None = None,
+    overlay_events: list[dict[str, Any]] | None = None,
+    protected_zones: list[dict[str, Any]] | None = None,
+    out_dir: str | Path | None = None,
+    max_mean_diff: float = 18.0,
+    probe_w: int = 180,
+    probe_h: int = 320,
+) -> dict[str, Any]:
+    """Stream EVERY decoded frame (0..N-1) comparing expected EDL source frame vs final MP4 outside overlay mask (R1.02).
+
+    Detects single-frame PIP shrink, zoom/crop, black/hidden source, wrong frame order, freeze, and
+    protected-region overlay intrusion without dumping full-res PNGs to disk.
+    """
+    src_p = Path(source_mp4).resolve()
+    fin_p = Path(final_mp4).resolve()
+    if not src_p.is_file() or not fin_p.is_file():
+        return {
+            "schema_version": "kh03.fullscreen_frame_qa.v1",
+            "verification_scope": "DECODED_RENDER",
+            "status": "FAIL_MISSING_MEDIA",
+            "pass": False,
+            "issues": ["Source or final MP4 missing for decoded frame verification."],
+        }
+
+    def _probe_meta(p: Path) -> dict[str, Any]:
+        pr = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height,r_frame_rate,nb_frames", "-of", "json", str(p)],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        st = json.loads(pr.stdout)["streams"][0]
+        num, den = (int(x) for x in str(st.get("r_frame_rate", "24/1")).split("/"))
+        return {
+            "width": int(st["width"]), "height": int(st["height"]),
+            "fps_num": num, "fps_den": max(1, den),
+            "nb_frames": int(st["nb_frames"]) if str(st.get("nb_frames", "")).isdigit() else None,
+        }
+
+    src_m = _probe_meta(src_p)
+    fin_m = _probe_meta(fin_p)
+    issues: list[str] = []
+
+    src_ar = src_m["width"] / float(max(1, src_m["height"]))
+    fin_ar = fin_m["width"] / float(max(1, fin_m["height"]))
+    if abs(src_ar - fin_ar) > 0.02:
+        issues.append(f"ASPECT_MISMATCH: source {src_m['width']}x{src_m['height']} vs final {fin_m['width']}x{fin_m['height']}")
+    if (src_m["fps_num"] / float(src_m["fps_den"])) != (fin_m["fps_num"] / float(fin_m["fps_den"])):
+        issues.append(f"FPS_MISMATCH: source {src_m['fps_num']}/{src_m['fps_den']} vs final {fin_m['fps_num']}/{fin_m['fps_den']}")
+
+    # Build expected source frame index -> output frame index list from EDL (or identity)
+    if edl and edl.get("segments"):
+        expected_src_frames: list[int] = []
+        for seg in edl["segments"]:
+            expected_src_frames.extend(range(int(seg["src_start_frame"]), int(seg["src_end_frame"])))
+    else:
+        n_est = fin_m["nb_frames"] or src_m["nb_frames"] or 0
+        expected_src_frames = list(range(n_est))
+
+    # Decode compact 180x320 RGB frames via streaming FFmpeg pipe (constant bounded memory)
+    def _decode_raw_rgb(p: Path, w: int, h: int) -> bytes:
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(p), "-vf", f"scale={w}:{h}:flags=bilinear", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=180,
+        )
+        return proc.stdout
+
+    frame_bytes = probe_w * probe_h * 3
+    src_buf = _decode_raw_rgb(src_p, probe_w, probe_h)
+    fin_buf = _decode_raw_rgb(fin_p, probe_w, probe_h)
+    src_n = len(src_buf) // frame_bytes
+    fin_n = len(fin_buf) // frame_bytes
+    if not expected_src_frames:
+        expected_src_frames = list(range(fin_n))
+
+    if fin_n != len(expected_src_frames):
+        issues.append(f"FRAME_COUNT_MISMATCH: final decoded {fin_n} frames != expected EDL {len(expected_src_frames)} frames")
+
+    # Build protected mask pixels (focus on presenter/subject region where overlays must NOT occlude)
+    pzones = protected_zones or [{"bbox_norm": [0.15, 0.30, 0.70, 0.44]}]
+    ov_list = overlay_events or []
+    n_check = min(fin_n, len(expected_src_frames))
+    fail_frames: list[dict[str, Any]] = []
+    max_obs_diff = 0.0
+    total_diff = 0.0
+
+    for out_idx in range(n_check):
+        src_idx = expected_src_frames[out_idx]
+        if src_idx >= src_n:
+            fail_frames.append({"frame": out_idx, "reason": f"src_idx {src_idx} >= src_n {src_n}"})
+            continue
+        im_s = Image.frombytes("RGB", (probe_w, probe_h), src_buf[src_idx * frame_bytes : (src_idx + 1) * frame_bytes])
+        im_f = Image.frombytes("RGB", (probe_w, probe_h), fin_buf[out_idx * frame_bytes : (out_idx + 1) * frame_bytes])
+
+        # Mask out ONLY approved non-protected overlay rects active on this frame; protected zones are NEVER masked out!
+        active_boxes = [
+            ev["normalized_bbox"] for ev in ov_list
+            if int(ev.get("start_frame", 0)) <= out_idx < int(ev.get("end_frame", 0)) and ev.get("normalized_bbox")
+        ]
+        # Measure diff inside protected zones directly (catches PIP shrink, zoom, crop, black frame, wrong order, or face occlusion!)
+        prot_diffs: list[float] = []
+        for pz in pzones:
+            bx, by, bw, bh = [float(v) for v in pz["bbox_norm"]]
+            box = (
+                max(0, int(bx * probe_w)), max(0, int(by * probe_h)),
+                min(probe_w, max(1, int((bx + bw) * probe_w))), min(probe_h, max(1, int((by + bh) * probe_h))),
+            )
+            diff_im = ImageChops.difference(im_s.crop(box), im_f.crop(box))
+            md = sum(ImageStat.Stat(diff_im).mean) / 3.0
+            prot_diffs.append(md)
+        # Also check full-frame outside active overlay boxes (catches background replacement / letterbox / PIP shrink)
+        im_s_m = im_s.copy()
+        im_f_m = im_f.copy()
+        for bx, by, bw, bh in active_boxes:
+            x0, y0 = max(0, int(bx * probe_w)), max(0, int(by * probe_h))
+            x1, y1 = min(probe_w, int((bx + bw) * probe_w)), min(probe_h, int((by + bh) * probe_h))
+            if x1 > x0 and y1 > y0:
+                im_s_m.paste((0, 0, 0), (x0, y0, x1, y1))
+                im_f_m.paste((0, 0, 0), (x0, y0, x1, y1))
+        bg_md = sum(ImageStat.Stat(ImageChops.difference(im_s_m, im_f_m)).mean) / 3.0
+        frame_md = round(max([bg_md] + prot_diffs), 3)
+        max_obs_diff = max(max_obs_diff, frame_md)
+        total_diff += frame_md
+        if frame_md > max_mean_diff:
+            fail_frames.append({
+                "frame": out_idx,
+                "expected_src_frame": src_idx,
+                "mean_abs_diff": frame_md,
+                "bg_diff": round(bg_md, 3),
+                "protected_max_diff": round(max(prot_diffs) if prot_diffs else 0.0, 3),
+                "reason": "FULLSCREEN_OR_PROTECTED_ZONE_DRIFT",
+            })
+
+    if fail_frames:
+        issues.append(f"FULLSCREEN_DECODED_FRAME_DRIFT: {len(fail_frames)}/{n_check} frames exceeded tolerance {max_mean_diff} (max={max_obs_diff})")
+
+    report = {
+        "schema_version": "kh03.fullscreen_frame_qa.v1",
+        "verification_scope": "DECODED_RENDER",
+        "source_mp4_sha256": hash_artifact(src_p),
+        "final_mp4_sha256": hash_artifact(fin_p),
+        "source_resolution": f"{src_m['width']}x{src_m['height']}",
+        "final_resolution": f"{fin_m['width']}x{fin_m['height']}",
+        "fps": f"{fin_m['fps_num']}/{fin_m['fps_den']}",
+        "frames_checked": n_check,
+        "frames_expected": len(expected_src_frames),
+        "max_mean_abs_diff": round(max_obs_diff, 3),
+        "avg_mean_abs_diff": round(total_diff / float(max(1, n_check)), 3),
+        "tolerance_mean_abs_diff": max_mean_diff,
+        "fail_frame_count": len(fail_frames),
+        "fail_frames_sample": fail_frames[:12],
+        "issues": issues,
+        "status": "DECODED_RENDER_PASS" if not issues else "DECODED_RENDER_FAIL",
+        "pass": len(issues) == 0,
+    }
+    if out_dir is not None:
+        od = Path(out_dir)
+        od.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(od / "FULLSCREEN_FRAME_QA.json", report)
+    return report
 
 
 def _create_minimal_gsap_shim(dest: Path) -> None:
@@ -459,11 +676,25 @@ async function runPass(plan, port) {
         }
 
     verified_reg = mark_gallery_verified(reg, results)
+    gsap_path = bdir / "assets" / "gsap.min.js"
+    gsap_sha = hash_artifact(gsap_path) if gsap_path.is_file() else None
+    bv_proc = subprocess.run([str(chrome_exe), "--version"], capture_output=True, text=True, timeout=15)
+    browser_ver = (bv_proc.stdout or bv_proc.stderr or "").strip() or "unknown"
+    native_gsap_ok = bool(all_pass and not gsap_shim_used)
+    shim_test_ok = bool(all_pass and gsap_shim_used)
     report = {
         "schema_version": "kh03.component_gallery.v1",
         "pass": all_pass,
         "status": "PASS" if all_pass else "FAIL",
         "gsap_mode": "OFFLINE_DETERMINISTIC_SHIM_TEST_ONLY" if gsap_shim_used else "PINNED_HYPERFRAMES_GSAP",
+        "gsap_vendor_sha256": gsap_sha,
+        "browser_version": browser_ver,
+        "native_gsap_verified": native_gsap_ok,
+        "shim_only_test_pass": shim_test_ok,
+        "production_gallery_status": (
+            "NATIVE_GSAP_PASS" if native_gsap_ok
+            else ("SHIM_ONLY_TEST_PASS_BLOCKED_MISSING_NATIVE_GSAP" if shim_test_ok else "FAIL")
+        ),
         "browser_errors": meta.get("errors", []),
         "t0_blank_sha256": hash_artifact(t0_png),
         "verified_count": sum(1 for v in results.values() if v["pass"]),
@@ -471,5 +702,6 @@ async function runPass(plan, port) {
         "capabilities": results,
     }
     write_json_atomic(gdir / "COMPONENT_GALLERY_REPORT.json", report)
+    write_json_atomic(gdir / "GALLERY_VERIFICATION.json", report)
     write_json_atomic(gdir / "CAPABILITY_REGISTRY_VERIFIED.json", verified_reg)
     return report

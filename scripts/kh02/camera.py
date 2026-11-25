@@ -561,6 +561,20 @@ def choose_framing(
             "reason": f"DYNAMIC_HYBRID PIP at {reg['anchor']} yielding main stage to {fn}.",
         }
 
+    # Explicit FULLSCREEN_9_16 / fullscreen_lock: uniform full canvas from frame 0 through EOF (zero PIP/zoom/crop/fade)
+    if presenter_policy is not None and bool(presenter_policy.get("fullscreen_lock")):
+        return {
+            "framing": "full_medium",
+            "target_region": [0.0, 0.0, 1.0, 1.0],
+            "anchor": [0.5, 0.5],
+            "scale_from": 1.0,
+            "scale_to": 1.0,
+            "presenter_opacity": 1.0,
+            "presenter_shape": "ROUNDED_RECT",
+            "presenter_z_order": 10,
+            "reason": f"FULLSCREEN_LOCK active: uniform 1.0x full-canvas framing across {fn} (zero PIP, zoom, pan, or fade).",
+        }
+
     # LEGACY_DYNAMIC (preserves exact v1/R1 framing defaults)
     if "pip_bottom_left" in vm:
         return {
@@ -655,7 +669,13 @@ def plan_camera_path(
             platform=platform,
             aspect_ratio=aspect_ratio,
         )
-        if pol_mode in ("FIXED_PIP", "ADAPTIVE_PIP") and fr.get("presenter_crop"):
+        if presenter_policy and bool(presenter_policy.get("fullscreen_lock")):
+            sc_from = 1.0
+            sc_to = 1.0
+            pos_from = [0.0, 0.0]
+            pos_to = [0.0, 0.0]
+            res_lim = max_zoom
+        elif pol_mode in ("FIXED_PIP", "ADAPTIVE_PIP") and fr.get("presenter_crop"):
             crop = fr["presenter_crop"]
             sc_from = float(crop["scale"])
             sc_to = float(crop["scale"])

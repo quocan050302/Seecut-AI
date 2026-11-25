@@ -320,16 +320,31 @@ def run_render_checked(
     env = dict(os.environ)
     env["RENDER_SCALE"] = str(eff_scale)
     t0 = time.monotonic()
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    popen_kw: dict[str, Any] = {
+        "env": env, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True,
+    }
+    if os.name != "nt":
+        popen_kw["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **popen_kw)
     try:
         stdout, stderr = proc.communicate(timeout=timeout_sec)
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            if os.name != "nt" and hasattr(os, "killpg"):
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            else:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True, text=True, timeout=10,
+                )
         except OSError:
             proc.kill()
-        stdout, stderr = proc.communicate(timeout=10)
+        try:
+            stdout, stderr = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate(timeout=5)
         raise TimeoutError(f"render.mjs timed out after {timeout_sec}s; reaped child process group")
     elapsed = round(time.monotonic() - t0, 3)
 

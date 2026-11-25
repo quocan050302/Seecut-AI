@@ -955,7 +955,7 @@ def apply_r1_cut_map(
         cmd.extend(["-map", "[aout]"])
     cmd.extend([
         "-c:v", "libx264", "-crf", "15", "-pix_fmt", "yuv420p",
-        "-r", f"{fps_num}/{fps_den}", "-vsync", "cfr",
+        "-r", f"{fps_num}/{fps_den}", "-fps_mode", "cfr",
     ])
     if has_audio:
         cmd.extend(["-c:a", "pcm_s16le" if dst.suffix.lower() == ".mov" else "aac", "-b:a", "192k", "-ar", str(sr)])

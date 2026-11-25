@@ -260,8 +260,19 @@ def analyze_inputs(
     aspect = _infer_aspect(eff_w, eff_h)
 
     raw_script = script_text or ""
-    if not raw_script and script_path and Path(script_path).is_file():
-        raw_script = Path(script_path).read_text(encoding="utf-8")
+    script_src_path_str: str | None = None
+    raw_script_sha: str | None = None
+    if script_path and Path(script_path).is_file():
+        sp_res = Path(script_path).resolve()
+        script_src_path_str = str(sp_res)
+        raw_bytes = sp_res.read_bytes()
+        import hashlib
+        raw_script_sha = hashlib.sha256(raw_bytes).hexdigest()
+        if not raw_script:
+            raw_script = raw_bytes.decode("utf-8", errors="replace")
+    elif raw_script:
+        import hashlib
+        raw_script_sha = hashlib.sha256(raw_script.encode("utf-8")).hexdigest()
     clean_script = sanitize_untrusted_text(raw_script, max_len=12000)
 
     # Transcript / ASR resolution (audio truth preserved whenever available)
@@ -432,6 +443,10 @@ def analyze_inputs(
         },
         "script_supplied": bool(clean_script),
         "script_sha256": hash_artifact({"normalized_script": effective_text}),
+        "raw_script_sha256": raw_script_sha,
+        "script_source_path": script_src_path_str,
+        "asr_sha256": hash_artifact(norm_transcript) if norm_transcript is not None else None,
+        "constraints_sha256": hash_artifact(eff_constraints),
         "normalized_script": effective_text,
         "language": lang,
         "asr_status": asr_status,
