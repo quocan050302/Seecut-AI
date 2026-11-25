@@ -7,7 +7,7 @@ PolyForm Noncommercial License 1.0.0 applies to upstream YeJe-cpu/SeeCut (PROBLE
 
 from __future__ import annotations
 
-__version__ = "kh03.0.0"
+__version__ = "kh03.3.0"
 REGISTRY_VERSION = "kh03.skills.v1.0.0"
 BASE_QA_SHA = "7e8a93d3e70ad4f4deb16e50c1d502764d0f2bb9"
 UPSTREAM_SEECUT_SHA = "b05d7ed27404a064060e0d370402f562b0c0c02e"

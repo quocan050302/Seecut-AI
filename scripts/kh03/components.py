@@ -186,6 +186,10 @@ def design_component(
     asset_ref: str | None = None,
     data_bindings: dict[str, Any] | None = None,
     easing: str | None = None,
+    anchor_word_id: str | None = None,
+    anchor_precision: str | None = None,
+    internal_nodes: list[dict[str, Any]] | None = None,
+    shared_element_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Design a schema-valid ComponentSpec with automatic verified fallback for unsupported capability requests."""
     reg = registry or build_registry()
@@ -247,6 +251,10 @@ def design_component(
         "safe_fallback_id": fallback_id,
         "rights": "ORIGINAL_KH03_COMPONENT_POLYFORM_NONCOMMERCIAL",
         "semantic_anchor": semantic_anchor,
+        "anchor_word_id": anchor_word_id,
+        "anchor_precision": anchor_precision,
+        "internal_nodes": list(internal_nodes or []),
+        "shared_element_ids": list(shared_element_ids or []),
     }
     assert_kh03_schema(spec, "component_spec")
     return spec
@@ -340,6 +348,13 @@ def compile_component_events(
         layer_cat = "evbg" if (sp["family"] == "product_footage" and sp.get("asset_ref")) else (
             "title" if sp["family"] == "typography" else "card"
         )
+        anchor_wid = sp.get("anchor_word_id")
+        anchor_prec = str(sp.get("anchor_precision") or ("word_exact" if anchor_wid else "beat_start"))
+        ev_params = dict(sp["params"])
+        if sp.get("internal_nodes"):
+            ev_params["internal_nodes"] = list(sp["internal_nodes"])
+        if sp.get("shared_element_ids"):
+            ev_params["shared_element_ids"] = list(sp["shared_element_ids"])
         raw_events.append({
             "event_id": sp["component_id"],
             "beat_id": sp["beat_id"],
@@ -351,8 +366,8 @@ def compile_component_events(
             "capability_id": sp["capability_id"],
             "start_frame": int(sp["start_frame"]),
             "end_frame": int(sp["end_frame"]),
-            "anchor_word_id": None,
-            "anchor_mode": "beat_start",
+            "anchor_word_id": anchor_wid,
+            "anchor_mode": "keyword_exact" if anchor_prec == "word_exact" else "beat_start",
             "entry_frames": int(sp["entry_frames"]),
             "hold_frames": int(sp["hold_frames"]),
             "exit_frames": int(sp["exit_frames"]),
@@ -362,7 +377,7 @@ def compile_component_events(
             "mask": {"type": "clip_inset_horizontal"} if sp["kind"] == "kh03_proof_frame_reveal" else None,
             "blend": "normal",
             "easing": sp["easing"],
-            "params": dict(sp["params"]),
+            "params": ev_params,
             "safe_zone": True,
             "face_exclusion": True,
             "semantic_reason": sp["semantic_anchor"],
@@ -372,9 +387,11 @@ def compile_component_events(
 
 
 def audit_component_motion(visual_events: list[dict[str, Any]], *, fps: float = 24.0) -> dict[str, Any]:
-    """Verify deterministic motion poses across start/mid/end frames and count genuinely distinct component families."""
+    """Verify deterministic outer + internal-node motion progression across start/mid/end frames (CMI-02)."""
     families: dict[str, int] = {}
     anomalies: list[str] = []
+    internal_node_count = 0
+    word_anchored_count = 0
     for ev in visual_events:
         cid = ev.get("capability_id", "unknown")
         families[cid] = families.get(cid, 0) + 1
@@ -387,13 +404,22 @@ def audit_component_motion(visual_events: list[dict[str, Any]], *, fps: float = 
             anomalies.append(f"{ev['event_id']}: low mid-beat opacity {p_mid['opacity']}")
         if p_after["opacity"] != 0.0:
             anomalies.append(f"{ev['event_id']}: did not exit cleanly at end_frame {ef}")
-        # Confirm determinism on repeat call
         if evaluate_pose(ev, mid) != p_mid or evaluate_pose(ev, sf) != p_start:
             anomalies.append(f"{ev['event_id']}: non-deterministic pose evaluation")
+        if ev.get("anchor_word_id"):
+            word_anchored_count += 1
+        inodes = (ev.get("params") or {}).get("internal_nodes") or []
+        internal_node_count += len(inodes)
+        for nd in inodes:
+            nsf, nef = int(nd.get("start_frame", sf)), int(nd.get("end_frame", ef))
+            if nef <= nsf:
+                anomalies.append(f"{ev['event_id']}.{nd.get('node_id')}: invalid internal frame range [{nsf},{nef})")
     return {
         "total_events": len(visual_events),
         "unique_capabilities": len(families),
         "capability_counts": families,
+        "internal_node_count": internal_node_count,
+        "word_anchored_events": word_anchored_count,
         "anomalies": anomalies,
         "pass": len(anomalies) == 0,
     }

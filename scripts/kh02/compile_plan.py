@@ -255,6 +255,10 @@ def export_project_config(
         proj["kh03_layout_plan_sha256"] = prov["kh03_layout_plan_sha256"]
     if prov.get("kh03_plan_sha256"):
         proj["kh03_plan_sha256"] = prov["kh03_plan_sha256"]
+    if prov.get("kh03_motion_graph_sha256"):
+        proj["kh03_motion_graph_sha256"] = prov["kh03_motion_graph_sha256"]
+    if prov.get("kh03_motion_graph_sha256"):
+        proj["kh03_motion_graph_sha256"] = prov["kh03_motion_graph_sha256"]
     if pres_lay:
         proj["kh02_presenter_layout"] = pres_lay
     if primary_source_path:
@@ -918,6 +922,17 @@ def compile_shotbook(
             "y_from": float(tr.get("y_offset_px", 16)),
             "easing": str(ev.get("easing", "power2.out")),
             "step_delays": params.get("step_delays_sec", [0.15, 1.55, 2.95]),
+            "internal_nodes": [
+                {
+                    "node_id": sanitize_identifier(nd.get("node_id", "")),
+                    "role": str(nd.get("role", "")),
+                    "primitive": str(nd.get("primitive", "")),
+                    "start": round(int(nd.get("start_frame", ev["start_frame"])) / fps, 4),
+                    "end": round(int(nd.get("end_frame", ev["end_frame"])) / fps, 4),
+                }
+                for nd in (params.get("internal_nodes") or [])
+                if isinstance(nd, dict) and nd.get("node_id")
+            ],
         })
 
     # Optional captions (only emitted if caption_policy == ON_REQUESTED and role == caption)
@@ -1405,6 +1420,61 @@ def compile_shotbook(
         const Lu = uEl.getTotalLength();
         tl.set(uEl, {{ strokeDasharray: Lu, strokeDashoffset: Lu }}, 0);
         tl.to(uEl, {{ strokeDashoffset: 0, duration: 0.36, ease: 'power2.out' }}, tw.start + 0.08);
+      }}
+    }}
+    if (tw.kind === 'kh03_proportional_reservoir') {{
+      for (let s = 1; s <= 5; s++) {{
+        const segEl = document.getElementById(tw.id + '_seg_' + s);
+        if (!segEl) continue;
+        const st = tw.start + 0.04 + (s - 1) * 0.05;
+        const initOp = (isFrameZero && s === 1) ? 0.85 : 0.0;
+        tl.set(segEl, {{ opacity: initOp, y: 8 }}, 0);
+        tl.to(segEl, {{ opacity: 1.0, y: 0, duration: 0.14, ease: 'power2.out' }}, st);
+      }}
+    }}
+    if (tw.kind === 'kh03_causal_flow_graph') {{
+      for (let s = 1; s <= 3; s++) {{
+        const nEl = document.getElementById(tw.id + '_node_' + s);
+        if (!nEl) continue;
+        const st = tw.start + 0.04 + (s - 1) * 0.07;
+        const initOp = (isFrameZero && s === 1) ? 0.85 : 0.0;
+        tl.set(nEl, {{ opacity: initOp, y: 12, scale: 0.92 }}, 0);
+        tl.to(nEl, {{ opacity: 1.0, y: 0, scale: 1.0, duration: 0.16, ease: 'power2.out' }}, st);
+      }}
+    }}
+    if (tw.kind === 'kh03_annotated_timeline') {{
+      for (let s = 1; s <= 3; s++) {{
+        const tEl = document.getElementById(tw.id + '_tl_' + s);
+        if (!tEl) continue;
+        const st = tw.start + 0.06 + (s - 1) * 0.16;
+        tl.set(tEl, {{ opacity: isFrameZero && s === 1 ? 0.85 : 0.0, x: -16 }}, 0);
+        tl.to(tEl, {{ opacity: 1.0, x: 0, duration: 0.24, ease: 'power2.out' }}, st);
+      }}
+    }}
+    if (tw.kind === 'kh03_contradiction_lockup') {{
+      const opEl = document.getElementById(tw.id + '_op');
+      if (opEl) {{
+        tl.set(opEl, {{ scale: 0.65, opacity: isFrameZero ? 0.8 : 0.0 }}, 0);
+        tl.to(opEl, {{ scale: 1.15, opacity: 1.0, duration: 0.20, ease: 'back.out(1.9)' }}, tw.start + 0.12);
+        tl.to(opEl, {{ scale: 1.0, duration: 0.16, ease: 'power2.out' }}, tw.start + 0.34);
+      }}
+    }}
+    if (tw.kind === 'kh03_rolling_counter') {{
+      const vEl = document.getElementById(tw.id + '_val');
+      if (vEl) {{
+        tl.set(vEl, {{ scale: 0.78, y: 10, opacity: isFrameZero ? 0.85 : 0.0 }}, 0);
+        tl.to(vEl, {{ scale: 1.0, y: 0, opacity: 1.0, duration: 0.32, ease: 'power3.out' }}, tw.start + 0.08);
+      }}
+    }}
+    if (tw.kind === 'kh03_comparison_matrix') {{
+      const cmpEl = document.getElementById(tw.id);
+      if (cmpEl) {{
+        const cols = cmpEl.querySelectorAll('.kh3-cmp-col');
+        cols.forEach((col, ci) => {{
+          const st = tw.start + 0.06 + ci * 0.16;
+          tl.set(col, {{ opacity: isFrameZero && ci === 0 ? 0.85 : 0.0, y: 10 }}, 0);
+          tl.to(col, {{ opacity: 1.0, y: 0, duration: 0.26, ease: 'power2.out' }}, st);
+        }});
       }}
     }}
     if (tw.kind === 'spotlight_focus') {{

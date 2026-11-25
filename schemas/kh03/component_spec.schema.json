@@ -32,6 +32,10 @@
     "protected_regions_checked": { "type": "boolean" },
     "safe_fallback_id": { "type": "string", "minLength": 1 },
     "rights": { "type": "string", "minLength": 1 },
-    "semantic_anchor": { "type": "string", "minLength": 1 }
+    "semantic_anchor": { "type": "string", "minLength": 1 },
+    "anchor_word_id": { "type": ["string", "null"] },
+    "anchor_precision": { "type": ["string", "null"] },
+    "internal_nodes": { "type": "array", "items": { "type": "object" } },
+    "shared_element_ids": { "type": "array", "items": { "type": "string" } }
   }
 }

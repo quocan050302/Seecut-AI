@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/evidence_binding.schema.json",
+  "title": "KH-03.R3 Universal Cross-Niche Evidence & Rights Ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "selected_skill_id",
+    "status",
+    "evidence_needs",
+    "bindings",
+    "gaps"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.evidence_ledger.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "selected_skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+    "status": {
+      "type": "string",
+      "enum": ["EVIDENCE_VERIFIED", "EVIDENCE_PARTIAL", "NO_ADDITIONAL_EVIDENCE_NEEDED", "EVIDENCE_BLOCKED_MISSING_REQUIRED"]
+    },
+    "evidence_needs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["need_id", "beat_id", "need_type", "priority", "claim_text"],
+        "properties": {
+          "need_id": { "type": "string", "minLength": 1 },
+          "beat_id": { "type": "string", "minLength": 1 },
+          "need_type": {
+            "type": "string",
+            "enum": [
+              "real_product_demo",
+              "document_page",
+              "screen_capture",
+              "image_detail",
+              "verified_chart_data",
+              "licensed_archival_media",
+              "original_diagram",
+              "physical_action_ref",
+              "text_quotation",
+              "none_needed"
+            ]
+          },
+          "priority": { "type": "string", "enum": ["required", "optional", "none"] },
+          "claim_text": { "type": "string" },
+          "accepted_proof_tiers": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["need_id", "beat_id", "proof_tier", "rights_status", "claim_scope"],
+        "properties": {
+          "need_id": { "type": "string" },
+          "beat_id": { "type": "string" },
+          "asset_id": { "type": ["string", "null"] },
+          "proof_tier": {
+            "type": "string",
+            "enum": ["ORIGINAL_SOURCE", "ACTUAL_SCREENSHOT", "ILLUSTRATIVE_DIAGRAM", "THIRD_PARTY_LICENSED", "MISSING_EVIDENCE", "NONE_NEEDED"]
+          },
+          "source_url_or_path": { "type": ["string", "null"] },
+          "sha256": { "type": ["string", "null"] },
+          "capture_date_utc": { "type": ["string", "null"] },
+          "resolution": { "type": ["array", "null"] },
+          "crop_rect_norm": { "type": ["array", "null"] },
+          "rights_status": { "type": "string" },
+          "attribution": { "type": "string" },
+          "usage_restrictions": { "type": "string" },
+          "claim_scope": { "type": "string" },
+          "owner_rights_review_required": { "type": "boolean" }
+        }
+      }
+    },
+    "gaps": { "type": "array", "items": { "type": "object" } },
+    "showcase_progression": { "type": "array", "items": { "type": "object" } }
+  }
+}

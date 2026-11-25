@@ -38,6 +38,9 @@
           "priority": { "type": "integer", "minimum": 1, "maximum": 5 },
           "layout_transition_id": { "type": ["string", "null"] },
           "motion_anchor": { "type": ["string", "null"] },
+          "motion_event_id": { "type": ["string", "null"] },
+          "anchor_id": { "type": ["string", "null"] },
+          "sample_onset": { "type": ["integer", "null"], "minimum": 0 },
           "clock_domain": { "type": ["string", "null"] },
           "src_onset_frame": { "type": ["integer", "null"] },
           "variation": { "type": "object" }
@@ -46,6 +49,7 @@
     },
     "clock_domain": { "type": ["string", "null"] },
     "time_map_sha256": { "type": ["string", "null"] },
+    "motion_graph_sha256": { "type": ["string", "null"] },
     "provider_status": { "type": "string" },
     "target_loudness_lufs": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
     "target_true_peak_dbtp": { "type": "number", "maximum": -0.5 },

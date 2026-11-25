@@ -37,6 +37,13 @@
     "layout_plan_ref": { "type": ["string", "null"] },
     "layout_plan_sha256": { "type": ["string", "null"] },
     "caption_layout_ref": { "type": ["string", "null"] },
+    "motion_graph_ref": { "type": ["string", "null"] },
+    "motion_graph_sha256": { "type": ["string", "null"] },
+    "shared_element_graph_ref": { "type": ["string", "null"] },
+    "evidence_ledger_ref": { "type": ["string", "null"] },
+    "type_system_ref": { "type": ["string", "null"] },
+    "visual_density_ref": { "type": ["string", "null"] },
+    "hook_microbeats_ref": { "type": ["string", "null"] },
     "plan_sha256": { "type": "string", "minLength": 16 }
   }
 }

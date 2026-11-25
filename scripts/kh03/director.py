@@ -25,6 +25,11 @@ from .contracts import (
     sanitize_identifier,
     write_json_atomic,
 )
+from .evidence_and_type import (
+    build_type_system,
+    build_universal_evidence_ledger,
+    plan_dynamic_captions_r3,
+)
 from .layout import (
     audit_layout_motion,
     build_subject_action_tracks,
@@ -33,7 +38,15 @@ from .layout import (
     resolve_layout_policy,
     solve_layout_sequence,
 )
+from .motion_graph import (
+    build_motion_graph,
+    build_semantic_hook_plan,
+    evaluate_visual_density_and_repetition,
+    remap_motion_graph_to_edl,
+    verify_morph_semantic_coverage,
+)
 from .recommend import get_skill_contract
+from .tracking import analyze_subject_object_tracks
 
 SKILL_ART_PALETTES: dict[str, dict[str, Any]] = {
     "SK-01": {
@@ -148,65 +161,27 @@ def plan_hooks(
     explanation_graph: dict[str, Any],
     *,
     constraints: dict[str, Any] | None = None,
+    run_id: str = "kh03_hook",
+    input_analysis: dict[str, Any] | None = None,
+    action_timeline: list[dict[str, Any]] | None = None,
+    run_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Generate 3 truthful hook options within selected skill; block spoilers & fake urgency."""
-    phrases = semantic_graph.get("phrases") or []
-    first_txt = phrases[0]["text"] if phrases else "Opening focus"
-    has_nums = bool(phrases and phrases[0].get("numeric_claims"))
-    has_neg = bool(phrases and phrases[0].get("has_negation"))
-    sk = get_skill_contract(skill_id)
-    pool = sk["hook_strategy_pool"]
-
-    options = [
-        {
-            "option_id": f"{skill_id.lower()}_hook_01",
-            "strategy": pool[0],
-            "opening_visual": (
-                "Immediate frame-0 contradiction lockup (headline value != ?) without spoiling final payoff."
-                if (has_nums or has_neg) else f"Immediate frame-0 {pool[0]} introducing the core question truthfully."
-            ),
-            "opening_line": first_txt,
-            "spoils_payoff": False,
-            "deceptive_urgency": False,
-            "selected": False,
-        },
-        {
-            "option_id": f"{skill_id.lower()}_hook_02",
-            "strategy": pool[1] if len(pool) > 1 else "direct_proof_lead",
-            "opening_visual": "Verified visual context or mechanism question framed cleanly from frame 0.",
-            "opening_line": first_txt,
-            "spoils_payoff": False,
-            "deceptive_urgency": False,
-            "selected": False,
-        },
-        {
-            "option_id": f"{skill_id.lower()}_hook_03",
-            "strategy": pool[2] if len(pool) > 2 else "calm_direct_lead",
-            "opening_visual": "Restrained clean typographic setup allowing spoken delivery and physical action to lead.",
-            "opening_line": first_txt,
-            "spoils_payoff": False,
-            "deceptive_urgency": False,
-            "selected": False,
-        },
-    ]
-
-    if skill_id in ("SK-01", "SK-04") and (has_nums or has_neg):
-        chosen = options[0]
-    elif skill_id in ("SK-03", "SK-05"):
-        chosen = options[2]
-    else:
-        chosen = options[1] if not (has_nums or has_neg) else options[0]
-
-    for o in options:
-        o["selected"] = (o["option_id"] == chosen["option_id"])
-
-    return {
-        "selected_hook_id": chosen["option_id"],
-        "selected_strategy": chosen["strategy"],
-        "options": options,
-        "truthful_no_spoiler_verified": True,
-        "editorial_intent_only": True,
+    """Generate 3 truthful hook micro-storyboards within selected skill (CMI-01); block spoilers & fake urgency."""
+    eff_inp = input_analysis or {
+        "media": {"nb_frames": 240, "fps_num": 24, "fps_den": 1, "duration_sec": 10.0, "aspect_ratio": "9:16"},
+        "language": "en",
+        "constraints": dict(constraints or {}),
     }
+    return build_semantic_hook_plan(
+        run_id=run_id,
+        skill_id=skill_id,
+        semantic_graph=semantic_graph,
+        explanation_graph=explanation_graph,
+        input_analysis=eff_inp,
+        action_timeline=action_timeline,
+        constraints=constraints,
+        run_dir=run_dir,
+    )
 
 
 def _trim_words(text: str, max_chars: int) -> str:
@@ -412,7 +387,33 @@ def build_creative_plan(
     selected_dir, all_dirs = choose_direction(
         selected_skill_id, semantic_graph, explanation_graph, footage_manifest, constraints=eff_constraints,
     )
-    hook_plan = plan_hooks(selected_skill_id, semantic_graph, explanation_graph, constraints=eff_constraints)
+
+    tr_path = run_dir / "analysis" / "TRANSCRIPT_NORMALIZED.json"
+    tr_doc = parse_json_strict(tr_path) if tr_path.is_file() else None
+    act_path = run_dir / "analysis" / "SOURCE_ACTION_MAP.json"
+    act_doc = parse_json_strict(act_path) if act_path.is_file() else None
+
+    # KH-03.R3 CMI-04: Honest subject/object/action tracking & protected region analysis
+    enable_tracking_scan = bool(eff_constraints.get("enable_streaming_tracking") or eff_constraints.get("enable_tracking", False))
+    tracking_res = analyze_subject_object_tracks(
+        media,
+        run_id=run_id,
+        video_path=input_analysis.get("video_path"),
+        transcript=tr_doc,
+        presenter_mode=str(eff_constraints.get("presenter_mode") or "LEGACY_DYNAMIC"),
+        enable_streaming_scan=enable_tracking_scan,
+        run_dir=run_dir,
+    )
+    hook_plan = plan_hooks(
+        selected_skill_id,
+        semantic_graph,
+        explanation_graph,
+        constraints=eff_constraints,
+        run_id=run_id,
+        input_analysis=input_analysis,
+        action_timeline=tracking_res.get("action_timeline"),
+        run_dir=run_dir,
+    )
 
     phrases = semantic_graph.get("phrases") or []
     exp_nodes = explanation_graph.get("nodes") or []
@@ -471,12 +472,23 @@ def build_creative_plan(
     prot_zones = input_analysis["safe_regions"]["protected_zones"]
     default_box = list(clear_zones[0]["bbox_norm"]) if clear_zones else [0.06, 0.07, 0.80, 0.14]
 
-    # KH-03.R2 ADL-01/02: Solve spatial layout sequence BEFORE component placement
-    tr_path = run_dir / "analysis" / "TRANSCRIPT_NORMALIZED.json"
-    tr_doc = parse_json_strict(tr_path) if tr_path.is_file() else None
-    act_path = run_dir / "analysis" / "SOURCE_ACTION_MAP.json"
-    act_doc = parse_json_strict(act_path) if act_path.is_file() else None
-    action_tracks = build_subject_action_tracks(media, transcript=tr_doc, action_map=act_doc)
+    # KH-03.R2 ADL-01/02 + R3 CMI-04: Solve spatial layout sequence BEFORE component placement
+    verified_probe_obs = [
+        {
+            "frame": int(ob.get("frame", 0)),
+            "face_bbox_norm": ob["face_bbox_norm"],
+            "confidence": float(ob.get("confidence", 0.72)),
+            "verified_detector": True,
+        }
+        for ob in (tracking_res.get("subject_tracks") or [])
+        if ob.get("verified_detector") and ob.get("face_bbox_norm")
+    ]
+    action_tracks = build_subject_action_tracks(
+        media,
+        transcript=tr_doc,
+        action_map=act_doc,
+        probe_frames=verified_probe_obs or None,
+    )
 
     pre_beats: list[dict[str, Any]] = []
     for idx, ph in enumerate(merged_phrases):
@@ -519,7 +531,7 @@ def build_creative_plan(
     audit_layout_motion(layout_plan, run_dir=run_dir)
     lay_by_beat = {lb["beat_id"]: lb for lb in layout_plan["beats"]}
 
-    # ADL-05: Adaptive caption placement (respects explicit caption_policy; never flips OFF default)
+    # ADL-05 + R3 CMI-05/CMI-06: Universal evidence ledger, type system & adaptive captions
     cap_pol = str(eff_constraints.get("caption_policy") or "OFF")
     words_src = list((tr_doc or {}).get("words") or [])
     caption_plan = plan_adaptive_captions(
@@ -528,6 +540,41 @@ def build_creative_plan(
         caption_policy=cap_pol,
         platform="reels" if aspect == "9:16" else "youtube",
         language=str(input_analysis.get("language") or "en"),
+        fps_num=int(media.get("fps_num") or 24),
+        fps_den=int(media.get("fps_den") or 1),
+        run_dir=run_dir,
+    )
+    asset_purpose = (
+        "COMMERCIAL_AND_NONCOMMERCIAL"
+        if eff_constraints.get("license_decision") == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED"
+        else "NONCOMMERCIAL_ONLY"
+    )
+    evidence_ledger = build_universal_evidence_ledger(
+        run_id=run_id,
+        skill_id=selected_skill_id,
+        semantic_graph=semantic_graph,
+        footage_manifest=footage_manifest,
+        intended_purpose=asset_purpose,
+        require_product_proof=bool(eff_constraints.get("require_product_proof", False)),
+        run_dir=run_dir,
+    )
+    sample_script_txt = str(input_analysis.get("normalized_script") or " ".join(p.get("text", "") for p in merged_phrases))
+    type_system = build_type_system(
+        run_id=run_id,
+        skill_id=selected_skill_id,
+        art_direction=art,
+        sample_text=sample_script_txt,
+        language=str(input_analysis.get("language") or "en"),
+        canvas_width=c_w,
+        canvas_height=c_h,
+        run_dir=run_dir,
+    )
+    plan_dynamic_captions_r3(
+        words_src,
+        layout_plan,
+        type_system,
+        caption_policy=cap_pol,
+        platform="reels" if aspect == "9:16" else "youtube",
         fps_num=int(media.get("fps_num") or 24),
         fps_den=int(media.get("fps_den") or 1),
         run_dir=run_dir,
@@ -658,6 +705,54 @@ def build_creative_plan(
         )
         final_specs = solved["components"]
 
+    # KH-03.R3 CMI-02 & CMI-03: Semantic Motion Graph, Internal Node Timelines & Shared-Element Morphs
+    mg_res = build_motion_graph(
+        run_id=run_id,
+        skill_id=selected_skill_id,
+        components=final_specs,
+        semantic_graph=semantic_graph,
+        explanation_graph=explanation_graph,
+        transcript=tr_doc,
+        layout_plan=layout_plan,
+        fps_num=int(media.get("fps_num") or 24),
+        fps_den=int(media.get("fps_den") or 1),
+        total_frames=total_frames,
+        reduced_motion=bool(eff_constraints.get("reduced_motion", False)),
+        run_dir=run_dir,
+    )
+    motion_graph = mg_res["motion_graph"]
+    root_by_cid: dict[str, dict[str, Any]] = {}
+    children_by_cid: dict[str, list[dict[str, Any]]] = {}
+    for nd in motion_graph.get("nodes", []):
+        cid_k = str(nd["component_id"])
+        if nd.get("parent_id") is None:
+            root_by_cid[cid_k] = nd
+        else:
+            children_by_cid.setdefault(cid_k, []).append({
+                "node_id": nd["node_id"],
+                "role": nd["role"],
+                "primitive": nd["primitive"],
+                "start_frame": int(nd["start_frame"]),
+                "end_frame": int(nd["end_frame"]),
+                "anchor_word_id": nd.get("anchor_word_id"),
+                "keyframes": list(nd.get("keyframes") or []),
+            })
+    node_to_cid = {str(nd["node_id"]): str(nd["component_id"]) for nd in motion_graph.get("nodes", [])}
+    shared_by_cid: dict[str, list[str]] = {}
+    for se in motion_graph.get("shared_elements", []):
+        for nid_k in (se.get("source_node_id"), se.get("target_node_id")):
+            cid_k = node_to_cid.get(str(nid_k or ""))
+            if cid_k:
+                shared_by_cid.setdefault(cid_k, []).append(str(se["shared_element_id"]))
+    for sp in final_specs:
+        rn = root_by_cid.get(sp["component_id"])
+        if rn:
+            sp["anchor_word_id"] = rn.get("anchor_word_id")
+            sp["anchor_precision"] = rn.get("anchor_precision", "beat_start")
+        sp["internal_nodes"] = list(children_by_cid.get(sp["component_id"]) or [])
+        if sp["component_id"] in shared_by_cid:
+            sp["shared_element_ids"] = sorted(set(shared_by_cid[sp["component_id"]]))
+
     plan_core = {
         "schema_version": "kh03.creative_plan.v1",
         "run_id": run_id,
@@ -680,6 +775,13 @@ def build_creative_plan(
         "layout_plan_ref": "layouts/LAYOUT_PLAN.json",
         "layout_plan_sha256": layout_plan["layout_plan_sha256"],
         "caption_layout_ref": "layouts/CAPTION_LAYOUT_PLAN.json",
+        "motion_graph_ref": "manifests/MOTION_GRAPH.json",
+        "motion_graph_sha256": motion_graph["graph_sha256"],
+        "shared_element_graph_ref": "manifests/SHARED_ELEMENT_GRAPH.json",
+        "evidence_ledger_ref": "assets/EVIDENCE_LEDGER.json",
+        "type_system_ref": "layouts/TYPE_SYSTEM.json",
+        "visual_density_ref": "qc/VISUAL_DENSITY_REPORT.json",
+        "hook_microbeats_ref": "manifests/HOOK_MICROBEATS.json",
         "layout_constraints": {
             "aspect_ratio": aspect,
             "layout_policy": layout_policy,
@@ -690,6 +792,14 @@ def build_creative_plan(
             "unique_layout_modes": sorted({lb["layout_mode"] for lb in layout_plan["beats"]}),
         },
     }
+    evaluate_visual_density_and_repetition(
+        run_id=run_id,
+        layout_plan=layout_plan,
+        creative_plan=plan_core,
+        motion_graph=motion_graph,
+        type_system=type_system,
+        run_dir=run_dir,
+    )
     plan_core["plan_sha256"] = hash_artifact(plan_core)
     assert_kh03_schema(plan_core, "creative_plan")
 
@@ -747,6 +857,8 @@ def compile_to_kh02_overrides(
     fps: float = 24.0,
     sound_plan: dict[str, Any] | None = None,
     layout_plan: dict[str, Any] | None = None,
+    motion_graph: dict[str, Any] | None = None,
+    caption_policy: str = "OFF",
 ) -> dict[str, Any]:
     """Translate KH-03 CREATIVE_PLAN into authoritative KH-02 overrides (clock_domain=SOURCE_CLOCK until Stage F EDL remap)."""
     sk = get_skill_contract(creative_plan["selected_skill_id"])
@@ -794,6 +906,9 @@ def compile_to_kh02_overrides(
         "layout_policy": layout_policy,
         "layout_plan": layout_plan,
         "layout_plan_sha256": (layout_plan or {}).get("layout_plan_sha256") or creative_plan.get("layout_plan_sha256"),
+        "motion_graph": motion_graph,
+        "motion_graph_sha256": (motion_graph or {}).get("graph_sha256") or creative_plan.get("motion_graph_sha256"),
+        "caption_policy": caption_policy,
         "profile": sk["preferred_profile"],
         "energy_mode": sk["preferred_energy"],
         "custom_beats": kh02_beats,
@@ -985,10 +1100,25 @@ def remap_kh03_plan_to_output_clock(
             # Attach to enclosing output beat cleanly
             enclosing = next((b["beat_id"] for b in mapped_beats if b["start_frame"] <= os0 < b["end_frame"]), fallback_bid)
             nev["beat_id"] = enclosing
-        # Clamp entry/exit frames safely inside remapped duration
+        # Clamp entry/exit frames & remap internal_nodes onto output EDL clock cleanly
         dur_f = oe0 - os0
         nev["entry_frames"] = min(int(ev.get("entry_frames") or 6), max(2, dur_f // 3))
         nev["exit_frames"] = min(int(ev.get("exit_frames") or 4), max(2, dur_f // 4))
+        ev_params = dict(ev.get("params") or {})
+        if isinstance(ev_params.get("internal_nodes"), list):
+            mapped_inodes: list[dict[str, Any]] = []
+            for nd in ev_params["internal_nodes"]:
+                n_sf, n_ef = int(nd.get("start_frame", sf)), int(nd.get("end_frame", ef))
+                n_sp = (n_sf, n_ef) if is_identity else _map_source_interval_to_edl(n_sf, n_ef, segs)
+                if n_sp is None:
+                    continue
+                mapped_inodes.append({
+                    **nd,
+                    "start_frame": max(os0, min(oe0 - 1, n_sp[0])),
+                    "end_frame": max(os0 + 1, min(oe0, max(n_sp[0] + 1, n_sp[1]))),
+                })
+            ev_params["internal_nodes"] = mapped_inodes
+            nev["params"] = ev_params
         mapped_vis.append(nev)
 
     # 3. Remap selected_hook_override
@@ -1025,7 +1155,7 @@ def remap_kh03_plan_to_output_clock(
         sp_in["time_map_sha256"] = edl_sha
         remapped_sound = sp_in
 
-    # 4b. Remap KH-03.R2 adaptive layout_plan + morph transitions + captions onto exact output EDL clock (ADL-03/05)
+    # 4b. Remap KH-03.R2 adaptive layout_plan + morph transitions + captions onto exact output EDL clock
     remapped_layout: dict[str, Any] | None = None
     remapped_captions: dict[str, Any] | None = None
     if kh03_overrides.get("layout_plan"):
@@ -1035,20 +1165,70 @@ def remap_kh03_plan_to_output_clock(
         # Re-anchor any layout-transition sound cues to remapped morph start frame
         if remapped_sound and remapped_layout.get("transitions"):
             tr_start_by_id = {t["transition_id"]: int(t["start_frame"]) for t in remapped_layout["transitions"]}
+            sr = int(edl.get("audio_sample_rate") or 48000)
             for sev in remapped_sound.get("events", []):
                 tid = sev.get("layout_transition_id")
                 if tid and tid in tr_start_by_id:
                     sev["onset_frame"] = tr_start_by_id[tid]
                     sev["onset_sec"] = round(float(Fraction(sev["onset_frame"]) / fps_frac), 4)
-        if mapped_words:
+                    sev["sample_onset"] = int(round(float(Fraction(sev["onset_frame"]) / fps_frac) * sr))
+        eff_cap_pol = str(kh03_overrides.get("caption_policy") or "OFF")
+        if mapped_words and eff_cap_pol != "OFF":
             remapped_captions = plan_adaptive_captions(
                 mapped_words,
                 remapped_layout,
-                caption_policy="ON_REQUESTED",
+                caption_policy=eff_cap_pol,
                 fps_num=int(edl["fps_num"]),
                 fps_den=int(edl["fps_den"]),
                 run_dir=run_dir,
             )
+
+    # 4c. Remap KH-03.R3 semantic motion_graph & re-anchor sound cues + internal_nodes onto exact output EDL clock (CMI-02/03/08)
+    remapped_mg: dict[str, Any] | None = None
+    if kh03_overrides.get("motion_graph"):
+        remapped_mg = remap_motion_graph_to_edl(
+            kh03_overrides["motion_graph"], edl, run_dir=run_dir,
+        )
+        verify_morph_semantic_coverage(remapped_mg, layout_plan=remapped_layout, run_dir=run_dir)
+        # Update mapped visual event internal_nodes with remapped frame spans
+        rm_children_by_cid: dict[str, list[dict[str, Any]]] = {}
+        for nd in remapped_mg.get("nodes", []):
+            if nd.get("parent_id") is not None:
+                rm_children_by_cid.setdefault(str(nd["component_id"]), []).append({
+                    "node_id": nd["node_id"],
+                    "role": nd["role"],
+                    "primitive": nd["primitive"],
+                    "start_frame": int(nd["start_frame"]),
+                    "end_frame": int(nd["end_frame"]),
+                    "anchor_word_id": nd.get("anchor_word_id"),
+                    "keyframes": list(nd.get("keyframes") or []),
+                })
+        for nev in mapped_vis:
+            if nev["event_id"] in rm_children_by_cid:
+                nev["params"] = dict(nev.get("params") or {})
+                nev["params"]["internal_nodes"] = rm_children_by_cid[nev["event_id"]]
+        # Re-anchor motion-graph bound sound cues to exact remapped onset frame
+        if remapped_sound and remapped_mg.get("semantic_motion_events"):
+            anc_by_key: dict[tuple[str, str], int] = {}
+            me_start_by_id: dict[str, int] = {}
+            for me in remapped_mg["semantic_motion_events"]:
+                meid_k = str(me["motion_event_id"])
+                me_start_by_id[meid_k] = int(me["out_interval"][0])
+                for sa in me.get("sound_anchors", []):
+                    anc_by_key[(meid_k, str(sa["anchor_id"]))] = int(sa["frame"])
+            sr_val = int(edl.get("audio_sample_rate") or 48000)
+            for sev in remapped_sound.get("events", []):
+                meid = sev.get("motion_event_id")
+                aid = sev.get("anchor_id")
+                if meid and (str(meid), str(aid or "")) in anc_by_key:
+                    new_f = anc_by_key[(str(meid), str(aid or ""))]
+                elif meid and str(meid) in me_start_by_id:
+                    new_f = me_start_by_id[str(meid)]
+                else:
+                    continue
+                sev["onset_frame"] = new_f
+                sev["onset_sec"] = round(float(Fraction(new_f) / fps_frac), 4)
+                sev["sample_onset"] = int(round(float(Fraction(new_f) / fps_frac) * sr_val))
 
     remap_report = {
         "schema_version": "kh03.timeline_remap_report.v1",
@@ -1068,6 +1248,7 @@ def remap_kh03_plan_to_output_clock(
         "sound_cues_removed": removed_cues,
         "layout_beats_remapped": len((remapped_layout or {}).get("beats", [])),
         "layout_transitions_remapped": len((remapped_layout or {}).get("transitions", [])),
+        "motion_events_remapped": len((remapped_mg or {}).get("semantic_motion_events", [])),
         "mapped_words_count": len(mapped_words),
         "pass": True,
     }
@@ -1093,6 +1274,8 @@ def remap_kh03_plan_to_output_clock(
     out_ov["sound_plan_sha256"] = hash_artifact(remapped_sound) if remapped_sound else None
     out_ov["layout_plan"] = remapped_layout
     out_ov["layout_plan_sha256"] = (remapped_layout or {}).get("layout_plan_sha256")
+    out_ov["motion_graph"] = remapped_mg
+    out_ov["motion_graph_sha256"] = (remapped_mg or {}).get("graph_sha256")
     out_ov["caption_layout_plan"] = remapped_captions
     out_ov["timeline_remap_report"] = remap_report
     return out_ov

@@ -42,8 +42,19 @@
     "constraints_sha256": { "type": "string", "minLength": 16 },
     "subject_tracking_mode": {
       "type": "string",
-      "enum": ["STATIC_FALLBACK_VERIFIED", "LOCAL_TRACKER_VERIFIED", "UNCERTAIN_CONSERVATIVE_FIT"]
+      "enum": [
+        "STATIC_FALLBACK_VERIFIED",
+        "LOCAL_TRACKER_VERIFIED",
+        "LOCAL_DETECTOR_VERIFIED",
+        "LOCAL_MOTION_SALIENT_TRACKED",
+        "FACELESS_OBJECT_TRACKING",
+        "TRACKING_STATIC_FALLBACK",
+        "UNCERTAIN_CONSERVATIVE_FIT"
+      ]
     },
+    "tracking_confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "scene_cut_frames": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+    "shared_element_ids": { "type": "array", "items": { "type": "string" } },
     "editorial_heuristic_disclaimer": { "type": "string" },
     "beats": {
       "type": "array",
@@ -51,24 +62,11 @@
       "items": {
         "type": "object",
         "required": [
-          "layout_id",
-          "beat_id",
-          "semantic_function",
-          "layout_mode",
-          "start_frame",
-          "end_frame",
-          "presenter_box_norm",
-          "presenter_box_px",
-          "graphic_box_norm",
-          "graphic_box_px",
-          "caption_slot_norm",
-          "source_crop",
-          "presenter_z_order",
-          "graphic_z_order",
-          "border_radius_px",
-          "score",
-          "reason",
-          "provenance"
+          "layout_id", "beat_id", "semantic_function", "layout_mode",
+          "start_frame", "end_frame", "presenter_box_norm", "presenter_box_px",
+          "graphic_box_norm", "graphic_box_px", "caption_slot_norm",
+          "source_crop", "presenter_z_order", "graphic_z_order",
+          "border_radius_px", "score", "reason", "provenance"
         ],
         "properties": {
           "layout_id": { "type": "string", "minLength": 1 },
@@ -77,60 +75,26 @@
           "layout_mode": {
             "type": "string",
             "enum": [
-              "FULL_CANVAS",
-              "PRESENTER_LEFT_SPLIT",
-              "PRESENTER_RIGHT_SPLIT",
-              "LOWER_COMPANION_SPLIT",
-              "UPPER_COMPANION_SPLIT",
-              "FLOATING_INSET_PRESENTER",
-              "FULL_SCREEN_RETURN"
+              "FULL_CANVAS", "PRESENTER_LEFT_SPLIT", "PRESENTER_RIGHT_SPLIT",
+              "LOWER_COMPANION_SPLIT", "UPPER_COMPANION_SPLIT",
+              "FLOATING_INSET_PRESENTER", "FULL_SCREEN_RETURN"
             ]
           },
           "start_frame": { "type": "integer", "minimum": 0 },
           "end_frame": { "type": "integer", "minimum": 1 },
           "src_start_frame": { "type": ["integer", "null"], "minimum": 0 },
           "src_end_frame": { "type": ["integer", "null"], "minimum": 1 },
-          "presenter_box_norm": {
-            "type": "array",
-            "minItems": 4,
-            "maxItems": 4,
-            "items": { "type": "number", "minimum": 0, "maximum": 1 }
-          },
-          "presenter_box_px": {
-            "type": "array",
-            "minItems": 4,
-            "maxItems": 4,
-            "items": { "type": "integer", "minimum": 0 }
-          },
-          "graphic_box_norm": {
-            "type": "array",
-            "minItems": 4,
-            "maxItems": 4,
-            "items": { "type": "number", "minimum": 0, "maximum": 1 }
-          },
-          "graphic_box_px": {
-            "type": "array",
-            "minItems": 4,
-            "maxItems": 4,
-            "items": { "type": "integer", "minimum": 0 }
-          },
-          "caption_slot_norm": {
-            "type": "array",
-            "minItems": 4,
-            "maxItems": 4,
-            "items": { "type": "number", "minimum": 0, "maximum": 1 }
-          },
+          "presenter_box_norm": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number", "minimum": 0, "maximum": 1 } },
+          "presenter_box_px": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "integer", "minimum": 0 } },
+          "graphic_box_norm": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number", "minimum": 0, "maximum": 1 } },
+          "graphic_box_px": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "integer", "minimum": 0 } },
+          "caption_slot_norm": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number", "minimum": 0, "maximum": 1 } },
           "protected_masks_norm": { "type": "array", "items": { "type": "object" } },
           "source_crop": { "type": "object" },
           "presenter_z_order": { "type": "integer" },
           "graphic_z_order": { "type": "integer" },
           "border_radius_px": { "type": "integer", "minimum": 0, "maximum": 999 },
-          "anchor": {
-            "type": "array",
-            "minItems": 2,
-            "maxItems": 2,
-            "items": { "type": "number", "minimum": 0, "maximum": 1 }
-          },
+          "anchor": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number", "minimum": 0, "maximum": 1 } },
           "presenter_opacity": { "type": "number", "minimum": 0, "maximum": 1 },
           "mobile_face_width_px": { "type": "number", "minimum": 0 },
           "score": { "type": "number", "minimum": 0, "maximum": 100 },
@@ -145,20 +109,9 @@
       "items": {
         "type": "object",
         "required": [
-          "transition_id",
-          "from_layout_id",
-          "to_layout_id",
-          "from_beat_id",
-          "to_beat_id",
-          "from_mode",
-          "to_mode",
-          "start_frame",
-          "end_frame",
-          "duration_sec",
-          "easing",
-          "technique",
-          "swept_presenter_bbox_norm",
-          "reason"
+          "transition_id", "from_layout_id", "to_layout_id", "from_beat_id",
+          "to_beat_id", "from_mode", "to_mode", "start_frame", "end_frame",
+          "duration_sec", "easing", "technique", "swept_presenter_bbox_norm", "reason"
         ],
         "properties": {
           "transition_id": { "type": "string", "minLength": 1 },
@@ -173,12 +126,7 @@
           "duration_sec": { "type": "number", "minimum": 0 },
           "easing": { "type": "string" },
           "technique": { "type": "string" },
-          "swept_presenter_bbox_norm": {
-            "type": "array",
-            "minItems": 4,
-            "maxItems": 4,
-            "items": { "type": "number", "minimum": 0, "maximum": 1 }
-          },
+          "swept_presenter_bbox_norm": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number", "minimum": 0, "maximum": 1 } },
           "reason": { "type": "string" }
         }
       }

@@ -42,6 +42,7 @@ from .contracts import (
     write_json_atomic,
 )
 from .director import build_creative_plan, compile_to_kh02_overrides
+from .execution import BoundedAsyncExecutor, DAGTask, compute_resource_budget
 from .explanation import plan_explanation
 from .footage import acquire_and_bind_footage
 from .intelligence import analyze_inputs, build_semantic_graph
@@ -268,6 +269,10 @@ def run_execute(
     supplied_assets: list[dict[str, Any]] | None = None,
     workers: int = 2,
     max_disk_gib: float | None = None,
+    max_memory_mib: int | None = None,
+    queue_frames: int = 2,
+    enable_tracking: bool = False,
+    reduced_motion: bool = False,
     offline: bool = True,
     online_opt_in: bool = False,
     run_h2: bool = False,
@@ -370,32 +375,79 @@ def run_execute(
             ),
         }
 
-    # Check disk floor before materializing assets/renders
+    # Check disk floor & CMI-10 bounded resource budget BEFORE materializing assets/renders
     pf = run_preflight(run_dir=rdir)
     if not pf["disk_floor_ok"]:
         transition_state(rdir, STATE_BLOCKED, reason=f"Insufficient disk space: {pf['free_disk_gib']} GiB", run_id=run_id)
         return {"exit_code": 2, "status": "BLOCKED_LOW_DISK", "run_id": run_id, "free_disk_gib": pf["free_disk_gib"]}
 
-    transition_state(rdir, STATE_PLANNING, reason=f"Starting KH-03 planning for selected skill {skill_id}.", run_id=run_id)
+    budget = compute_resource_budget(
+        rdir,
+        workers=workers,
+        max_memory_mib=max_memory_mib,
+        max_disk_gib=max_disk_gib,
+        queue_frames=queue_frames if queue_frames is not None else 8,
+        run_dir=(None if dry_run else rdir),
+    )
+    if not budget["budget_ok"]:
+        b_stat = str(budget.get("status") or "BLOCKED_RESOURCE_BUDGET")
+        transition_state(rdir, STATE_BLOCKED, reason=f"{b_stat}: {budget.get('reason')}", run_id=run_id)
+        return {"exit_code": 2, "status": b_stat, "run_id": run_id, "execution_budget": budget}
+
+    eff_workers = int(budget["workers"])
+    transition_state(rdir, STATE_PLANNING, reason=f"Starting KH-03.R3 planning for selected skill {skill_id} (workers={eff_workers}).", run_id=run_id)
     asset_purpose = (
         "COMMERCIAL_AND_NONCOMMERCIAL" if eff_lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED"
         else ("TEST_ONLY" if not production_mode else "NONCOMMERCIAL_ONLY")
     )
 
-    # 3. Research context, Footage Acquisition & Deep Explanation Engine
-    emit_research_summary(rdir, skill_id)
-    footage_manifest = acquire_and_bind_footage(
+    # 3. CMI-10 Bounded Async DAG for independent Stage 3 analyses (research + footage + explanation + registry)
+    dag = BoundedAsyncExecutor(
         run_id=run_id,
-        run_dir=rdir,
-        semantic_graph=sem,
-        skill_id=skill_id,
-        constraints=saved_c,
-        local_libraries=footage_library_dirs,
-        supplied_assets=supplied_assets,
-        intended_purpose=asset_purpose,
-        workers=workers,
-        offline=eff_offline,
+        budget=budget,
+        run_dir=(None if dry_run else rdir),
     )
+    dag_res = dag.run([
+        DAGTask(
+            task_id="01_research_summary",
+            pool="network",
+            fn=lambda _deps: emit_research_summary(rdir, skill_id),
+        ),
+        DAGTask(
+            task_id="02_footage_acquire",
+            pool="network",
+            fn=lambda _deps: acquire_and_bind_footage(
+                run_id=run_id,
+                run_dir=rdir,
+                semantic_graph=sem,
+                skill_id=skill_id,
+                constraints=saved_c,
+                local_libraries=footage_library_dirs,
+                supplied_assets=supplied_assets,
+                intended_purpose=asset_purpose,
+                workers=eff_workers,
+                offline=eff_offline,
+            ),
+        ),
+        DAGTask(
+            task_id="03_explanation_graph",
+            pool="cpu",
+            fn=lambda _deps: plan_explanation(sem, inp, skill_id=skill_id, run_dir=rdir),
+        ),
+        DAGTask(
+            task_id="04_capability_registry",
+            pool="cpu",
+            fn=lambda _deps: build_registry(),
+        ),
+    ])
+    if not dag_res["pass"]:
+        fail_r = [r for r in dag_res["receipts"] if r["status"] != "PASS"]
+        transition_state(rdir, STATE_BLOCKED, reason=f"Bounded DAG planning failed: {fail_r}", run_id=run_id)
+        return {"exit_code": 1, "status": "PLANNING_DAG_FAIL", "run_id": run_id, "errors": fail_r}
+
+    footage_manifest = dag_res["results"]["02_footage_acquire"]
+    explanation_graph = dag_res["results"]["03_explanation_graph"]
+    reg = dag_res["results"]["04_capability_registry"]
     transition_state(
         rdir,
         STATE_ASSET_READY if footage_manifest["status"] == "ASSET_READY" else STATE_ASSET_PARTIAL,
@@ -403,10 +455,19 @@ def run_execute(
         run_id=run_id,
     )
 
-    explanation_graph = plan_explanation(sem, inp, skill_id=skill_id, run_dir=rdir)
-    reg = build_registry()
+    eff_exec_c = dict(saved_c)
+    if enable_tracking:
+        eff_exec_c["enable_streaming_tracking"] = True
+    if reduced_motion:
+        eff_exec_c["reduced_motion"] = True
+    if presenter_mode:
+        eff_exec_c["presenter_mode"] = presenter_mode
+    eff_cut = cut_policy or saved_c.get("cut_policy") or "LOCK_VOICE"
+    eff_caption = caption_policy or saved_c.get("caption_policy") or "OFF"
+    eff_music = music_policy or saved_c.get("music_policy") or "OFF"
+    eff_exec_c["caption_policy"] = eff_caption
 
-    # 4. Adaptive Creative Plan + Layout Choreography + Component Collision Resolution
+    # 4. Adaptive Creative Plan + Layout Choreography + CMI-01..07 Motion/Evidence/Typography/Density
     creative_plan = build_creative_plan(
         run_id=run_id,
         run_dir=rdir,
@@ -417,23 +478,32 @@ def run_execute(
         explanation_graph=explanation_graph,
         footage_manifest=footage_manifest,
         registry=reg,
-        constraints=saved_c,
+        constraints=eff_exec_c,
     )
     lp_file = rdir / "layouts" / "LAYOUT_PLAN.json"
     layout_plan = parse_json_strict(lp_file) if lp_file.is_file() else None
+    mg_file = rdir / "manifests" / "MOTION_GRAPH.json"
+    motion_graph = parse_json_strict(mg_file) if mg_file.is_file() else None
+    ev_file = rdir / "assets" / "EVIDENCE_LEDGER.json"
+    evidence_ledger = parse_json_strict(ev_file) if ev_file.is_file() else None
+    vd_file = rdir / "qc" / "VISUAL_DENSITY_REPORT.json"
+    visual_density = parse_json_strict(vd_file) if vd_file.is_file() else None
+    trk_file = rdir / "analysis" / "TRACKING_PROVENANCE.json"
+    tracking_prov = parse_json_strict(trk_file) if trk_file.is_file() else None
 
     fps = inp["media"]["fps_num"] / float(max(1, inp["media"]["fps_den"]))
-    eff_cut = cut_policy or saved_c.get("cut_policy") or "LOCK_VOICE"
-    eff_caption = caption_policy or saved_c.get("caption_policy") or "OFF"
-    eff_music = music_policy or saved_c.get("music_policy") or "OFF"
 
-    # 5. Multi-Layer Sound Director (anchored to spatial layout transitions & visual reveals!)
+    # 5. Multi-Layer Sound Director (anchored to spatial layout transitions AND CMI-02 motion-graph sub-events!)
     snd_res = plan_soundscape_for_skill(
         run_id=run_id,
         run_dir=rdir,
         creative_plan=creative_plan,
         layout_plan=layout_plan,
+        motion_graph=motion_graph,
         fps=fps,
+        fps_num=int(inp["media"]["fps_num"]),
+        fps_den=int(inp["media"]["fps_den"]),
+        sample_rate=int(inp["media"].get("audio_sample_rate") or 48000),
         voice_policy=eff_cut,
         sfx_policy=sfx_policy,
         bgm_policy=eff_music,
@@ -441,15 +511,20 @@ def run_execute(
         sfx_config_path=sfx_config_path,
         intended_purpose=asset_purpose,
         offline=eff_offline,
-        workers=workers,
+        workers=eff_workers,
         production_mode=production_mode,
         allow_test_only_sfx=allow_test_only_sfx,
     )
 
-    # 6. Build KH-02 Brief & Invoke Normal KH-02 Pipeline (passing authoritative layout_plan + hook + sound_plan!)
+    # 6. Build KH-02 Brief & Invoke Normal KH-02 Pipeline (passing authoritative layout_plan + motion_graph + hook + sound_plan!)
     sk = get_skill_contract(skill_id)
     kh03_ov = compile_to_kh02_overrides(
-        creative_plan, fps=fps, sound_plan=snd_res["sound_plan"], layout_plan=layout_plan,
+        creative_plan,
+        fps=fps,
+        sound_plan=snd_res["sound_plan"],
+        layout_plan=layout_plan,
+        motion_graph=motion_graph,
+        caption_policy=eff_caption,
     )
 
     sources_list = [{
@@ -573,8 +648,11 @@ def run_execute(
         creative_plan, inp, shotbook=shotbook, require_shotbook=(not dry_run), run_dir=(None if dry_run else rdir),
     )
     transition_state(rdir, STATE_QA, reason="Executing KH-03 editorial & comprehension QA.", run_id=run_id)
-    # Reload post-EDL remapped layout_plan from disk if written during Stage E/F
+    # Reload post-EDL remapped layout_plan & motion_graph from disk if written during Stage E/F
     eff_layout_plan = parse_json_strict(lp_file) if lp_file.is_file() else layout_plan
+    eff_motion_graph = parse_json_strict(mg_file) if mg_file.is_file() else motion_graph
+    sq_file = rdir / "qc" / "STREAMING_QA_REPORT.json"
+    streaming_qa_doc = parse_json_strict(sq_file) if sq_file.is_file() else None
     qa_rep = evaluate_kh03_editorial(
         run_id=run_id,
         creative_plan=creative_plan,
@@ -584,15 +662,51 @@ def run_execute(
         visual_qa=vis_qa,
         shotbook=shotbook,
         layout_plan=eff_layout_plan,
+        motion_graph=eff_motion_graph,
+        evidence_ledger=evidence_ledger,
+        visual_density=visual_density,
+        tracking_report=tracking_prov,
+        streaming_qa=streaming_qa_doc,
         license_decision=eff_lic,
         evidence_paths=[
             str(rdir / "manifests/CREATIVE_PLAN.json"),
+            str(rdir / "manifests/MOTION_GRAPH.json"),
             str(rdir / "analysis/EXPLANATION_GRAPH.json"),
             str(rdir / "assets/FOOTAGE_MANIFEST.json"),
+            str(rdir / "assets/EVIDENCE_LEDGER.json"),
             str(rdir / "stems/SOUND_DIRECTOR_PLAN.json"),
         ] + ([str(sb_path)] if sb_path.is_file() else []),
         run_dir=(None if dry_run else rdir),
     )
+
+    if not dry_run and final_mp4_exists and final_mp4_sha:
+        (rdir / "FINAL_RENDER_SHA256.txt").write_text(f"{final_mp4_sha}  {Path(final_mp4_raw).name}\n", encoding="utf-8")
+        write_json_atomic(rdir / "qc" / "FINAL_QA.json", {
+            "schema_version": "kh03.final_qa.v1",
+            "run_id": run_id,
+            "mode": mode,
+            "final_mp4_path": str(final_mp4_raw),
+            "final_mp4_sha256": final_mp4_sha,
+            "creative_plan_sha256": creative_plan["plan_sha256"],
+            "motion_graph_sha256": (eff_motion_graph or {}).get("graph_sha256"),
+            "gates": qa_rep["gates"],
+            "editorial_candidate_pass": qa_rep["editorial_candidate_pass"],
+            "owner_visual": "PENDING",
+            "owner_audio": "PENDING",
+            "commercial_release": qa_rep["gates"]["COMMERCIAL_RELEASE"],
+        })
+        (rdir / "OWNER_REVIEW.md").write_text(
+            "\n".join([
+                f"# Owner Review Checklist — `{run_id}` (`{skill_id}`)",
+                "",
+                f"- **Final MP4 SHA-256**: `{final_mp4_sha}`",
+                "- **OWNER_VISUAL**: `PENDING` (requires human playback inspection)",
+                "- **OWNER_AUDIO**: `PENDING` (requires human listening inspection)",
+                f"- **COMMERCIAL_RELEASE**: `{qa_rep['gates']['COMMERCIAL_RELEASE']}`",
+                "",
+            ]),
+            encoding="utf-8",
+        )
 
     # R1.07: Mode-truthful status — plan mode NEVER claims RENDER_CANDIDATE_VERIFIED or OWNER_PENDING final video!
     if mode == "plan":
@@ -700,6 +814,13 @@ def run_verify(*, run_root: Path, production_mode: bool = True, require_render: 
             issues.append("CREATIVE_PLAN SHA mismatch in SHOTBOOK_V2 provenance.")
         if prov.get("kh03_clock_domain") != "OUTPUT_EDL_MAPPED":
             issues.append(f"SHOTBOOK_V2 missing OUTPUT_EDL_MAPPED clock provenance ({prov.get('kh03_clock_domain')!r}).")
+        mg_f = rdir / "manifests" / "MOTION_GRAPH.json"
+        if plan.get("motion_graph_ref") and not mg_f.is_file():
+            issues.append("MISSING_REQUIRED_ARTIFACT: MOTION_GRAPH.json")
+        if mg_f.is_file() and prov.get("kh03_motion_graph_sha256"):
+            mg_doc = parse_json_strict(mg_f)
+            if mg_doc.get("graph_sha256") != prov.get("kh03_motion_graph_sha256"):
+                issues.append("MOTION_GRAPH SHA mismatch between MOTION_GRAPH.json and SHOTBOOK_V2 provenance.")
         lp_pol = (plan.get("layout_constraints") or {}).get("layout_policy")
         if lp_pol == "ADAPTIVE_DYNAMIC":
             lp_f = rdir / "layouts" / "LAYOUT_PLAN.json"
@@ -723,6 +844,11 @@ def run_verify(*, run_root: Path, production_mode: bool = True, require_render: 
                 issues.append("MISSING_FINAL_MP4: require_render=True but final rendered MP4 missing.")
             elif hash_artifact(mp4_paths[0]) != mp4_sha:
                 issues.append("TAMPERED_FINAL_MP4: final MP4 SHA on disk does not match stage receipt.")
+            sha_txt = rdir / "FINAL_RENDER_SHA256.txt"
+            if sha_txt.is_file():
+                recorded_sha = sha_txt.read_text(encoding="utf-8").strip().split()[0]
+                if recorded_sha != mp4_sha or (mp4_paths and mp4_paths[0].is_file() and hash_artifact(mp4_paths[0]) != recorded_sha):
+                    issues.append("TAMPERED_FINAL_MP4: FINAL_RENDER_SHA256.txt does not match final MP4 on disk.")
 
     return {
         "exit_code": 0 if not issues else 1,
@@ -778,6 +904,10 @@ def main(argv: list[str] | None = None) -> int:
     p_exe.add_argument("--footage-library", action="append", type=Path, default=None)
     p_exe.add_argument("--workers", type=int, default=2)
     p_exe.add_argument("--max-disk", type=float, default=None)
+    p_exe.add_argument("--max-memory-mib", type=int, default=None)
+    p_exe.add_argument("--queue-frames", type=int, default=2)
+    p_exe.add_argument("--enable-tracking", action="store_true", default=False)
+    p_exe.add_argument("--reduced-motion", action="store_true", default=False)
     p_exe.add_argument("--online-opt-in", action="store_true", default=False)
     p_exe.add_argument("--run-h2", action="store_true", default=False)
     p_exe.add_argument("--compare-baseline", action="append", type=Path, default=None)
@@ -844,6 +974,10 @@ def main(argv: list[str] | None = None) -> int:
             footage_library_dirs=args.footage_library,
             workers=args.workers,
             max_disk_gib=args.max_disk,
+            max_memory_mib=args.max_memory_mib,
+            queue_frames=args.queue_frames,
+            enable_tracking=args.enable_tracking,
+            reduced_motion=args.reduced_motion,
             offline=(not args.online_opt_in),
             online_opt_in=args.online_opt_in,
             run_h2=args.run_h2,

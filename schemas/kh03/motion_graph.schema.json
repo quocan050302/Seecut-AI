@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/motion_graph.schema.json",
+  "title": "KH-03.R3 Semantic Component Motion & Shared-Element Scene Graph",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "selected_skill_id",
+    "clock_domain",
+    "fps_num",
+    "fps_den",
+    "total_frames",
+    "nodes",
+    "semantic_motion_events",
+    "shared_elements",
+    "graph_sha256"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.motion_graph.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "selected_skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+    "clock_domain": { "type": "string", "enum": ["SOURCE_CLOCK", "OUTPUT_EDL_MAPPED"] },
+    "time_map_sha256": { "type": ["string", "null"] },
+    "fps_num": { "type": "integer", "minimum": 1 },
+    "fps_den": { "type": "integer", "minimum": 1 },
+    "total_frames": { "type": "integer", "minimum": 1 },
+    "reduced_motion_policy": { "type": "string", "enum": ["STANDARD", "REDUCED_MOTION"] },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "node_id",
+          "component_id",
+          "parent_id",
+          "beat_id",
+          "role",
+          "primitive",
+          "geometry_norm",
+          "safe_bounds_norm",
+          "z_order",
+          "start_frame",
+          "end_frame",
+          "min_read_dwell_frames",
+          "entry_frames",
+          "hold_frames",
+          "exit_frames",
+          "easing",
+          "keyframes",
+          "end_state"
+        ],
+        "properties": {
+          "node_id": { "type": "string", "minLength": 1 },
+          "component_id": { "type": "string", "minLength": 1 },
+          "parent_id": { "type": ["string", "null"] },
+          "beat_id": { "type": "string", "minLength": 1 },
+          "role": { "type": "string", "minLength": 1 },
+          "primitive": {
+            "type": "string",
+            "enum": [
+              "path_follow",
+              "progressive_draw",
+              "object_split_merge",
+              "proportional_allocation",
+              "exact_decimal_counter",
+              "annotated_arrow",
+              "staggered_emergence",
+              "diagram_state_transition",
+              "masked_detail_reveal",
+              "comparative_reveal",
+              "safe_transform",
+              "layered_paper_motion",
+              "timeline_progression",
+              "step_completion",
+              "spatial_emphasis",
+              "stable_hold"
+            ]
+          },
+          "evidence_refs": { "type": "array", "items": { "type": "string" } },
+          "claim_refs": { "type": "array", "items": { "type": "string" } },
+          "geometry_norm": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "safe_bounds_norm": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "local_coord_space": { "type": "string", "enum": ["CANVAS_NORM", "COMPONENT_LOCAL_NORM"] },
+          "z_order": { "type": "integer" },
+          "anchor_word_id": { "type": ["string", "null"] },
+          "anchor_precision": { "type": "string", "enum": ["word_exact", "phrase_fallback", "action_verified", "beat_start"] },
+          "action_anchor_id": { "type": ["string", "null"] },
+          "start_frame": { "type": "integer", "minimum": 0 },
+          "end_frame": { "type": "integer", "minimum": 1 },
+          "src_start_frame": { "type": ["integer", "null"], "minimum": 0 },
+          "src_end_frame": { "type": ["integer", "null"], "minimum": 1 },
+          "min_read_dwell_frames": { "type": "integer", "minimum": 1 },
+          "entry_frames": { "type": "integer", "minimum": 0 },
+          "hold_frames": { "type": "integer", "minimum": 0 },
+          "exit_frames": { "type": "integer", "minimum": 0 },
+          "easing": {
+            "type": "string",
+            "enum": ["none", "power1.out", "power2.out", "power2.inOut", "power3.out", "power3.inOut", "back.out(1.4)", "back.out(1.7)", "back.out(1.9)"]
+          },
+          "clip_mask": { "type": ["object", "null"] },
+          "visibility": { "type": "boolean" },
+          "numeric_exact": { "type": ["object", "null"] },
+          "shared_element_id": { "type": ["string", "null"] },
+          "keyframes": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "required": ["frame", "opacity", "tx", "ty", "scale"],
+              "properties": {
+                "frame": { "type": "integer", "minimum": 0 },
+                "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+                "tx": { "type": "number", "minimum": -1, "maximum": 1 },
+                "ty": { "type": "number", "minimum": -1, "maximum": 1 },
+                "scale": { "type": "number", "minimum": 0.05, "maximum": 4.0 },
+                "rotation_deg": { "type": "number", "minimum": -180, "maximum": 180 },
+                "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+                "state_label": { "type": "string" }
+              }
+            }
+          },
+          "end_state": { "type": "string", "enum": ["SETTLED_HOLD", "MORPH_HANDOFF", "CLEAN_EXIT"] }
+        }
+      }
+    },
+    "semantic_motion_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["motion_event_id", "node_id", "component_id", "src_interval", "out_interval", "reason", "desired_state"],
+        "properties": {
+          "motion_event_id": { "type": "string", "minLength": 1 },
+          "node_id": { "type": "string", "minLength": 1 },
+          "component_id": { "type": "string", "minLength": 1 },
+          "beat_id": { "type": "string" },
+          "src_interval": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 0 } },
+          "out_interval": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 0 } },
+          "reason": { "type": "string", "minLength": 1 },
+          "desired_state": { "type": "string", "minLength": 1 },
+          "sound_anchors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["anchor_id", "kind", "frame"],
+              "properties": {
+                "anchor_id": { "type": "string", "minLength": 1 },
+                "kind": { "type": "string", "enum": ["anticipation", "contact", "click", "arrival", "settle", "reveal", "payoff", "morph_start", "morph_settle"] },
+                "frame": { "type": "integer", "minimum": 0 },
+                "recommended_family": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "shared_elements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "shared_element_id",
+          "source_node_id",
+          "target_node_id",
+          "evidence_or_claim_binding",
+          "start_frame",
+          "end_frame",
+          "source_geometry_norm",
+          "target_geometry_norm",
+          "ownership_mode"
+        ],
+        "properties": {
+          "shared_element_id": { "type": "string", "minLength": 1 },
+          "source_node_id": { "type": "string", "minLength": 1 },
+          "target_node_id": { "type": "string", "minLength": 1 },
+          "from_beat_id": { "type": "string" },
+          "to_beat_id": { "type": "string" },
+          "evidence_or_claim_binding": { "type": "string", "minLength": 1 },
+          "start_frame": { "type": "integer", "minimum": 0 },
+          "end_frame": { "type": "integer", "minimum": 1 },
+          "source_geometry_norm": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number", "minimum": 0, "maximum": 1 } },
+          "target_geometry_norm": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number", "minimum": 0, "maximum": 1 } },
+          "swept_bounds_norm": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number", "minimum": 0, "maximum": 1 } },
+          "z_order": { "type": "integer" },
+          "ownership_mode": { "type": "string", "enum": ["SINGLE_DOM_REUSE", "MATCHED_CROSSFADE_HANDOFF"] },
+          "no_duplicate_at_endpoint": { "type": "boolean" },
+          "min_overlap_visibility": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "graph_sha256": { "type": "string", "minLength": 16 }
+  }
+}

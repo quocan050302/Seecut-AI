@@ -1435,6 +1435,7 @@ def resolve_editorial_plan(
                 **({"kh03_sound_plan_sha256": kh03_metadata["sound_plan_sha256"]} if kh03_metadata.get("sound_plan_sha256") else {}),
                 **({"kh03_layout_policy": kh03_metadata["layout_policy"]} if kh03_metadata.get("layout_policy") else {}),
                 **({"kh03_layout_plan_sha256": kh03_metadata["layout_plan_sha256"]} if kh03_metadata.get("layout_plan_sha256") else {}),
+                **({"kh03_motion_graph_sha256": kh03_metadata["motion_graph_sha256"]} if kh03_metadata.get("motion_graph_sha256") else {}),
             } if kh03_metadata else {}),
         },
     }

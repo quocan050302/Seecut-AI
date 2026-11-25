@@ -14,6 +14,7 @@ from typing import Any
 from .contracts import assert_kh03_schema, write_json_atomic
 from .explanation import evaluate_comprehension, verify_explanation_coverage
 from .layout import compute_anti_repetition_report
+from .motion_graph import verify_morph_semantic_coverage
 
 
 def compute_plan_similarity(plan_a: dict[str, Any], plan_b: dict[str, Any]) -> dict[str, Any]:
@@ -59,6 +60,11 @@ def evaluate_kh03_editorial(
     visual_qa: dict[str, Any],
     shotbook: dict[str, Any] | None = None,
     layout_plan: dict[str, Any] | None = None,
+    motion_graph: dict[str, Any] | None = None,
+    evidence_ledger: dict[str, Any] | None = None,
+    visual_density: dict[str, Any] | None = None,
+    tracking_report: dict[str, Any] | None = None,
+    streaming_qa: dict[str, Any] | None = None,
     license_decision: str = "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED",
     reviewer_type: str = "DETERMINISTIC_OBJECTIVE",
     evidence_paths: list[str] | None = None,
@@ -75,6 +81,37 @@ def evaluate_kh03_editorial(
         hard_defects.append({
             "code": "REPEATED_TOP_BANNER_LOOP",
             "message": "; ".join(anti_rep.get("findings") or ["Unjustified layout repetition detected."]),
+        })
+
+    morph_cov = (
+        verify_morph_semantic_coverage(motion_graph, layout_plan=layout_plan, run_dir=run_dir)
+        if motion_graph is not None else None
+    )
+    if morph_cov is not None and not morph_cov["pass"]:
+        hard_defects.append({
+            "code": "MORPH_SEMANTIC_GAP_OR_COLLISION",
+            "message": "; ".join(str(f) for f in (morph_cov.get("issues") or morph_cov.get("findings") or ["Shared-element morph coverage failed."])),
+        })
+    ev_blocked = bool(
+        evidence_ledger is not None
+        and (evidence_ledger.get("status") == "EVIDENCE_BLOCKED_MISSING_REQUIRED" or evidence_ledger.get("pass") is False)
+    )
+    if ev_blocked:
+        gap_msgs = [str(g.get("reason", g)) for g in (evidence_ledger.get("gaps") or [])]
+        hard_defects.append({
+            "code": "EVIDENCE_RIGHTS_OR_PROOF_FAIL",
+            "message": "; ".join(gap_msgs or ["Required evidence proof or rights verification failed."]),
+        })
+    vd_doc = (visual_density or {}).get("visual_density_report", visual_density) if visual_density is not None else None
+    if vd_doc is not None and not vd_doc.get("pass", True):
+        hard_defects.append({
+            "code": "VISUAL_DENSITY_OR_REPETITION_FAIL",
+            "message": "; ".join(str(f) for f in (vd_doc.get("findings") or ["Visual density / repetition gate failed."])),
+        })
+    if streaming_qa is not None and not streaming_qa.get("pass", True):
+        hard_defects.append({
+            "code": "STREAMING_FRAME_QA_FAIL",
+            "message": "; ".join(str(f) for f in (streaming_qa.get("issues") or ["Streaming frame QA failed."])),
         })
 
     exp_cov = verify_explanation_coverage(explanation_graph)
@@ -139,6 +176,11 @@ def evaluate_kh03_editorial(
         "KH03_FOOTAGE_ACQUISITION": "PASS" if f_stat == "ASSET_READY" else ("PARTIAL" if f_stat in ("FOOTAGE_PARTIAL", "A_ROLL_AND_GRAPHICS_ONLY") else "BLOCKED"),
         "KH03_SOUND_ASSETS": "PASS" if snd_counts.get("ADD", 0) > 0 else ("BLOCKED_SFX_ASSETS" if snd_counts.get("UNAVAILABLE", 0) > 0 else "VOICE_ONLY"),
         "KH03_VISUAL_COLLISION": "PASS" if visual_qa.get("pass") else "FAIL",
+        "KH03_MOTION_GRAPH": "PASS" if (motion_graph is not None and (morph_cov is None or morph_cov["pass"])) else ("NOT_RUN" if motion_graph is None else "FAIL"),
+        "KH03_SHARED_ELEMENT_QA": "PASS" if (morph_cov is not None and morph_cov["pass"]) else ("NOT_RUN" if morph_cov is None else "FAIL"),
+        "KH03_EVIDENCE_RIGHTS": "FAIL" if ev_blocked else ("PASS" if evidence_ledger is not None else "NOT_RUN"),
+        "KH03_VISUAL_DENSITY": "PASS" if (vd_doc is None or vd_doc.get("pass", True)) else "FAIL",
+        "KH03_TRACKING_SCOPE": (tracking_report or {}).get("tracking_mode") or (tracking_report or {}).get("mode") or "STATIC_FALLBACK_VERIFIED",
         "AUTO_EDITORIAL_QA": "PASS" if editorial_pass else "FAIL",
         "OWNER_VISUAL": "PENDING",
         "OWNER_AUDIO": "PENDING",

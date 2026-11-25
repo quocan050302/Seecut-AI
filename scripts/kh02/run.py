@@ -736,6 +736,7 @@ def execute_pipeline(
                 "sound_plan_sha256": eff_kh03_overrides.get("sound_plan_sha256"),
                 "layout_policy": eff_kh03_overrides.get("layout_policy"),
                 "layout_plan_sha256": eff_kh03_overrides.get("layout_plan_sha256"),
+                "motion_graph_sha256": eff_kh03_overrides.get("motion_graph_sha256"),
             }
             if eff_kh03_overrides else None
         )
@@ -1407,6 +1408,8 @@ def execute_pipeline(
         result["owner_visual_status"] = "PENDING"
         result["owner_audio_status"] = "PENDING"
         result["commercial_release_status"] = "BLOCKED" if lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" else "AUTHORIZED_PENDING_OWNER"
+        if final_mp4_path and Path(final_mp4_path).is_file() and final_mp4_sha:
+            (run_dir / "FINAL_RENDER_SHA256.txt").write_text(f"{final_mp4_sha}  {Path(final_mp4_path).name}\n", encoding="utf-8")
         result["status"] = "RENDER_VERIFIED_PENDING_OWNER" if all_ok else "RENDER_QA_FAIL"
         result["exit_code"] = 0 if all_ok else 1
 

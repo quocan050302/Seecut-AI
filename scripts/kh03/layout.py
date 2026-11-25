@@ -1367,12 +1367,17 @@ def compute_anti_repetition_report(
         max_hold_f = max(max_hold_f, cur_hold_f)
     longest_hold_sec = round(max_hold_f / max(1.0, fps), 3)
 
-    # Detect repetitive top-banner loop: >=3 beats, all FULL_CANVAS with graphic pinned to top strip (y < 0.25)
-    top_banner_beats = sum(
-        1 for b in beats
-        if b["layout_mode"] == "FULL_CANVAS" and float(b["graphic_box_norm"][1]) < 0.25 and float(b["graphic_box_norm"][3]) < 0.28
-    )
-    is_banner_loop = (len(beats) >= 3 and top_banner_beats == len(beats))
+    # Detect repetitive top-banner loop: ALL beats OR duration-weighted >=78% top-banner residence!
+    total_f = max(1, sum(max(1, int(b["end_frame"]) - int(b["start_frame"])) for b in beats))
+    top_banner_beats = 0
+    top_banner_frames = 0
+    for b in beats:
+        df = max(1, int(b["end_frame"]) - int(b["start_frame"]))
+        if b["layout_mode"] == "FULL_CANVAS" and float(b["graphic_box_norm"][1]) < 0.25 and float(b["graphic_box_norm"][3]) < 0.28:
+            top_banner_beats += 1
+            top_banner_frames += df
+    top_banner_ratio = round(top_banner_frames / float(total_f), 4)
+    is_banner_loop = (len(beats) >= 3 and (top_banner_beats == len(beats) or top_banner_ratio >= 0.78))
     justified_continuity = (pol == "FULLSCREEN_LOCK") or (skill_id == "SK-05")
     unjustified_repetition = bool(is_banner_loop and not justified_continuity and pol == "ADAPTIVE_DYNAMIC")
 

@@ -1,18 +1,25 @@
-"""KH-03 Visual QA & Deterministic Headless Chromium Component Gallery Verifier.
+"""KH-03 Visual QA, True O(1) Streaming Frame Verifier & Native Pinned-GSAP Gallery (CMI-09 & CMI-10).
 
 Provides:
 1. Swept bounding-box protected-region collision audit (face/mouth/hands/objects + fullscreen hard lock).
-2. Real headless Chromium verification of all 8 newly compiled KH-03 component families using
-   either pinned playwright-core OR native Node v26 Chromium CDP (direct == reverse == repeat == cold,
-   visible pixel delta >= 2.0, zero console/page errors, zero first-frame flash).
+2. TRUE O(1)-memory streaming per-frame decoded QA (`verify_fullscreen_frames`, `verify_adaptive_layout_frames`)
+   using `stream_paired_frames()` (zero full-video RGB buffers in RAM!), incremental `FRAME_QA.jsonl` & CSV
+   streaming, `STREAMING_QA_REPORT.json`, and `PROCESS_CLEANUP_REPORT.json`.
+3. Internal component ROI pixel motion audit (`verify_component_internal_roi_motion`, `COMPONENT_PIXEL_QA.json`)
+   that excludes presenter/camera motion and catches frozen static cards or codec-noise-only changes.
+4. Bounded hook pixel QA (`verify_hook_pixels`) and every-frame morph strip extraction (`export_morph_frame_strips`).
+5. Cross-platform headless Chromium verification (macOS, Linux, Windows) of all 8 KH-03 component families
+   separating genuine pinned native GSAP (`NATIVE_GSAP_PASS`) from offline test shim (`SHIM_ONLY_TEST_PASS`).
 """
 
 from __future__ import annotations
 
+import csv as _csv
 import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,23 +28,60 @@ from PIL import Image, ImageChops, ImageStat
 from scripts.kh02.compile_plan import compile_shotbook
 from scripts.kh02.registry import build_registry, mark_gallery_verified
 
-from .components import KH03_COMPONENT_CATALOG, audit_component_motion, design_component, compile_component_events
+from .components import KH03_COMPONENT_CATALOG, audit_component_motion, compile_component_events, design_component
 from .contracts import hash_artifact, write_json_atomic
+from .execution import (
+    StreamingRGBFrameDecoder,
+    count_edl_frames,
+    get_process_rss_mib,
+    stream_paired_frames,
+)
 
 
 def _find_chromium_executable() -> Path | None:
+    """Locate local Chromium / Chrome for Testing deterministically across macOS, Linux, and Windows."""
     env_p = os.environ.get("KH03_CHROMIUM_PATH") or os.environ.get("CHROME_PATH")
     if env_p and Path(env_p).is_file():
         return Path(env_p)
-    # Check local Playwright browser cache cleanly (bounded explicit paths, no HOME recursive scan)
+
+    # 1. macOS Playwright cache (bounded explicit paths, no HOME recursive scan)
+    mac_pw = Path.home() / "Library" / "Caches" / "ms-playwright"
+    if mac_pw.is_dir():
+        for pat in (
+            "chromium-*/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+            "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+            "chromium_headless_shell-*/chrome-headless-shell-mac-arm64/chrome-headless-shell",
+            "chromium_headless_shell-*/chrome-headless-shell-mac/chrome-headless-shell",
+        ):
+            matches = sorted(mac_pw.glob(pat), reverse=True)
+            if matches:
+                return matches[0]
+
+    # 2. Linux Playwright cache
+    lin_pw = Path.home() / ".cache" / "ms-playwright"
+    if lin_pw.is_dir():
+        for pat in (
+            "chromium-*/chrome-linux/chrome",
+            "chromium_headless_shell-*/chrome-linux/headless_shell",
+        ):
+            matches = sorted(lin_pw.glob(pat), reverse=True)
+            if matches:
+                return matches[0]
+
+    # 3. Windows Playwright cache
     local_app = os.environ.get("LOCALAPPDATA")
     if local_app:
         pw_root = Path(local_app) / "ms-playwright"
         if pw_root.is_dir():
-            for pat in ("chromium_headless_shell-*/chrome-headless-shell-win64/chrome-headless-shell.exe", "chromium-*/chrome-win/chrome.exe"):
+            for pat in (
+                "chromium_headless_shell-*/chrome-headless-shell-win64/chrome-headless-shell.exe",
+                "chromium-*/chrome-win/chrome.exe",
+            ):
                 matches = sorted(pw_root.glob(pat), reverse=True)
                 if matches:
                     return matches[0]
+
+    # 4. System PATH browsers
     for name in ("chromium", "chromium-browser", "google-chrome", "chrome"):
         found = shutil.which(name)
         if found:
@@ -57,6 +101,32 @@ def _mean_abs_diff(img_a: Path, img_b: Path, crop_box: tuple[int, int, int, int]
         return round(sum(stat.mean) / 3.0, 4)
 
 
+def _probe_video_meta(p: Path) -> dict[str, Any]:
+    pr = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,r_frame_rate,nb_frames,duration",
+            "-of", "json", str(p),
+        ],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    st = json.loads(pr.stdout)["streams"][0]
+    num, den = (int(x) for x in str(st.get("r_frame_rate", "24/1")).split("/"))
+    nb = int(st["nb_frames"]) if str(st.get("nb_frames", "")).isdigit() else None
+    if nb is None and st.get("duration"):
+        try:
+            nb = int(round(float(st["duration"]) * (num / float(max(1, den)))))
+        except Exception:
+            nb = None
+    return {
+        "width": int(st["width"]),
+        "height": int(st["height"]),
+        "fps_num": num,
+        "fps_den": max(1, den),
+        "nb_frames": nb,
+    }
+
+
 def audit_fullscreen_and_collisions(
     creative_plan: dict[str, Any],
     input_analysis: dict[str, Any],
@@ -65,7 +135,7 @@ def audit_fullscreen_and_collisions(
     require_shotbook: bool = False,
     run_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Audit full-screen lock compliance, camera geometry, protected-region clearance, 360px legibility & motion (R1.02)."""
+    """Audit full-screen lock compliance, camera geometry, protected-region clearance, 360px legibility & motion."""
     lc = creative_plan.get("layout_constraints") or {}
     fs_lock = bool(lc.get("fullscreen_lock"))
     media = input_analysis.get("media") or {}
@@ -130,7 +200,7 @@ def audit_fullscreen_and_collisions(
     }
     prot_map = {
         "schema_version": "kh03.protected_region_map.v1",
-        "detection_mode": "STATIC_FALLBACK_VERIFIED",
+        "detection_mode": str(lc.get("tracking_mode") or "STATIC_FALLBACK_VERIFIED"),
         "note": "Conservative swept safe bounds verified; ML face/hand tracker not claimed unless explicitly executed.",
         "protected_zones": (input_analysis.get("safe_regions") or {}).get("protected_zones") or [],
         "clear_overlay_zones": (input_analysis.get("safe_regions") or {}).get("clear_overlay_zones") or [],
@@ -165,157 +235,168 @@ def verify_fullscreen_frames(
     max_mean_diff: float = 18.0,
     probe_w: int = 180,
     probe_h: int = 320,
+    ffmpeg_threads: int = 2,
 ) -> dict[str, Any]:
-    """Stream EVERY decoded frame (0..N-1) comparing expected EDL source frame vs final MP4 outside overlay mask (R1.02).
-
-    Detects single-frame PIP shrink, zoom/crop, black/hidden source, wrong frame order, freeze, and
-    protected-region overlay intrusion without dumping full-res PNGs to disk.
-    """
+    """TRUE O(1)-RAM streaming verifier for EVERY decoded frame under FULLSCREEN_LOCK (CMI-09 & CMI-10)."""
+    t0 = time.monotonic()
     src_p = Path(source_mp4).resolve()
     fin_p = Path(final_mp4).resolve()
     if not src_p.is_file() or not fin_p.is_file():
         return {
             "schema_version": "kh03.fullscreen_frame_qa.v1",
             "verification_scope": "DECODED_RENDER",
+            "streaming_mode": "TRUE_BOUNDED_STREAMING_O1_RAM",
             "status": "FAIL_MISSING_MEDIA",
             "pass": False,
             "issues": ["Source or final MP4 missing for decoded frame verification."],
         }
 
-    def _probe_meta(p: Path) -> dict[str, Any]:
-        pr = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height,r_frame_rate,nb_frames", "-of", "json", str(p)],
-            capture_output=True, text=True, check=True, timeout=30,
-        )
-        st = json.loads(pr.stdout)["streams"][0]
-        num, den = (int(x) for x in str(st.get("r_frame_rate", "24/1")).split("/"))
-        return {
-            "width": int(st["width"]), "height": int(st["height"]),
-            "fps_num": num, "fps_den": max(1, den),
-            "nb_frames": int(st["nb_frames"]) if str(st.get("nb_frames", "")).isdigit() else None,
-        }
-
-    src_m = _probe_meta(src_p)
-    fin_m = _probe_meta(fin_p)
+    src_m = _probe_video_meta(src_p)
+    fin_m = _probe_video_meta(fin_p)
     issues: list[str] = []
 
     src_ar = src_m["width"] / float(max(1, src_m["height"]))
     fin_ar = fin_m["width"] / float(max(1, fin_m["height"]))
     if abs(src_ar - fin_ar) > 0.02:
         issues.append(f"ASPECT_MISMATCH: source {src_m['width']}x{src_m['height']} vs final {fin_m['width']}x{fin_m['height']}")
-    if (src_m["fps_num"] / float(src_m["fps_den"])) != (fin_m["fps_num"] / float(fin_m["fps_den"])):
+    if abs((src_m["fps_num"] / float(src_m["fps_den"])) - (fin_m["fps_num"] / float(fin_m["fps_den"]))) > 0.02:
         issues.append(f"FPS_MISMATCH: source {src_m['fps_num']}/{src_m['fps_den']} vs final {fin_m['fps_num']}/{fin_m['fps_den']}")
 
-    # Build expected source frame index -> output frame index list from EDL (or identity)
-    if edl and edl.get("segments"):
-        expected_src_frames: list[int] = []
-        for seg in edl["segments"]:
-            expected_src_frames.extend(range(int(seg["src_start_frame"]), int(seg["src_end_frame"])))
-    else:
-        n_est = fin_m["nb_frames"] or src_m["nb_frames"] or 0
-        expected_src_frames = list(range(n_est))
-
-    # Decode compact 180x320 RGB frames via streaming FFmpeg pipe (constant bounded memory)
-    def _decode_raw_rgb(p: Path, w: int, h: int) -> bytes:
-        proc = subprocess.run(
-            ["ffmpeg", "-v", "error", "-i", str(p), "-vf", f"scale={w}:{h}:flags=bilinear", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=180,
-        )
-        return proc.stdout
-
-    frame_bytes = probe_w * probe_h * 3
-    src_buf = _decode_raw_rgb(src_p, probe_w, probe_h)
-    fin_buf = _decode_raw_rgb(fin_p, probe_w, probe_h)
-    src_n = len(src_buf) // frame_bytes
-    fin_n = len(fin_buf) // frame_bytes
-    if not expected_src_frames:
-        expected_src_frames = list(range(fin_n))
-
-    if fin_n != len(expected_src_frames):
-        issues.append(f"FRAME_COUNT_MISMATCH: final decoded {fin_n} frames != expected EDL {len(expected_src_frames)} frames")
-
-    # Build protected mask pixels (focus on presenter/subject region where overlays must NOT occlude)
+    expected_n = count_edl_frames(edl, fin_m["nb_frames"] or src_m["nb_frames"] or 0)
     pzones = protected_zones or [{"bbox_norm": [0.15, 0.30, 0.70, 0.44]}]
     ov_list = overlay_events or []
-    n_check = min(fin_n, len(expected_src_frames))
+
     fail_frames: list[dict[str, Any]] = []
+    fail_count = 0
+    checked = 0
     max_obs_diff = 0.0
     total_diff = 0.0
+    rss_start = get_process_rss_mib()
+    rss_peak = rss_start
+    last_stats: dict[str, Any] = {}
 
-    for out_idx in range(n_check):
-        src_idx = expected_src_frames[out_idx]
-        if src_idx >= src_n:
-            fail_frames.append({"frame": out_idx, "reason": f"src_idx {src_idx} >= src_n {src_n}"})
-            continue
-        im_s = Image.frombytes("RGB", (probe_w, probe_h), src_buf[src_idx * frame_bytes : (src_idx + 1) * frame_bytes])
-        im_f = Image.frombytes("RGB", (probe_w, probe_h), fin_buf[out_idx * frame_bytes : (out_idx + 1) * frame_bytes])
+    jsonl_fh = None
+    jsonl_tmp: Path | None = None
+    od = Path(out_dir) if out_dir is not None else None
+    if od is not None:
+        od.mkdir(parents=True, exist_ok=True)
+        jsonl_tmp = od / "FRAME_QA.jsonl.part"
+        jsonl_fh = jsonl_tmp.open("w", encoding="utf-8")
 
-        # Mask out ONLY approved non-protected overlay rects active on this frame; protected zones are NEVER masked out!
-        active_boxes = [
-            ev["normalized_bbox"] for ev in ov_list
-            if int(ev.get("start_frame", 0)) <= out_idx < int(ev.get("end_frame", 0)) and ev.get("normalized_bbox")
-        ]
-        # Measure diff inside protected zones directly (catches PIP shrink, zoom, crop, black frame, wrong order, or face occlusion!)
-        prot_diffs: list[float] = []
-        for pz in pzones:
-            bx, by, bw, bh = [float(v) for v in pz["bbox_norm"]]
-            box = (
-                max(0, int(bx * probe_w)), max(0, int(by * probe_h)),
-                min(probe_w, max(1, int((bx + bw) * probe_w))), min(probe_h, max(1, int((by + bh) * probe_h))),
-            )
-            diff_im = ImageChops.difference(im_s.crop(box), im_f.crop(box))
-            md = sum(ImageStat.Stat(diff_im).mean) / 3.0
-            prot_diffs.append(md)
-        # Also check full-frame outside active overlay boxes (catches background replacement / letterbox / PIP shrink)
-        im_s_m = im_s.copy()
-        im_f_m = im_f.copy()
-        for bx, by, bw, bh in active_boxes:
-            x0, y0 = max(0, int(bx * probe_w)), max(0, int(by * probe_h))
-            x1, y1 = min(probe_w, int((bx + bw) * probe_w)), min(probe_h, int((by + bh) * probe_h))
-            if x1 > x0 and y1 > y0:
-                im_s_m.paste((0, 0, 0), (x0, y0, x1, y1))
-                im_f_m.paste((0, 0, 0), (x0, y0, x1, y1))
-        bg_md = sum(ImageStat.Stat(ImageChops.difference(im_s_m, im_f_m)).mean) / 3.0
-        frame_md = round(max([bg_md] + prot_diffs), 3)
-        max_obs_diff = max(max_obs_diff, frame_md)
-        total_diff += frame_md
-        if frame_md > max_mean_diff:
-            fail_frames.append({
-                "frame": out_idx,
-                "expected_src_frame": src_idx,
-                "mean_abs_diff": frame_md,
-                "bg_diff": round(bg_md, 3),
-                "protected_max_diff": round(max(prot_diffs) if prot_diffs else 0.0, 3),
-                "reason": "FULLSCREEN_OR_PROTECTED_ZONE_DRIFT",
-            })
+    try:
+        for out_idx, src_idx, src_b, fin_b, st_info in stream_paired_frames(
+            src_p, fin_p, edl=edl, expected_total_frames=expected_n,
+            probe_w=probe_w, probe_h=probe_h, ffmpeg_threads=ffmpeg_threads,
+        ):
+            last_stats = st_info
+            if fin_b is None:
+                break
+            if src_b is None:
+                fail_count += 1
+                if len(fail_frames) < 16:
+                    fail_frames.append({"frame": out_idx, "expected_src_frame": src_idx, "reason": "SRC_EOF_EARLY"})
+                continue
 
-    if fail_frames:
-        issues.append(f"FULLSCREEN_DECODED_FRAME_DRIFT: {len(fail_frames)}/{n_check} frames exceeded tolerance {max_mean_diff} (max={max_obs_diff})")
+            im_s = Image.frombytes("RGB", (probe_w, probe_h), src_b)
+            im_f = Image.frombytes("RGB", (probe_w, probe_h), fin_b)
+            active_boxes = [
+                ev["normalized_bbox"] for ev in ov_list
+                if int(ev.get("start_frame", 0)) <= out_idx < int(ev.get("end_frame", 0)) and ev.get("normalized_bbox")
+            ]
+            prot_diffs: list[float] = []
+            for pz in pzones:
+                bx, by, bw, bh = [float(v) for v in pz["bbox_norm"]]
+                box = (
+                    max(0, int(bx * probe_w)), max(0, int(by * probe_h)),
+                    min(probe_w, max(1, int((bx + bw) * probe_w))), min(probe_h, max(1, int((by + bh) * probe_h))),
+                )
+                md = sum(ImageStat.Stat(ImageChops.difference(im_s.crop(box), im_f.crop(box))).mean) / 3.0
+                prot_diffs.append(md)
 
+            im_s_m = im_s.copy()
+            im_f_m = im_f.copy()
+            for bx, by, bw, bh in active_boxes:
+                x0, y0 = max(0, int(bx * probe_w)), max(0, int(by * probe_h))
+                x1, y1 = min(probe_w, int((bx + bw) * probe_w)), min(probe_h, int((by + bh) * probe_h))
+                if x1 > x0 and y1 > y0:
+                    im_s_m.paste((0, 0, 0), (x0, y0, x1, y1))
+                    im_f_m.paste((0, 0, 0), (x0, y0, x1, y1))
+            bg_md = sum(ImageStat.Stat(ImageChops.difference(im_s_m, im_f_m)).mean) / 3.0
+            frame_md = round(max([bg_md] + prot_diffs), 3)
+            max_obs_diff = max(max_obs_diff, frame_md)
+            total_diff += frame_md
+            checked += 1
+            row_ok = frame_md <= max_mean_diff
+            if not row_ok:
+                fail_count += 1
+                if len(fail_frames) < 16:
+                    fail_frames.append({
+                        "frame": out_idx,
+                        "expected_src_frame": src_idx,
+                        "mean_abs_diff": frame_md,
+                        "bg_diff": round(bg_md, 3),
+                        "protected_max_diff": round(max(prot_diffs) if prot_diffs else 0.0, 3),
+                        "reason": "FULLSCREEN_OR_PROTECTED_ZONE_DRIFT",
+                    })
+            if jsonl_fh is not None and (out_idx == 0 or out_idx == expected_n - 1 or out_idx % max(1, expected_n // 60) == 0 or not row_ok):
+                jsonl_fh.write(json.dumps({"frame": out_idx, "src_frame": src_idx, "mean_abs_diff": frame_md, "pass": row_ok}) + "\n")
+            if checked % 120 == 0:
+                rss_peak = max(rss_peak, get_process_rss_mib())
+    finally:
+        if jsonl_fh is not None:
+            jsonl_fh.close()
+
+    if jsonl_tmp is not None and od is not None and jsonl_tmp.is_file():
+        jsonl_tmp.replace(od / "FRAME_QA.jsonl")
+
+    if checked != expected_n or int(last_stats.get("fin_extra_frames", 0)) > 0:
+        issues.append(
+            f"FRAME_COUNT_MISMATCH: decoded {checked} (+{last_stats.get('fin_extra_frames', 0)} extra) != expected EDL {expected_n}"
+        )
+    if fail_count > 0:
+        issues.append(f"FULLSCREEN_DECODED_FRAME_DRIFT: {fail_count}/{checked} frames exceeded tolerance {max_mean_diff} (max={max_obs_diff})")
+
+    wall_s = round(time.monotonic() - t0, 4)
+    rss_peak = max(rss_peak, get_process_rss_mib())
     report = {
         "schema_version": "kh03.fullscreen_frame_qa.v1",
         "verification_scope": "DECODED_RENDER",
+        "streaming_mode": "TRUE_BOUNDED_STREAMING_O1_RAM",
         "source_mp4_sha256": hash_artifact(src_p),
         "final_mp4_sha256": hash_artifact(fin_p),
         "source_resolution": f"{src_m['width']}x{src_m['height']}",
         "final_resolution": f"{fin_m['width']}x{fin_m['height']}",
         "fps": f"{fin_m['fps_num']}/{fin_m['fps_den']}",
-        "frames_checked": n_check,
-        "frames_expected": len(expected_src_frames),
+        "frames_checked": checked,
+        "frames_expected": expected_n,
         "max_mean_abs_diff": round(max_obs_diff, 3),
-        "avg_mean_abs_diff": round(total_diff / float(max(1, n_check)), 3),
+        "avg_mean_abs_diff": round(total_diff / float(max(1, checked)), 3),
         "tolerance_mean_abs_diff": max_mean_diff,
-        "fail_frame_count": len(fail_frames),
+        "fail_frame_count": fail_count,
         "fail_frames_sample": fail_frames[:12],
+        "streaming_metrics": {
+            "wall_sec": wall_s,
+            "decoded_fps": round(checked / max(0.001, wall_s), 2),
+            "rss_start_mib": rss_start,
+            "rss_peak_mib": rss_peak,
+            "rss_delta_mib": round(max(0.0, rss_peak - rss_start), 2),
+            "src_cleanup": last_stats.get("src_cleanup"),
+            "fin_cleanup": last_stats.get("fin_cleanup"),
+        },
         "issues": issues,
         "status": "DECODED_RENDER_PASS" if not issues else "DECODED_RENDER_FAIL",
         "pass": len(issues) == 0,
     }
-    if out_dir is not None:
-        od = Path(out_dir)
-        od.mkdir(parents=True, exist_ok=True)
+    if od is not None:
         write_json_atomic(od / "FULLSCREEN_FRAME_QA.json", report)
+        write_json_atomic(od / "FRAME_QA_SUMMARY.json", report)
+        write_json_atomic(od / "STREAMING_QA_REPORT.json", report["streaming_metrics"])
+        write_json_atomic(od / "PROCESS_CLEANUP_REPORT.json", {
+            "schema_version": "kh03.process_cleanup.v1",
+            "src_decoder": last_stats.get("src_cleanup"),
+            "fin_decoder": last_stats.get("fin_cleanup"),
+            "all_clean": bool((last_stats.get("src_cleanup") or {}).get("clean", True) and (last_stats.get("fin_cleanup") or {}).get("clean", True)),
+        })
     return report
 
 
@@ -330,175 +411,202 @@ def verify_adaptive_layout_frames(
     max_mean_diff: float = 28.0,
     probe_w: int = 180,
     probe_h: int = 320,
+    ffmpeg_threads: int = 2,
 ) -> dict[str, Any]:
-    """Stream EVERY decoded frame (0..N-1) verifying live presenter geometry, crop, motion & continuity (ADL-07).
+    """TRUE O(1)-RAM streaming verifier for EVERY decoded frame under ADAPTIVE_DYNAMIC layout (CMI-09 & CMI-10).
 
-    Evaluates exact `interpolate_presenter_geometry(frame)` at every frame (including morph midpoints!),
-    transforms the corresponding EDL source frame into the expected presenter box via aspect-preserving
-    object-fit:cover math, and detects missing presenter, freeze, black flash, crop/aspect drift, or
-    wrong frame order without dumping full-res PNGs to disk.
+    Streams source + output incrementally via `stream_paired_frames()` and writes CSV/JSONL directly to disk,
+    holding at most 2 compact low-res frames in RAM regardless of whether video is 30s or 30+ minutes!
     """
-    import csv as _csv
     from .layout import compute_source_crop_for_box, interpolate_presenter_geometry
 
+    t0 = time.monotonic()
     src_p = Path(source_mp4).resolve()
     fin_p = Path(final_mp4).resolve()
     if not src_p.is_file() or not fin_p.is_file():
         return {
             "schema_version": "kh03.adaptive_layout_frame_qa.v1",
             "verification_scope": "DECODED_RENDER",
+            "streaming_mode": "TRUE_BOUNDED_STREAMING_O1_RAM",
             "status": "FAIL_MISSING_MEDIA",
             "pass": False,
             "issues": ["Source or final MP4 missing for adaptive layout decoded frame verification."],
         }
 
-    def _probe(p: Path) -> dict[str, Any]:
-        pr = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height,r_frame_rate,nb_frames", "-of", "json", str(p)],
-            capture_output=True, text=True, check=True, timeout=30,
-        )
-        st = json.loads(pr.stdout)["streams"][0]
-        num, den = (int(x) for x in str(st.get("r_frame_rate", "24/1")).split("/"))
-        return {
-            "width": int(st["width"]), "height": int(st["height"]),
-            "fps_num": num, "fps_den": max(1, den),
-            "nb_frames": int(st["nb_frames"]) if str(st.get("nb_frames", "")).isdigit() else None,
-        }
-
-    src_m = _probe(src_p)
-    fin_m = _probe(fin_p)
+    src_m = _probe_video_meta(src_p)
+    fin_m = _probe_video_meta(fin_p)
     issues: list[str] = []
+    expected_n = count_edl_frames(edl, fin_m["nb_frames"] or src_m["nb_frames"] or 0)
 
-    if edl and edl.get("segments"):
-        expected_src_frames: list[int] = []
-        for seg in edl["segments"]:
-            expected_src_frames.extend(range(int(seg["src_start_frame"]), int(seg["src_end_frame"])))
-    else:
-        n_est = fin_m["nb_frames"] or src_m["nb_frames"] or 0
-        expected_src_frames = list(range(n_est))
-
-    def _decode_rgb(p: Path, w: int, h: int) -> bytes:
-        proc = subprocess.run(
-            ["ffmpeg", "-v", "error", "-i", str(p), "-vf", f"scale={w}:{h}:flags=bilinear", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=180,
-        )
-        return proc.stdout
-
-    frame_bytes = probe_w * probe_h * 3
-    src_buf = _decode_rgb(src_p, probe_w, probe_h)
-    fin_buf = _decode_rgb(fin_p, probe_w, probe_h)
-    src_n = len(src_buf) // frame_bytes
-    fin_n = len(fin_buf) // frame_bytes
-    if not expected_src_frames:
-        expected_src_frames = list(range(fin_n))
-    if fin_n != len(expected_src_frames):
-        issues.append(f"FRAME_COUNT_MISMATCH: final {fin_n} != expected EDL {len(expected_src_frames)}")
-
-    n_check = min(fin_n, len(expected_src_frames))
     trs = layout_plan.get("transitions") or []
     beats_by_id = {b["beat_id"]: b for b in layout_plan.get("beats", [])}
     fail_frames: list[dict[str, Any]] = []
-    csv_rows: list[dict[str, Any]] = []
+    fail_count = 0
+    checked = 0
     max_diff = 0.0
     sum_diff = 0.0
     prev_pres_crop: Image.Image | None = None
+    prev_src_im: Image.Image | None = None
     freeze_streak = 0
     max_freeze_streak = 0
     black_frames = 0
     morph_checked = 0
+    rss_start = get_process_rss_mib()
+    rss_peak = rss_start
+    last_stats: dict[str, Any] = {}
 
-    for out_idx in range(n_check):
-        src_idx = expected_src_frames[out_idx]
-        if src_idx >= src_n:
-            fail_frames.append({"frame": out_idx, "reason": "SRC_INDEX_OUT_OF_RANGE"})
-            continue
-        im_s = Image.frombytes("RGB", (probe_w, probe_h), src_buf[src_idx * frame_bytes : (src_idx + 1) * frame_bytes])
-        im_f = Image.frombytes("RGB", (probe_w, probe_h), fin_buf[out_idx * frame_bytes : (out_idx + 1) * frame_bytes])
+    od = Path(out_dir) if out_dir is not None else None
+    csv_fh = None
+    csv_writer = None
+    csv_tmp: Path | None = None
+    jsonl_fh = None
+    jsonl_tmp: Path | None = None
+    if od is not None:
+        od.mkdir(parents=True, exist_ok=True)
+        csv_tmp = od / "ADAPTIVE_LAYOUT_FRAME_QA.csv.part"
+        csv_fh = csv_tmp.open("w", encoding="utf-8", newline="")
+        csv_writer = _csv.DictWriter(csv_fh, fieldnames=["frame", "src_frame", "layout_mode", "in_transition", "mean_abs_diff", "black_flash", "pass"])
+        csv_writer.writeheader()
+        jsonl_tmp = od / "FRAME_QA.jsonl.part"
+        jsonl_fh = jsonl_tmp.open("w", encoding="utf-8")
 
-        st = interpolate_presenter_geometry(out_idx, layout_plan, trs)
-        if st["in_transition"]:
-            morph_checked += 1
-        bx, by, bw, bh = st["presenter_box_norm"]
-        px0 = max(0, int(round(bx * probe_w)))
-        py0 = max(0, int(round(by * probe_h)))
-        pw = max(8, min(probe_w - px0, int(round(bw * probe_w))))
-        ph = max(8, min(probe_h - py0, int(round(bh * probe_h))))
+    try:
+        for out_idx, src_idx, src_b, fin_b, st_info in stream_paired_frames(
+            src_p, fin_p, edl=edl, expected_total_frames=expected_n,
+            probe_w=probe_w, probe_h=probe_h, ffmpeg_threads=ffmpeg_threads,
+        ):
+            last_stats = st_info
+            if fin_b is None:
+                break
+            if src_b is None:
+                fail_count += 1
+                if len(fail_frames) < 16:
+                    fail_frames.append({"frame": out_idx, "expected_src_frame": src_idx, "reason": "SRC_INDEX_OUT_OF_RANGE"})
+                continue
 
-        # Compute aspect-preserving cover crop of expected source frame into (pw, ph)
-        lb = beats_by_id.get(st["beat_id"]) or (layout_plan.get("beats") or [{}])[0]
-        fc = tuple(lb.get("anchor") or [0.5, 0.36])
-        crop_info = compute_source_crop_for_box(src_m["width"], src_m["height"], pw, ph, focus_center=(fc[0], fc[1]))
-        cx, cy, cw_n, ch_n = crop_info["crop_rect_norm"]
-        sx0 = max(0, int(round(cx * probe_w)))
-        sy0 = max(0, int(round(cy * probe_h)))
-        sx1 = max(sx0 + 4, min(probe_w, int(round((cx + cw_n) * probe_w))))
-        sy1 = max(sy0 + 4, min(probe_h, int(round((cy + ch_n) * probe_h))))
-        exp_pres = im_s.crop((sx0, sy0, sx1, sy1)).resize((pw, ph), Image.BILINEAR)
-        act_pres = im_f.crop((px0, py0, px0 + pw, py0 + ph))
+            im_s = Image.frombytes("RGB", (probe_w, probe_h), src_b)
+            im_f = Image.frombytes("RGB", (probe_w, probe_h), fin_b)
 
-        # Check inner safe core of presenter box (avoid rounded corner edge pixels & full-screen top hook card)
-        is_full = (bw > 0.95 and bh > 0.95)
-        ix0 = max(0, int(pw * 0.14))
-        ix1 = min(pw, max(ix0 + 4, int(pw * 0.86)))
-        iy0 = max(0, int(ph * (0.26 if is_full else 0.14)))
-        iy1 = min(ph, max(iy0 + 4, int(ph * (0.68 if is_full else 0.86))))
+            st = interpolate_presenter_geometry(out_idx, layout_plan, trs)
+            if st["in_transition"]:
+                morph_checked += 1
+            bx, by, bw, bh = st["presenter_box_norm"]
+            px0 = max(0, int(round(bx * probe_w)))
+            py0 = max(0, int(round(by * probe_h)))
+            pw = max(8, min(probe_w - px0, int(round(bw * probe_w))))
+            ph = max(8, min(probe_h - py0, int(round(bh * probe_h))))
 
-        exp_core = exp_pres.crop((ix0, iy0, ix1, iy1))
-        act_core = act_pres.crop((ix0, iy0, ix1, iy1))
-        md = round(sum(ImageStat.Stat(ImageChops.difference(exp_core, act_core)).mean) / 3.0, 3)
-        act_luma = sum(ImageStat.Stat(act_core).mean) / 3.0
-        exp_luma = sum(ImageStat.Stat(exp_core).mean) / 3.0
-        is_black = (act_luma < 6.0 and exp_luma > 18.0)
-        if is_black:
-            black_frames += 1
+            lb = beats_by_id.get(st["beat_id"]) or (layout_plan.get("beats") or [{}])[0]
+            fc = tuple(lb.get("anchor") or [0.5, 0.36])
+            crop_info = compute_source_crop_for_box(src_m["width"], src_m["height"], pw, ph, focus_center=(fc[0], fc[1]))
+            cx, cy, cw_n, ch_n = crop_info["crop_rect_norm"]
+            sx0 = max(0, int(round(cx * probe_w)))
+            sy0 = max(0, int(round(cy * probe_h)))
+            sx1 = max(sx0 + 4, min(probe_w, int(round((cx + cw_n) * probe_w))))
+            sy1 = max(sy0 + 4, min(probe_h, int(round((cy + ch_n) * probe_h))))
+            exp_pres = im_s.crop((sx0, sy0, sx1, sy1)).resize((pw, ph), Image.BILINEAR)
+            act_pres = im_f.crop((px0, py0, px0 + pw, py0 + ph))
 
-        # Detect live presenter freeze when source itself is changing
-        if prev_pres_crop is not None and prev_pres_crop.size == act_core.size and out_idx > 0:
-            src_prev = Image.frombytes("RGB", (probe_w, probe_h), src_buf[expected_src_frames[out_idx - 1] * frame_bytes : (expected_src_frames[out_idx - 1] + 1) * frame_bytes])
-            src_delta = sum(ImageStat.Stat(ImageChops.difference(src_prev, im_s)).mean) / 3.0
-            act_delta = sum(ImageStat.Stat(ImageChops.difference(prev_pres_crop, act_core)).mean) / 3.0
-            if src_delta > 2.5 and act_delta < 0.15:
-                freeze_streak += 1
-                max_freeze_streak = max(max_freeze_streak, freeze_streak)
+            is_full = (bw > 0.95 and bh > 0.95)
+            ix0 = max(0, int(pw * 0.14))
+            ix1 = min(pw, max(ix0 + 4, int(pw * 0.86)))
+            iy0 = max(0, int(ph * (0.26 if is_full else 0.14)))
+            iy1 = min(ph, max(iy0 + 4, int(ph * (0.68 if is_full else 0.86))))
+
+            exp_core = exp_pres.crop((ix0, iy0, ix1, iy1))
+            act_core = act_pres.crop((ix0, iy0, ix1, iy1))
+            md = round(sum(ImageStat.Stat(ImageChops.difference(exp_core, act_core)).mean) / 3.0, 3)
+            act_luma = sum(ImageStat.Stat(act_core).mean) / 3.0
+            exp_luma = sum(ImageStat.Stat(exp_core).mean) / 3.0
+            is_black = (act_luma < 6.0 and exp_luma > 18.0)
+            if is_black:
+                black_frames += 1
+
+            # O(1)-RAM freeze detector: compares ONLY previous source frame & previous presenter crop!
+            if prev_pres_crop is not None and prev_src_im is not None and prev_pres_crop.size == act_core.size:
+                src_delta = sum(ImageStat.Stat(ImageChops.difference(prev_src_im, im_s)).mean) / 3.0
+                act_delta = sum(ImageStat.Stat(ImageChops.difference(prev_pres_crop, act_core)).mean) / 3.0
+                if src_delta > 2.5 and act_delta < 0.15:
+                    freeze_streak += 1
+                    max_freeze_streak = max(max_freeze_streak, freeze_streak)
+                else:
+                    freeze_streak = 0
             else:
                 freeze_streak = 0
-        else:
-            freeze_streak = 0
-        prev_pres_crop = act_core
+            prev_pres_crop = act_core
+            prev_src_im = im_s
 
-        max_diff = max(max_diff, md)
-        sum_diff += md
-        row_fail = (md > max_mean_diff) or is_black
-        if row_fail:
-            fail_frames.append({
-                "frame": out_idx,
-                "expected_src_frame": src_idx,
-                "layout_mode": st["layout_mode"],
-                "in_transition": st["in_transition"],
-                "mean_abs_diff": md,
-                "black_flash": is_black,
-                "reason": "BLACK_FLASH" if is_black else "PRESENTER_GEOMETRY_OR_OCCLUSION_DRIFT",
-            })
-        if out_idx == 0 or out_idx == n_check - 1 or out_idx % max(1, n_check // 40) == 0 or st["in_transition"] or row_fail:
-            csv_rows.append({
-                "frame": out_idx,
-                "src_frame": src_idx,
-                "layout_mode": st["layout_mode"],
-                "in_transition": st["in_transition"],
-                "mean_abs_diff": md,
-                "black_flash": is_black,
-                "pass": not row_fail,
-            })
+            max_diff = max(max_diff, md)
+            sum_diff += md
+            checked += 1
+            row_fail = (md > max_mean_diff) or is_black
+            if row_fail:
+                fail_count += 1
+                if len(fail_frames) < 16:
+                    fail_frames.append({
+                        "frame": out_idx,
+                        "expected_src_frame": src_idx,
+                        "layout_mode": st["layout_mode"],
+                        "in_transition": st["in_transition"],
+                        "mean_abs_diff": md,
+                        "black_flash": is_black,
+                        "reason": "BLACK_FLASH" if is_black else "PRESENTER_GEOMETRY_OR_OCCLUSION_DRIFT",
+                    })
 
-    if fail_frames:
-        issues.append(f"ADAPTIVE_LAYOUT_FRAME_DRIFT: {len(fail_frames)}/{n_check} frames failed (max_diff={max_diff}, black={black_frames})")
+            sample_stride = max(1, expected_n // 60)
+            if out_idx == 0 or out_idx == expected_n - 1 or out_idx % sample_stride == 0 or st["in_transition"] or row_fail:
+                row_d = {
+                    "frame": out_idx,
+                    "src_frame": src_idx,
+                    "layout_mode": st["layout_mode"],
+                    "in_transition": st["in_transition"],
+                    "mean_abs_diff": md,
+                    "black_flash": is_black,
+                    "pass": not row_fail,
+                }
+                if csv_writer is not None:
+                    csv_writer.writerow(row_d)
+                if jsonl_fh is not None:
+                    jsonl_fh.write(json.dumps(row_d) + "\n")
+            if checked % 180 == 0:
+                rss_peak = max(rss_peak, get_process_rss_mib())
+    finally:
+        if csv_fh is not None:
+            csv_fh.close()
+        if jsonl_fh is not None:
+            jsonl_fh.close()
+
+    if od is not None:
+        if csv_tmp is not None and csv_tmp.is_file():
+            csv_tmp.replace(od / "ADAPTIVE_LAYOUT_FRAME_QA.csv")
+        if jsonl_tmp is not None and jsonl_tmp.is_file():
+            jsonl_tmp.replace(od / "FRAME_QA.jsonl")
+
+    if checked != expected_n or int(last_stats.get("fin_extra_frames", 0)) > 0:
+        issues.append(f"FRAME_COUNT_MISMATCH: final {checked} (+{last_stats.get('fin_extra_frames', 0)} extra) != expected EDL {expected_n}")
+    if fail_count > 0:
+        issues.append(f"ADAPTIVE_LAYOUT_FRAME_DRIFT: {fail_count}/{checked} frames failed (max_diff={max_diff}, black={black_frames})")
     if max_freeze_streak >= 8:
         issues.append(f"PRESENTER_FREEZE_DETECTED: {max_freeze_streak} consecutive static presenter frames while source moved")
+
+    wall_s = round(time.monotonic() - t0, 4)
+    rss_peak = max(rss_peak, get_process_rss_mib())
+    streaming_metrics = {
+        "streaming_mode": "TRUE_BOUNDED_STREAMING_O1_RAM",
+        "wall_sec": wall_s,
+        "decoded_fps": round(checked / max(0.001, wall_s), 2),
+        "frames_decoded": checked,
+        "rss_start_mib": rss_start,
+        "rss_peak_mib": rss_peak,
+        "rss_delta_mib": round(max(0.0, rss_peak - rss_start), 2),
+        "src_cleanup": last_stats.get("src_cleanup"),
+        "fin_cleanup": last_stats.get("fin_cleanup"),
+    }
 
     report = {
         "schema_version": "kh03.adaptive_layout_frame_qa.v1",
         "verification_scope": "DECODED_RENDER",
+        "streaming_mode": "TRUE_BOUNDED_STREAMING_O1_RAM",
         "source_mp4_sha256": hash_artifact(src_p),
         "final_mp4_sha256": hash_artifact(fin_p),
         "layout_plan_sha256": layout_plan.get("layout_plan_sha256"),
@@ -507,24 +615,31 @@ def verify_adaptive_layout_frames(
         "source_resolution": f"{src_m['width']}x{src_m['height']}",
         "final_resolution": f"{fin_m['width']}x{fin_m['height']}",
         "fps": f"{fin_m['fps_num']}/{fin_m['fps_den']}",
-        "frames_checked": n_check,
-        "frames_expected": len(expected_src_frames),
+        "frames_checked": checked,
+        "frames_expected": expected_n,
         "morph_frames_checked": morph_checked,
         "max_mean_abs_diff": round(max_diff, 3),
-        "avg_mean_abs_diff": round(sum_diff / float(max(1, n_check)), 3),
+        "avg_mean_abs_diff": round(sum_diff / float(max(1, checked)), 3),
         "tolerance_mean_abs_diff": max_mean_diff,
         "black_flash_frames": black_frames,
         "max_freeze_streak": max_freeze_streak,
-        "fail_frame_count": len(fail_frames),
+        "fail_frame_count": fail_count,
         "fail_frames_sample": fail_frames[:12],
+        "streaming_metrics": streaming_metrics,
         "issues": issues,
         "status": "DECODED_ADAPTIVE_PASS" if not issues else "DECODED_ADAPTIVE_FAIL",
         "pass": len(issues) == 0,
     }
-    if out_dir is not None:
-        od = Path(out_dir)
-        od.mkdir(parents=True, exist_ok=True)
+    if od is not None:
         write_json_atomic(od / "ADAPTIVE_LAYOUT_FRAME_QA.json", report)
+        write_json_atomic(od / "FRAME_QA_SUMMARY.json", report)
+        write_json_atomic(od / "STREAMING_QA_REPORT.json", streaming_metrics)
+        write_json_atomic(od / "PROCESS_CLEANUP_REPORT.json", {
+            "schema_version": "kh03.process_cleanup.v1",
+            "src_decoder": last_stats.get("src_cleanup"),
+            "fin_decoder": last_stats.get("fin_cleanup"),
+            "all_clean": bool((last_stats.get("src_cleanup") or {}).get("clean", True) and (last_stats.get("fin_cleanup") or {}).get("clean", True)),
+        })
         write_json_atomic(od / "MOTION_CHOREOGRAPHY_QA.json", {
             "schema_version": "kh03.motion_choreography_qa.v1",
             "final_mp4_sha256": report["final_mp4_sha256"],
@@ -534,11 +649,209 @@ def verify_adaptive_layout_frames(
             "pass": report["pass"],
             "issues": issues,
         })
-        with (od / "ADAPTIVE_LAYOUT_FRAME_QA.csv").open("w", encoding="utf-8", newline="") as fh:
-            w = _csv.DictWriter(fh, fieldnames=["frame", "src_frame", "layout_mode", "in_transition", "mean_abs_diff", "black_flash", "pass"])
-            w.writeheader()
-            w.writerows(csv_rows)
     return report
+
+
+def verify_component_internal_roi_motion(
+    final_mp4: str | Path,
+    node_bindings: list[dict[str, Any]],
+    *,
+    presenter_box_norm_by_frame: dict[int, list[float]] | None = None,
+    codec_noise_floor: float = 1.6,
+    probe_w: int = 360,
+    probe_h: int = 640,
+    out_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """CMI-02 & CMI-09 pixel verifier: checks internal component ROI motion strictly EXCLUDING presenter motion!
+
+    Catches frozen static components even when live presenter moves elsewhere on screen, and rejects
+    tiny codec-noise fluctuations below `codec_noise_floor`.
+    """
+    fin_p = Path(final_mp4).resolve()
+    if not fin_p.is_file():
+        return {"schema_version": "kh03.component_pixel_qa.v1", "pass": False, "status": "MISSING_MP4", "nodes": []}
+
+    # Collect only the exact frame indices needed (start, mid, settle) so RAM stays tiny!
+    needed_frames: set[int] = set()
+    for nb in node_bindings:
+        sf = max(0, int(nb.get("start_frame", 0)))
+        stf = max(sf + 1, int(nb.get("settle_frame", sf + 6)))
+        ef = max(stf + 1, int(nb.get("end_frame", stf + 6)))
+        needed_frames.update({sf, (sf + stf) // 2, stf, max(sf, ef - 2)})
+
+    captured: dict[int, Image.Image] = {}
+    max_needed = max(needed_frames) if needed_frames else 0
+    idx = 0
+    with StreamingRGBFrameDecoder(fin_p, probe_w, probe_h, ffmpeg_threads=2, timeout_sec=120.0) as dec:
+        while idx <= max_needed:
+            raw = dec.read_frame()
+            if raw is None:
+                break
+            if idx in needed_frames:
+                captured[idx] = Image.frombytes("RGB", (probe_w, probe_h), raw)
+            idx += 1
+
+    results: list[dict[str, Any]] = []
+    frozen_nodes: list[str] = []
+    for nb in node_bindings:
+        nid = str(nb["node_id"])
+        sf = max(0, int(nb.get("start_frame", 0)))
+        stf = max(sf + 1, int(nb.get("settle_frame", sf + 6)))
+        rx, ry, rw, rh = [float(v) for v in nb.get("canvas_roi_norm", [0.1, 0.1, 0.5, 0.2])]
+        box = (
+            max(0, int(rx * probe_w)), max(0, int(ry * probe_h)),
+            min(probe_w, max(2, int((rx + rw) * probe_w))), min(probe_h, max(2, int((ry + rh) * probe_h))),
+        )
+        im0 = captured.get(sf)
+        im1 = captured.get(stf)
+        if im0 is None or im1 is None or box[2] <= box[0] or box[3] <= box[1]:
+            results.append({"node_id": nid, "component_id": nb.get("component_id"), "roi_delta": 0.0, "moved": False, "reason": "FRAME_UNAVAILABLE"})
+            frozen_nodes.append(nid)
+            continue
+
+        c0 = im0.crop(box).copy()
+        c1 = im1.crop(box).copy()
+        # Mask out presenter overlap inside ROI if presenter overlaps any corner so presenter motion cannot spoof component motion!
+        pbox = (presenter_box_norm_by_frame or {}).get(stf)
+        if pbox and len(pbox) == 4:
+            px0 = max(0, int(pbox[0] * probe_w) - box[0])
+            py0 = max(0, int(pbox[1] * probe_h) - box[1])
+            px1 = min(c0.width, int((pbox[0] + pbox[2]) * probe_w) - box[0])
+            py1 = min(c0.height, int((pbox[1] + pbox[3]) * probe_h) - box[1])
+            if px1 > px0 and py1 > py0:
+                c0.paste((0, 0, 0), (px0, py0, px1, py1))
+                c1.paste((0, 0, 0), (px0, py0, px1, py1))
+
+        delta = round(sum(ImageStat.Stat(ImageChops.difference(c0, c1)).mean) / 3.0, 3)
+        moved = delta >= codec_noise_floor
+        if not moved and nb.get("primitive") != "stable_hold":
+            frozen_nodes.append(nid)
+        results.append({
+            "node_id": nid,
+            "component_id": nb.get("component_id"),
+            "primitive": nb.get("primitive"),
+            "frames_compared": [sf, stf],
+            "roi_delta": delta,
+            "codec_noise_floor": codec_noise_floor,
+            "moved": moved,
+        })
+
+    rep = {
+        "schema_version": "kh03.component_pixel_qa.v1",
+        "final_mp4_sha256": hash_artifact(fin_p),
+        "nodes_checked": len(results),
+        "moved_nodes": sum(1 for r in results if r["moved"]),
+        "frozen_nodes": frozen_nodes,
+        "nodes": results,
+        "pass": len(frozen_nodes) == 0 and len(results) > 0,
+    }
+    if out_dir is not None:
+        od = Path(out_dir)
+        od.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(od / "COMPONENT_PIXEL_QA.json", rep)
+    return rep
+
+
+def verify_hook_pixels(
+    final_mp4: str | Path,
+    hook_plan: dict[str, Any],
+    *,
+    fps: float = 24.0,
+    out_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """CMI-01 pixel verifier: checks frame 0 visibility + 0-3s hook evolution without empty black flash."""
+    fin_p = Path(final_mp4).resolve()
+    if not fin_p.is_file():
+        return {"schema_version": "kh03.hook_pixel_qa.v1", "pass": False, "status": "MISSING_MP4"}
+    w, h = 270, 480
+    sample_f = [0, min(12, int(round(fps * 0.5))), min(36, int(round(fps * 1.5))), min(68, int(round(fps * 2.8)))]
+    imgs: dict[int, Image.Image] = {}
+    max_f = max(sample_f)
+    idx = 0
+    with StreamingRGBFrameDecoder(fin_p, w, h, ffmpeg_threads=2, timeout_sec=60.0) as dec:
+        while idx <= max_f:
+            raw = dec.read_frame()
+            if raw is None:
+                break
+            if idx in sample_f:
+                imgs[idx] = Image.frombytes("RGB", (w, h), raw)
+            idx += 1
+    f0 = imgs.get(0)
+    f0_luma = round(sum(ImageStat.Stat(f0).mean) / 3.0, 2) if f0 else 0.0
+    deltas = []
+    ordered = [imgs[k] for k in sample_f if k in imgs]
+    for i in range(len(ordered) - 1):
+        deltas.append(round(sum(ImageStat.Stat(ImageChops.difference(ordered[i], ordered[i + 1])).mean) / 3.0, 3))
+    evolving = any(d >= 1.5 for d in deltas)
+    ok = (f0 is not None and f0_luma >= 10.0 and evolving)
+    rep = {
+        "schema_version": "kh03.hook_pixel_qa.v1",
+        "final_mp4_sha256": hash_artifact(fin_p),
+        "selected_hook_id": hook_plan.get("selected_hook_id"),
+        "sampled_frames": [k for k in sample_f if k in imgs],
+        "frame0_mean_luma": f0_luma,
+        "frame0_non_empty": f0_luma >= 10.0,
+        "subframe_deltas": deltas,
+        "opening_evolving": evolving,
+        "pass": ok,
+    }
+    if out_dir is not None:
+        od = Path(out_dir)
+        od.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(od / "HOOK_PIXEL_QA.json", rep)
+        if ordered:
+            strip = Image.new("RGB", (w * len(ordered), h), (16, 12, 10))
+            for i, im in enumerate(ordered):
+                strip.paste(im, (i * w, 0))
+            strip.save(od / "hook_contact_sheet.png")
+    return rep
+
+
+def export_morph_frame_strips(
+    final_mp4: str | Path,
+    transitions: list[dict[str, Any]],
+    out_dir: str | Path,
+    *,
+    tile_w: int = 180,
+    tile_h: int = 320,
+    max_transitions: int = 6,
+) -> list[str]:
+    """Export bounded every-frame strip PNG for each critical morph transition (CMI-03)."""
+    fin_p = Path(final_mp4).resolve()
+    sdir = Path(out_dir) / "MORPH_FRAME_STRIPS"
+    sdir.mkdir(parents=True, exist_ok=True)
+    if not fin_p.is_file() or not transitions:
+        return []
+    wanted_ranges = [(str(t["transition_id"]), int(t["start_frame"]), int(t["end_frame"])) for t in transitions[:max_transitions]]
+    wanted_frames: set[int] = set()
+    for _, s0, s1 in wanted_ranges:
+        for f in range(max(0, s0), min(s0 + 24, max(s0 + 1, s1 + 1))):
+            wanted_frames.add(f)
+    if not wanted_frames:
+        return []
+    captured: dict[int, Image.Image] = {}
+    max_f = max(wanted_frames)
+    idx = 0
+    with StreamingRGBFrameDecoder(fin_p, tile_w, tile_h, ffmpeg_threads=2, timeout_sec=90.0) as dec:
+        while idx <= max_f:
+            raw = dec.read_frame()
+            if raw is None:
+                break
+            if idx in wanted_frames:
+                captured[idx] = Image.frombytes("RGB", (tile_w, tile_h), raw)
+            idx += 1
+    out_paths: list[str] = []
+    for tid, s0, s1 in wanted_ranges:
+        frames = [captured[f] for f in range(max(0, s0), min(s0 + 24, max(s0 + 1, s1 + 1))) if f in captured]
+        if not frames:
+            continue
+        strip = Image.new("RGB", (tile_w * len(frames), tile_h), (16, 12, 10))
+        for i, im in enumerate(frames):
+            strip.paste(im, (i * tile_w, 0))
+        sp = sdir / f"{tid}_f{s0}_f{s1}.png"
+        strip.save(sp)
+        out_paths.append(str(sp))
+    return out_paths
 
 
 def _create_minimal_gsap_shim(dest: Path) -> None:
@@ -623,7 +936,7 @@ def run_kh03_component_gallery(
     height: int = 640,
     fps: int = 24,
 ) -> dict[str, Any]:
-    """Compile & capture ALL 8 new KH-03 visual components in real headless Chromium across direct/reverse/repeat/cold seeks."""
+    """Compile & capture ALL 8 KH-03 cross-domain visual components in real headless Chromium across direct/reverse/repeat/cold seeks."""
     gdir = Path(out_dir).resolve()
     bdir = gdir / "build"
     shots_dir = gdir / "shots"
@@ -633,11 +946,11 @@ def run_kh03_component_gallery(
     if chrome_exe is None:
         return {"pass": False, "status": "BLOCKED_ENV", "error": "No local Chromium executable available.", "capabilities": {}}
 
-    # Ensure gsap.min.js exists (use pinned HyperFrames vendor GSAP if present, else deterministic test shim inside gallery build)
     troot = tools_root or (Path(os.environ.get("SEECUT_STANDALONE_ROOT", os.path.expanduser("~/Projects/SeeCut-Olivia-Standalone"))) / "tools")
     gsap_probe_root = gdir / "_gsap_tools"
     gsap_shim_used = False
-    if not (troot / "node_modules/hyperframes/dist/vendor/npm/gsap@3.15.0/dist/gsap.min.js").is_file():
+    has_native_gsap = any(troot.glob("node_modules/hyperframes/dist/vendor/npm/gsap@*/dist/gsap.min.js"))
+    if not has_native_gsap:
         _create_minimal_gsap_shim(gsap_probe_root / "node_modules/hyperframes/dist/vendor/npm/gsap@3.15.0/dist/gsap.min.js")
         troot = gsap_probe_root
         gsap_shim_used = True
@@ -663,15 +976,16 @@ def run_kh03_component_gallery(
         }],
     }
 
+    # Intentionally spans unrelated domains: cooking, biology/physics, history, textiles, software, finance, product, CTA
     sample_params: dict[str, dict[str, Any]] = {
-        "kh03.contradiction_lockup": {"kicker": "EXAMPLE", "left_value": "$1,200", "operator": "≠", "right_value": "$?", "headline": "Balance is not spendable"},
-        "kh03.proportional_reservoir": {"kicker": "TRUE PROPORTION", "headline": "Budget Allocation", "segments": [{"label": "Bills", "pct": 66.7, "delta": "-$800"}, {"label": "Food", "pct": 16.7, "delta": "-$200"}, {"label": "Gas", "pct": 8.3, "delta": "-$100"}, {"label": "Left", "pct": 8.3, "delta": "$100"}]},
-        "kh03.rolling_counter": {"kicker": "REMAINING", "headline": "Discrete Tabular Roll", "start_value": "$1,200", "end_value": "$100", "unit": "USD"},
-        "kh03.causal_flow_graph": {"kicker": "MECHANISM", "headline": "Heat Pump Cycle", "nodes": [{"label": "Absorb", "text": "Outdoor air"}, {"label": "Compress", "text": "Raise temp"}, {"label": "Release", "text": "Warm room"}]},
-        "kh03.annotated_timeline": {"kicker": "CHRONOLOGY", "headline": "1440 Printing Shift", "steps": [{"label": "1440", "text": "Movable type"}, {"label": "Weeks", "text": "Pamphlets spread"}]},
-        "kh03.comparison_matrix": {"kicker": "COMPARISON", "headline": "Linen vs Cotton", "left_col": {"title": "Linen", "detail": "Hollow flax airflow"}, "right_col": {"title": "Cotton", "detail": "Tightly packed fibers"}},
-        "kh03.proof_frame_reveal": {"kicker": "VERIFIED COVER", "headline": "The Next Paycheck Plan", "subtitle": "REAL_EVIDENCE", "evidence_label": "REAL_EVIDENCE"},
-        "kh03.cta_magnetic_underline": {"kicker": "NEXT STEP", "headline": "Plan your next payday.", "cta_tag": "Link in my profile"},
+        "kh03.contradiction_lockup": {"kicker": "CULINARY PHYSICS", "left_value": "450°F", "operator": "≠", "right_value": "Sear", "headline": "Dry surface matters more"},
+        "kh03.proportional_reservoir": {"kicker": "NUTRITION MIX", "headline": "Sourdough Hydration", "segments": [{"label": "Flour", "pct": 58.0, "delta": "500g"}, {"label": "Water", "pct": 35.0, "delta": "325g"}, {"label": "Starter", "pct": 7.0, "delta": "75g"}]},
+        "kh03.rolling_counter": {"kicker": "LATENCY DROP", "headline": "Streaming Frame QA", "start_value": "4.6 GiB", "end_value": "12 MiB", "unit": "RAM"},
+        "kh03.causal_flow_graph": {"kicker": "THERMODYNAMICS", "headline": "Heat Pump Cycle", "nodes": [{"label": "Absorb", "text": "Outdoor air"}, {"label": "Compress", "text": "Raise temp"}, {"label": "Release", "text": "Warm room"}]},
+        "kh03.annotated_timeline": {"kicker": "HISTORY", "headline": "1440 Printing Shift", "steps": [{"label": "1440", "text": "Movable type"}, {"label": "Weeks", "text": "Pamphlets spread"}]},
+        "kh03.comparison_matrix": {"kicker": "MATERIALS", "headline": "Linen vs Cotton", "left_col": {"title": "Linen", "detail": "Hollow flax airflow"}, "right_col": {"title": "Cotton", "detail": "Tightly packed fibers"}},
+        "kh03.proof_frame_reveal": {"kicker": "VERIFIED CAPTURE", "headline": "Field Specimen Plate", "subtitle": "REAL_EVIDENCE", "evidence_label": "REAL_EVIDENCE"},
+        "kh03.cta_magnetic_underline": {"kicker": "NEXT STEP", "headline": "Read the full guide.", "cta_tag": "Source notes linked"},
     }
 
     specs = []
@@ -747,7 +1061,7 @@ def run_kh03_component_gallery(
         },
         "story_arc": {
             "creative_direction_id": "kh03_gallery", "theme": "explainer_cobalt_chalk",
-            "archetype": "visual_essay_modular", "summary": "KH-03 8-component gallery", "alternatives_considered": [],
+            "archetype": "visual_essay_modular", "summary": "KH-03 8-component cross-domain gallery", "alternatives_considered": [],
         },
         "beats": beats,
         "visual_events": vis_events,
@@ -758,19 +1072,21 @@ def run_kh03_component_gallery(
         "claim_evidence": [],
         "approved_exceptions": [],
         "provenance": {
-            "planner_version": "kh03.0.0", "generated_at_utc": "1970-01-01T00:00:00Z",
+            "planner_version": "kh03.3.0", "generated_at_utc": "1970-01-01T00:00:00Z",
             "engine": "SeeCut-v3.4-HyperFrames-HTML-GSAP",
-            "base_git_sha": "7e8a93d", "upstream_seecut_sha": "b05d7ed",
+            "base_git_sha": "8066fc7", "upstream_seecut_sha": "b05d7ed",
         },
     }
 
     compiled = compile_shotbook(shotbook, inventory, bdir, tools_root=troot, registry=reg)
     html_url = Path(compiled["html_path"]).resolve().as_uri()
 
-    # Build direct / reverse / repeat / cold seek plan using native Node v26 CDP (zero npm deps!)
+    # Build direct / entry-motion / reverse / repeat / cold seek plan (uses dynamic free TCP ports to avoid race collisions!)
     plan1 = [{"label": "t0_blank", "t": 0.0}]
     for idx, sp in enumerate(specs):
+        t_entry = round((sp["start_frame"] + 2) / float(fps), 4)
         ts = round((sp["start_frame"] + 14) / float(fps), 4)
+        plan1.append({"label": f"c{idx}_entry", "t": t_entry})
         plan1.append({"label": f"c{idx}_direct", "t": ts})
     for idx in reversed(range(len(specs))):
         ts = round((specs[idx]["start_frame"] + 14) / float(fps), 4)
@@ -783,6 +1099,7 @@ def run_kh03_component_gallery(
     node_cdp = r"""
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
+const net = require('node:net');
 const path = require('node:path');
 const chromePath = process.argv[1];
 const url = process.argv[2];
@@ -792,7 +1109,16 @@ const H = parseInt(process.argv[5], 10);
 const plan1 = JSON.parse(process.argv[6]);
 const plan2 = JSON.parse(process.argv[7]);
 
-async function runPass(plan, port) {
+function freePort() {
+  return new Promise((res, rej) => {
+    const s = net.createServer();
+    s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); });
+    s.on('error', rej);
+  });
+}
+
+async function runPass(plan) {
+  const port = await freePort();
   const errors = [];
   const udir = path.join(outDir, `_prof_${port}_${process.pid}`);
   fs.mkdirSync(udir, { recursive: true });
@@ -847,21 +1173,21 @@ async function runPass(plan, port) {
   } finally {
     try { ws.close(); } catch {}
     try { proc.kill('SIGKILL'); } catch {}
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise(r => setTimeout(r, 180));
     try { fs.rmSync(udir, { recursive: true, force: true }); } catch {}
   }
   return errors;
 }
 
 (async () => {
-  const e1 = await runPass(plan1, 9461);
-  const e2 = await runPass(plan2, 9462);
+  const e1 = await runPass(plan1);
+  const e2 = await runPass(plan2);
   console.log(JSON.stringify({ ok: (e1.length === 0 && e2.length === 0), errors: [...e1, ...e2] }));
 })().catch(e => { console.error(e); process.exit(1); });
 """
     pr = subprocess.run(
         ["node", "-e", node_cdp, str(chrome_exe), html_url, str(shots_dir), str(width), str(height), json.dumps(plan1), json.dumps(plan2)],
-        capture_output=True, text=True, timeout=90,
+        capture_output=True, text=True, timeout=120,
     )
     if pr.returncode != 0:
         return {"pass": False, "status": "FAIL_CHROMIUM_CDP", "error": pr.stderr[-400:], "capabilities": {}}
@@ -872,6 +1198,7 @@ async function runPass(plan, port) {
     all_pass = bool(meta.get("ok"))
 
     for idx, sp in enumerate(specs):
+        p_ent = shots_dir / f"c{idx}_entry.png"
         p_dir = shots_dir / f"c{idx}_direct.png"
         p_rev = shots_dir / f"c{idx}_reverse.png"
         p_rep = shots_dir / f"c{idx}_repeat.png"
@@ -880,6 +1207,7 @@ async function runPass(plan, port) {
         crop = (int(bx * width), int(by * height), int((bx + bw) * width), int((by + bh) * height))
 
         diff_vis = _mean_abs_diff(t0_png, p_dir, crop)
+        diff_prog = _mean_abs_diff(p_ent, p_dir, crop)
         diff_rev = _mean_abs_diff(p_dir, p_rev)
         diff_rep = _mean_abs_diff(p_dir, p_rep)
         diff_cld = _mean_abs_diff(p_dir, p_cld)
@@ -890,6 +1218,7 @@ async function runPass(plan, port) {
             "pass": ok,
             "kind": sp["kind"],
             "visible_region_delta_vs_t0": diff_vis,
+            "internal_entry_to_settle_delta": diff_prog,
             "reverse_seek_diff": diff_rev,
             "repeat_seek_diff": diff_rep,
             "cold_restart_diff": diff_cld,
@@ -925,5 +1254,6 @@ async function runPass(plan, port) {
     }
     write_json_atomic(gdir / "COMPONENT_GALLERY_REPORT.json", report)
     write_json_atomic(gdir / "GALLERY_VERIFICATION.json", report)
+    write_json_atomic(gdir / "NATIVE_GALLERY_VERIFICATION.json", report)
     write_json_atomic(gdir / "CAPABILITY_REGISTRY_VERIFIED.json", verified_reg)
     return report

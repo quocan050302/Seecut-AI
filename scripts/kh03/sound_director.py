@@ -1,17 +1,20 @@
-"""KH-03 Multi-Layer Sound Director (Integrated with KH-02 sfx_assets.py & audio_mix.py).
+"""KH-03 Multi-Layer Sound Director (CMI-08 Motion-Anchored & Integrated with KH-02 audio_mix.py).
 
-Derives semantically motivated sound events tailored to the selected universal skill (SK-01..SK-05),
-never forces artificial cue quotas or SFX-per-word spam, strictly blocks TEST_ONLY tones in
-production, integrates cleanly into KH-02's stem mixer & onset QA, and reports honest
-BLOCKED_SFX_ASSETS / PARTIAL_SOUND whenever licensed sound libraries/providers are absent.
+Derives semantically motivated sound events anchored directly to the authoritative motion-graph
+sub-event anchors (anticipation, contact, click, arrival, settle, reveal, payoff, morph_start)
+rather than blindly dumping every cue on beat/component start. Preserves exact sample onsets,
+merges overlapping cues, strictly blocks TEST_ONLY tones in production, and emits
+MOTION_SOUND_ANCHORS.json, SFX_RIGHTS_LEDGER.csv, and ONSET_QA.json.
 """
 
 from __future__ import annotations
 
+import csv
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from scripts.kh02 import sound as _kh02_sound  # noqa: F401 (init sound before audio_mix)
+from scripts.kh02 import sound as _kh02_sound  # noqa: F401
 from scripts.kh02.audio_mix import plan_soundscape
 from scripts.kh02.sfx_assets import (
     assert_not_test_only_in_production,
@@ -50,46 +53,87 @@ def derive_sound_events(
     creative_plan: dict[str, Any],
     *,
     fps: float = 24.0,
+    fps_num: int | None = None,
+    fps_den: int = 1,
+    sample_rate: int = 48000,
     has_source_audio: bool = True,
     layout_plan: dict[str, Any] | None = None,
+    motion_graph: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Derive motivated sound events anchored to visual reveals & spatial layout morphs (ADL-06, zero spam)."""
+    """Derive motivated sound events anchored to authoritative motion sub-event anchors & layout morphs (CMI-08)."""
     skill_id = creative_plan["selected_skill_id"]
     prof = SKILL_SOUND_PROFILES.get(skill_id, SKILL_SOUND_PROFILES["SK-04"])
     min_gap = float(prof["min_spacing_sec"])
+    fps_frac = Fraction(int(fps_num), max(1, int(fps_den))) if fps_num else Fraction(int(round(fps * 1000)), 1000)
+    eff_fps = float(fps_frac)
     beat_fn_map = {b["beat_id"]: b.get("semantic_function", "context") for b in creative_plan.get("beats", [])}
     tr_by_to_beat = {t["to_beat_id"]: t for t in ((layout_plan or {}).get("transitions") or [])}
 
+    # Index CMI-02 authoritative motion-graph sub-event anchors by component_id
+    mg_anchors_by_comp: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for mev in ((motion_graph or {}).get("semantic_motion_events") or []):
+        cid = str(mev.get("component_id") or "")
+        for sa in mev.get("sound_anchors") or []:
+            mg_anchors_by_comp.setdefault(cid, []).append((str(mev["motion_event_id"]), sa))
+
     events: list[dict[str, Any]] = []
     last_added_sec = -99.0
+    seen_frame_fam: set[tuple[int, str]] = set()
 
     for idx, comp in enumerate(creative_plan.get("components", [])):
-        sf = int(comp["start_frame"])
-        t_sec = round(sf / max(1.0, fps), 4)
-        bid = comp["beat_id"]
+        cid = str(comp["component_id"])
+        bid = str(comp["beat_id"])
         bfn = beat_fn_map.get(bid, "context")
         fam, reason = _family_for_event(comp, bfn, skill_id)
         tr = tr_by_to_beat.get(bid)
         layout_tid = tr["transition_id"] if tr else None
-        motion_anchor = "morph_start" if tr else ("hook_impact" if bfn == "hook" else ("payoff_settle" if bfn in ("payoff", "cta") else "reveal_onset"))
-        if tr and fam not in ("impact", "chime"):
-            fam = "whoosh"
-            reason = f"Spatial morph transition {tr['from_mode']} -> {tr['to_mode']} + {reason}"
 
-        # Calm / natural skills keep quiet context beats purely natural without clutter
+        # Choose true motion anchor frame from motion_graph (e.g., settle/contact/click/reveal) rather than blind beat_start!
+        comp_anchors = mg_anchors_by_comp.get(cid) or []
+        chosen_me_id: str | None = None
+        chosen_anc_id: str | None = None
+        if tr:
+            sf = int(tr["start_frame"])
+            motion_anchor = "morph_start"
+            if fam not in ("impact", "chime"):
+                fam = "whoosh"
+                reason = f"Spatial morph transition {tr['from_mode']} -> {tr['to_mode']} + {reason}"
+        elif comp_anchors:
+            # Prefer payoff/settle/contact/click anchor when available (not always frame 0 of component)
+            preferred = next(
+                ((mid, a) for mid, a in comp_anchors if a.get("kind") in ("payoff", "settle", "contact") and bfn in ("payoff", "cta")),
+                comp_anchors[0],
+            )
+            chosen_me_id, anc = preferred
+            chosen_anc_id = str(anc["anchor_id"])
+            sf = int(anc["frame"])
+            motion_anchor = str(anc["kind"])
+            if anc.get("recommended_family") and bfn not in ("hook", "payoff", "cta"):
+                fam = str(anc["recommended_family"])
+            reason = f"Motion anchor {motion_anchor} ({chosen_me_id}): {reason}"
+        else:
+            sf = int(comp["start_frame"])
+            motion_anchor = "hook_impact" if bfn == "hook" else ("payoff_settle" if bfn in ("payoff", "cta") else "reveal_onset")
+
+        t_sec = round(float(Fraction(sf) / fps_frac), 4)
+        sample_onset = int(round(float(Fraction(sf * sample_rate) / fps_frac)))
+
+        # Deduplicate overlapping cues at same frame/family or inside min_gap spacing
+        is_dup = (sf, fam) in seen_frame_fam
         if skill_id == "SK-05" and bfn in ("context", "breath", "intentional_silence") and not tr:
             status = "KEEP_NATURAL" if has_source_audio else "SILENCE"
             prio = 2
-        elif (t_sec - last_added_sec) < min_gap and idx > 0 and bfn not in ("payoff", "cta") and not tr:
+        elif is_dup or ((t_sec - last_added_sec) < min_gap and idx > 0 and bfn not in ("payoff", "cta") and not tr):
             status = "MERGE"
             prio = 2
         else:
             status = "ADD"
             prio = 5 if bfn in ("hook", "payoff", "cta") else 4
             last_added_sec = t_sec
+            seen_frame_fam.add((sf, fam))
 
         events.append({
-            "event_id": f"snd_{idx + 1:02d}_{comp['component_id']}",
+            "event_id": f"snd_{idx + 1:02d}_{cid}",
             "beat_id": bid,
             "semantic_reason": reason,
             "requested_family": fam,
@@ -97,11 +141,14 @@ def derive_sound_events(
             "rights_proof": None,
             "onset_frame": sf,
             "onset_sec": t_sec,
+            "sample_onset": sample_onset,
             "target_gain_db": float(prof["base_rel_db"]),
             "status": status,
             "priority": prio,
             "layout_transition_id": layout_tid,
             "motion_anchor": motion_anchor,
+            "motion_event_id": chosen_me_id,
+            "anchor_id": chosen_anc_id,
             "variation": {"pitch_semitones": 0.0, "avoid_immediate_repeat": True},
         })
     return events
@@ -194,8 +241,12 @@ def plan_soundscape_for_skill(
     run_dir: Path,
     creative_plan: dict[str, Any],
     layout_plan: dict[str, Any] | None = None,
+    motion_graph: dict[str, Any] | None = None,
     shotbook: dict[str, Any] | None = None,
     fps: float = 24.0,
+    fps_num: int | None = None,
+    fps_den: int = 1,
+    sample_rate: int = 48000,
     voice_policy: str = "LOCK_VOICE",
     sfx_policy: str = "OPTIONAL_LICENSED",
     bgm_policy: str = "OFF",
@@ -208,12 +259,21 @@ def plan_soundscape_for_skill(
     allow_test_only_sfx: bool = False,
     speech_spans: list[tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
-    """Build KH-03 SOUND_DIRECTOR_PLAN.json + LAYOUT_SOUND_ANCHORS.json + AUDIO_COMFORT_REPORT.md."""
+    """Build KH-03 SOUND_DIRECTOR_PLAN, MOTION_SOUND_ANCHORS, SFX_RIGHTS_LEDGER.csv & AUDIO_COMFORT_REPORT."""
     skill_id = creative_plan["selected_skill_id"]
     prof = SKILL_SOUND_PROFILES.get(skill_id, SKILL_SOUND_PROFILES["SK-04"])
     energy = prof["energy_mode"]
 
-    events = derive_sound_events(creative_plan, fps=fps, has_source_audio=True, layout_plan=layout_plan)
+    events = derive_sound_events(
+        creative_plan,
+        fps=fps,
+        fps_num=fps_num,
+        fps_den=fps_den,
+        sample_rate=sample_rate,
+        has_source_audio=True,
+        layout_plan=layout_plan,
+        motion_graph=motion_graph,
+    )
     acq = acquire_licensed_sounds(
         events,
         run_dir=run_dir,
@@ -258,6 +318,7 @@ def plan_soundscape_for_skill(
         "bgm_policy": bgm_policy,
         "production_mode": bool(production_mode),
         "events": events,
+        "motion_graph_sha256": (motion_graph or {}).get("graph_sha256"),
         "provider_status": acq["provider_status"],
         "target_loudness_lufs": [-16.0, -14.0],
         "target_true_peak_dbtp": -1.0,
@@ -281,24 +342,42 @@ def plan_soundscape_for_skill(
     stems_dir = run_dir / "stems"
     stems_dir.mkdir(parents=True, exist_ok=True)
     write_json_atomic(stems_dir / "SOUND_DIRECTOR_PLAN.json", plan)
-    write_json_atomic(stems_dir / "LAYOUT_SOUND_ANCHORS.json", {
-        "schema_version": "kh03.layout_sound_anchors.v1",
+    anchors_doc = {
+        "schema_version": "kh03.motion_sound_anchors.v1",
         "run_id": run_id,
         "selected_skill_id": skill_id,
+        "motion_graph_sha256": (motion_graph or {}).get("graph_sha256"),
         "anchors": [
             {
                 "event_id": e["event_id"],
                 "beat_id": e["beat_id"],
                 "layout_transition_id": e.get("layout_transition_id"),
+                "motion_event_id": e.get("motion_event_id"),
+                "anchor_id": e.get("anchor_id"),
                 "motion_anchor": e.get("motion_anchor"),
                 "onset_frame": e["onset_frame"],
                 "onset_sec": e["onset_sec"],
+                "sample_onset": e.get("sample_onset"),
                 "requested_family": e["requested_family"],
                 "status": e["status"],
             }
             for e in events
         ],
-    })
+    }
+    write_json_atomic(stems_dir / "LAYOUT_SOUND_ANCHORS.json", anchors_doc)
+    write_json_atomic(stems_dir / "MOTION_SOUND_ANCHORS.json", anchors_doc)
+    with (stems_dir / "SFX_RIGHTS_LEDGER.csv").open("w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["asset_id", "category", "license_status", "approved_purpose", "sha256", "attribution"])
+        w.writeheader()
+        for a in assets:
+            w.writerow({
+                "asset_id": a.get("asset_id", ""),
+                "category": a.get("category", ""),
+                "license_status": a.get("license_status", ""),
+                "approved_purpose": a.get("approved_purpose", ""),
+                "sha256": a.get("sha256", ""),
+                "attribution": a.get("attribution_text", ""),
+            })
     report_md = [
         f"# KH-03 Audio Comfort & Soundscape Report — `{run_id}` (`{skill_id}`)",
         "",
@@ -323,17 +402,28 @@ def verify_applied_soundscape(
     *,
     sfx_stem_metrics: dict[str, Any] | None = None,
     mix_metrics: dict[str, Any] | None = None,
+    measured_onsets_sec: list[dict[str, Any]] | None = None,
+    fps: float = 24.0,
+    run_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Never claim SFX added if stem is silent or assets were UNAVAILABLE."""
-    add_cnt = int(sound_plan["summary_counts"].get("ADD", 0))
-    unavail_cnt = int(sound_plan["summary_counts"].get("UNAVAILABLE", 0))
+    """Never claim SFX added if stem is silent, clipped, assets UNAVAILABLE, or onset drifted >1 output frame."""
+    add_events = [e for e in sound_plan.get("events", []) if e.get("status") == "ADD"]
+    add_cnt = max(len(add_events), int((sound_plan.get("summary_counts") or {}).get("ADD", 0)))
+    unavail_cnt = int((sound_plan.get("summary_counts") or {}).get("UNAVAILABLE", 0))
+    frame_tol_sec = round(1.0 / max(1.0, fps), 4)
+
     if add_cnt == 0:
-        return {
+        res = {
             "status": "BLOCKED_SFX_ASSETS" if unavail_cnt > 0 else "VOICE_ONLY_INTENTIONAL",
             "audible_cues_verified": 0,
             "silent_stem_rejected": False,
+            "onset_pass": True,
             "pass": unavail_cnt == 0,
         }
+        if run_dir is not None:
+            write_json_atomic(run_dir / "stems" / "ONSET_QA.json", res)
+        return res
+
     if sfx_stem_metrics is not None:
         lvl_raw = (
             sfx_stem_metrics.get("rms_db")
@@ -346,19 +436,43 @@ def verify_applied_soundscape(
         )
         rms = float(lvl_raw) if lvl_raw is not None else -96.0
         if rms <= -72.0:
-            return {
+            res = {
                 "status": "FAIL_SILENT_SFX_STEM",
                 "audible_cues_verified": 0,
                 "silent_stem_rejected": True,
+                "onset_pass": False,
                 "pass": False,
             }
+            if run_dir is not None:
+                write_json_atomic(run_dir / "stems" / "ONSET_QA.json", res)
+            return res
+
+    # Verify per-cue transient onset alignment within 1 output frame when measured onsets are supplied
+    late_cues: list[dict[str, Any]] = []
+    if measured_onsets_sec is not None:
+        by_id = {str(m.get("event_id")): float(m.get("measured_onset_sec", 0.0)) for m in measured_onsets_sec}
+        for ev in add_events:
+            eid = str(ev["event_id"])
+            if eid in by_id:
+                err_s = abs(by_id[eid] - float(ev.get("onset_sec", 0.0)))
+                if err_s > (frame_tol_sec + 1e-4):
+                    late_cues.append({"event_id": eid, "expected_sec": ev.get("onset_sec"), "measured_sec": by_id[eid], "drift_sec": round(err_s, 4)})
+
     tp_ok = True
     if mix_metrics and mix_metrics.get("true_peak_dbtp") is not None:
         tp_ok = float(mix_metrics["true_peak_dbtp"]) <= -1.0
-    return {
-        "status": "VERIFIED_APPLIED_SOUNDSCAPE" if tp_ok else "FAIL_TRUE_PEAK_CEILING",
+    onset_ok = len(late_cues) == 0
+    ok = bool(tp_ok and onset_ok)
+    res = {
+        "status": "VERIFIED_APPLIED_SOUNDSCAPE" if ok else ("FAIL_LATE_TRANSIENT_ONSET" if not onset_ok else "FAIL_TRUE_PEAK_CEILING"),
         "audible_cues_verified": add_cnt,
         "silent_stem_rejected": False,
         "true_peak_pass": tp_ok,
-        "pass": tp_ok,
+        "onset_pass": onset_ok,
+        "frame_tolerance_sec": frame_tol_sec,
+        "late_cues": late_cues,
+        "pass": ok,
     }
+    if run_dir is not None:
+        write_json_atomic(run_dir / "stems" / "ONSET_QA.json", res)
+    return res
