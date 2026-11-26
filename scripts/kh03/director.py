@@ -903,6 +903,9 @@ def compile_to_kh02_overrides(
     layout_plan: dict[str, Any] | None = None,
     motion_graph: dict[str, Any] | None = None,
     caption_policy: str = "OFF",
+    winning_candidate_id: str | None = None,
+    winner_binding_sha256: str | None = None,
+    competition_status: str | None = None,
 ) -> dict[str, Any]:
     """Translate KH-03 CREATIVE_PLAN into authoritative KH-02 overrides (clock_domain=SOURCE_CLOCK until Stage F EDL remap)."""
     sk = get_skill_contract(creative_plan["selected_skill_id"])
@@ -999,6 +1002,9 @@ def compile_to_kh02_overrides(
     return {
         "selected_skill_id": creative_plan["selected_skill_id"],
         "kh03_plan_sha256": creative_plan["plan_sha256"],
+        "winning_candidate_id": winning_candidate_id or creative_plan.get("winning_candidate_id"),
+        "winner_binding_sha256": winner_binding_sha256,
+        "competition_status": competition_status or creative_plan.get("competition_status") or "SINGLE_PLAN_NO_COMPETITION",
         "clock_domain": "SOURCE_CLOCK",
         "time_map_sha256": None,
         "fullscreen_lock": fs_lock,

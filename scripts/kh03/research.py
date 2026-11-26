@@ -69,13 +69,20 @@ def query_authorized_research_adapter(config: dict[str, Any] | None = None) -> d
     }
 
 
-def emit_research_summary(run_dir: Path, skill_id: str) -> Path:
+def emit_research_summary(run_dir: Path, skill_id: str, *, ctx: Any | None = None) -> Path:
+    if ctx is not None:
+        ctx.check_cancelled()
     snap = load_archived_research_snapshot()
     notes = extract_grammar_notes_for_skill(skill_id, snap)
-    return write_json_atomic(run_dir / "research" / "RESEARCH_CONTEXT.json", {
+    payload = {
         "snapshot_available": snap["available"],
         "evidence_class": snap["evidence_class"],
         "live_vidiq_calls_executed": False,
         "competitor_media_downloaded": False,
         "notes": notes,
-    })
+    }
+    target = run_dir / "research" / "RESEARCH_CONTEXT.json"
+    if ctx is not None:
+        ctx.publish_json("RESEARCH_CONTEXT.json", payload, target)
+        return target
+    return write_json_atomic(target, payload)

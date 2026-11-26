@@ -39,16 +39,23 @@ from .contracts import (
     parse_json_strict,
     persist_kh03_stage_receipt,
     transition_state,
+    verify_commercial_permission_evidence,
     write_json_atomic,
 )
-from .candidates import adopt_candidate, generate_creative_candidates, rank_candidates, validate_candidate_diversity
+from .candidates import (
+    adopt_candidate,
+    bind_winner_to_execution,
+    generate_creative_candidates,
+    rank_candidates,
+    validate_candidate_diversity,
+)
 from .director import build_creative_plan, compile_to_kh02_overrides
-from .execution import BoundedAsyncExecutor, DAGTask, compute_resource_budget
+from .execution import BoundedAsyncExecutor, DAGTask, TaskContext, compute_resource_budget
 from .explanation import plan_explanation
 from .footage import acquire_and_bind_footage
 from .intelligence import analyze_inputs, build_editorial_context, build_semantic_graph
 from .layout import VALID_LAYOUT_POLICIES, resolve_layout_policy
-from .qa import evaluate_kh03_editorial, orchestrate_final_render_qa
+from .qa import aggregate_gate_results, evaluate_kh03_editorial, orchestrate_final_render_qa, resolve_gate_profile
 from .recommend import get_skill_contract, issue_recommendation, recommend_skills
 from .research import emit_research_summary
 from .selection import SelectionGateError, record_user_selection, validate_user_selection
@@ -127,6 +134,7 @@ def run_recommend(
     cut_policy: str = "LOCK_VOICE",
     caption_policy: str = "OFF",
     music_policy: str = "OFF",
+    secondary_sources: list[dict[str, Any]] | None = None,
     run_asr: bool = False,
     test_only: bool = False,
 ) -> dict[str, Any]:
@@ -150,8 +158,11 @@ def run_recommend(
     eff_lic = str(license_decision or "BLOCKED_LICENSE_UNRESOLVED").strip().upper()
     if eff_lic not in _VALID_LICENSE_DECISIONS:
         eff_lic = "BLOCKED_LICENSE_UNRESOLVED"
-    comm_evid = str(commercial_permission_evidence or "").strip() or None
-    if eff_purpose == "COMMERCIAL_MARKETING" and (eff_lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" or not comm_evid or len(comm_evid) < 8):
+    comm_evid = commercial_permission_evidence if isinstance(commercial_permission_evidence, dict) else (str(commercial_permission_evidence or "").strip() or None)
+    perm_check = verify_commercial_permission_evidence(comm_evid)
+    if eff_purpose == "COMMERCIAL_MARKETING" and (eff_lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" or not perm_check["verified"]):
+        eff_lic = "BLOCKED_COMMERCIAL_LICENSE"
+    elif eff_lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" and not perm_check["verified"]:
         eff_lic = "BLOCKED_COMMERCIAL_LICENSE"
 
     tr_json = parse_json_strict(transcript_path) if (transcript_path and Path(transcript_path).is_file()) else None
@@ -175,6 +186,7 @@ def run_recommend(
         video_rights=video_rights,
         language=language,
         constraints=constraints,
+        secondary_sources=secondary_sources,
         run_asr=run_asr,
         run_dir=rdir,
     )
@@ -276,6 +288,10 @@ def run_execute(
     reduced_motion: bool = False,
     compete_candidates: bool = False,
     max_candidates: int = 3,
+    pairwise_fn: Any = None,
+    owner_override_candidate_id: str | None = None,
+    owner_selection_receipt: dict[str, Any] | None = None,
+    candidate_preview_runner: Any = None,
     offline: bool = True,
     online_opt_in: bool = False,
     run_h2: bool = False,
@@ -321,11 +337,12 @@ def run_execute(
             }
     saved_lic = str(saved_c.get("license_decision") or "BLOCKED_LICENSE_UNRESOLVED")
     saved_purpose = str(saved_c.get("intended_purpose") or "NONCOMMERCIAL_ENGINEERING").upper()
-    saved_evid = str(saved_c.get("commercial_permission_evidence") or "").strip()
+    saved_evid = saved_c.get("commercial_permission_evidence")
 
     eff_purpose = str(intended_purpose or saved_purpose).strip().upper()
-    eff_evid = str(commercial_permission_evidence if commercial_permission_evidence is not None else saved_evid).strip()
+    eff_evid = commercial_permission_evidence if commercial_permission_evidence is not None else saved_evid
     eff_lic = str(license_decision or saved_lic).strip().upper()
+    perm_check = verify_commercial_permission_evidence(eff_evid)
 
     # 2. P0 Fail-Closed PROBLEM-01 License Gate (rejects invalid status, commercial override bypass, or unsubstantiated permission!)
     if eff_lic not in _VALID_LICENSE_DECISIONS or eff_purpose not in _VALID_PURPOSES:
@@ -347,23 +364,23 @@ def run_execute(
             "selected_skill_id": skill_id,
             "reason": "Cannot override a BLOCKED_COMMERCIAL_LICENSE recommendation with NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED.",
         }
-    if eff_purpose == "COMMERCIAL_MARKETING" and (eff_lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" or len(eff_evid) < 8):
-        transition_state(rdir, STATE_BLOCKED, reason="COMMERCIAL_MARKETING lacks verified written permission evidence.", run_id=run_id)
+    if eff_purpose == "COMMERCIAL_MARKETING" and (eff_lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" or not perm_check["verified"]):
+        transition_state(rdir, STATE_BLOCKED, reason=f"COMMERCIAL_MARKETING lacks verified receipt: {perm_check['reason']}", run_id=run_id)
         return {
             "exit_code": 2,
             "status": "BLOCKED_COMMERCIAL_LICENSE",
             "run_id": run_id,
             "selected_skill_id": skill_id,
-            "reason": "COMMERCIAL_MARKETING requires WRITTEN_COMMERCIAL_PERMISSION_VERIFIED with substantiated commercial_permission_evidence.",
+            "reason": f"COMMERCIAL_MARKETING requires WRITTEN_COMMERCIAL_PERMISSION_VERIFIED with verified structured receipt: {perm_check['reason']}",
         }
-    if eff_lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" and len(eff_evid) < 8:
-        transition_state(rdir, STATE_BLOCKED, reason="Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED.", run_id=run_id)
+    if eff_lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" and not perm_check["verified"]:
+        transition_state(rdir, STATE_BLOCKED, reason=f"Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED: {perm_check['reason']}", run_id=run_id)
         return {
             "exit_code": 2,
             "status": "BLOCKED_COMMERCIAL_LICENSE",
             "run_id": run_id,
             "selected_skill_id": skill_id,
-            "reason": "Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED rejected: provide commercial_permission_evidence.",
+            "reason": f"Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED rejected: {perm_check['reason']}",
         }
     if eff_lic in ("BLOCKED_COMMERCIAL_LICENSE", "BLOCKED_LICENSE_UNRESOLVED"):
         transition_state(rdir, STATE_BLOCKED, reason=f"PROBLEM-01 license gate: {eff_lic}", run_id=run_id)
@@ -404,44 +421,46 @@ def run_execute(
         else ("TEST_ONLY" if not production_mode else "NONCOMMERCIAL_ONLY")
     )
 
-    # 3. CMI-10 Bounded Async DAG for independent Stage 3 analyses (research + footage + explanation + registry)
+    # 3. CMI-10 + R4.1-03 Ctx-Safe Bounded Async DAG for independent Stage 3 analyses
+    # ALL write-capable workers receive (deps, ctx) and publish ONLY via CoordinatorPublisher under active TaskLease!
+    def _w_research(_deps: dict[str, Any], ctx: TaskContext) -> Path:
+        ctx.check_cancelled()
+        return emit_research_summary(rdir, skill_id, ctx=(None if dry_run else ctx))
+
+    def _w_footage(_deps: dict[str, Any], ctx: TaskContext) -> dict[str, Any]:
+        ctx.check_cancelled()
+        return acquire_and_bind_footage(
+            run_id=run_id,
+            run_dir=rdir,
+            semantic_graph=sem,
+            skill_id=skill_id,
+            constraints=saved_c,
+            local_libraries=footage_library_dirs,
+            supplied_assets=supplied_assets,
+            intended_purpose=asset_purpose,
+            workers=eff_workers,
+            offline=eff_offline,
+            ctx=(None if dry_run else ctx),
+        )
+
+    def _w_explanation(_deps: dict[str, Any], ctx: TaskContext) -> dict[str, Any]:
+        ctx.check_cancelled()
+        return plan_explanation(sem, inp, skill_id=skill_id, run_dir=(None if dry_run else rdir), ctx=(None if dry_run else ctx))
+
+    def _w_registry(_deps: dict[str, Any], ctx: TaskContext) -> dict[str, Any]:
+        ctx.check_cancelled()
+        return build_registry()
+
     dag = BoundedAsyncExecutor(
         run_id=run_id,
         budget=budget,
         run_dir=(None if dry_run else rdir),
     )
     dag_res = dag.run([
-        DAGTask(
-            task_id="01_research_summary",
-            pool="network",
-            fn=lambda _deps: emit_research_summary(rdir, skill_id),
-        ),
-        DAGTask(
-            task_id="02_footage_acquire",
-            pool="network",
-            fn=lambda _deps: acquire_and_bind_footage(
-                run_id=run_id,
-                run_dir=rdir,
-                semantic_graph=sem,
-                skill_id=skill_id,
-                constraints=saved_c,
-                local_libraries=footage_library_dirs,
-                supplied_assets=supplied_assets,
-                intended_purpose=asset_purpose,
-                workers=eff_workers,
-                offline=eff_offline,
-            ),
-        ),
-        DAGTask(
-            task_id="03_explanation_graph",
-            pool="cpu",
-            fn=lambda _deps: plan_explanation(sem, inp, skill_id=skill_id, run_dir=rdir),
-        ),
-        DAGTask(
-            task_id="04_capability_registry",
-            pool="cpu",
-            fn=lambda _deps: build_registry(),
-        ),
+        DAGTask(task_id="01_research_summary", pool="network", fn=_w_research),
+        DAGTask(task_id="02_footage_acquire", pool="network", fn=_w_footage),
+        DAGTask(task_id="03_explanation_graph", pool="cpu", fn=_w_explanation),
+        DAGTask(task_id="04_capability_registry", pool="cpu", fn=_w_registry),
     ])
     if not dag_res["pass"]:
         fail_r = [r for r in dag_res["receipts"] if r["status"] != "PASS"]
@@ -508,11 +527,22 @@ def run_execute(
     trk_file = rdir / "analysis" / "TRACKING_PROVENANCE.json"
     tracking_prov = parse_json_strict(trk_file) if trk_file.is_file() else None
 
-    # PED-09 Optional Multi-Candidate Creative Competition (<=3 structurally distinct candidates within user-selected skill)
+    # PED-09 / R4.1-01 Real Multi-Candidate Creative Competition + End-to-End Winner Binding
     candidate_decision = None
+    winner_binding_doc = None
+    winning_candidate_id: str | None = None
+    winner_binding_sha: str | None = None
+    competition_status = "SINGLE_PLAN_NO_COMPETITION"
+
+    source_hashes: dict[str, str] = {"primary_aroll": inp["video_sha256"]}
+    if inp.get("secondary_sources_sha256"):
+        source_hashes["secondary_sources"] = str(inp["secondary_sources_sha256"])
+
     if compete_candidates and not dry_run and layout_plan is not None:
         sat_p = rdir / "layouts" / "SUBJECT_ACTION_TRACKS.json"
         sat_doc = parse_json_strict(sat_p) if sat_p.is_file() else {}
+        tr_p_cand = rdir / "analysis" / "TRANSCRIPT_NORMALIZED.json"
+        tr_doc_cand = parse_json_strict(tr_p_cand) if tr_p_cand.is_file() else None
         cand_list = generate_creative_candidates(
             run_id=run_id,
             selected_skill_id=skill_id,
@@ -524,15 +554,88 @@ def run_execute(
             constraints=eff_exec_c,
             assets=footage_manifest.get("assets"),
             max_candidates=max_candidates,
+            base_creative_plan=creative_plan,
+            semantic_graph=sem,
+            explanation_graph=explanation_graph,
+            transcript=tr_doc_cand,
+            selection_receipt_sha256=sel_sha,
+            source_hashes=source_hashes,
+            run_dir=rdir,
         )
         div_check = validate_candidate_diversity(cand_list)
-        ranking = rank_candidates(cand_list)
+        if not div_check["pass"]:
+            valid_id_set = set(div_check.get("valid_candidate_ids") or [])
+            cand_list = [c for c in cand_list if c["candidate_id"] in valid_id_set]
+            if not cand_list:
+                transition_state(rdir, STATE_BLOCKED, reason="CANDIDATE_DIVERSITY_FAIL: no valid structurally distinct candidates.", run_id=run_id)
+                return {
+                    "exit_code": 2,
+                    "status": "CANDIDATE_DIVERSITY_FAIL",
+                    "run_id": run_id,
+                    "selected_skill_id": skill_id,
+                    "diversity_check": div_check,
+                }
+
+        # Preview/Full competition: run bounded isolated preview runner (concurrency=1) when supplied
+        if mode in ("preview", "full") and candidate_preview_runner is not None:
+            for c_item in cand_list:
+                if not c_item.get("plan_gate_pass"):
+                    continue
+                prev_res = candidate_preview_runner(c_item, Path(c_item["workspace_dir"]))
+                c_item["preview_mp4_path"] = prev_res.get("preview_mp4_path")
+                c_item["preview_mp4_sha256"] = prev_res.get("preview_mp4_sha256")
+                c_item["preview_qa_pass"] = bool(prev_res.get("preview_qa_pass", False))
+
+        ranking = rank_candidates(
+            cand_list,
+            pairwise_fn=pairwise_fn,
+            mode=mode,
+            require_preview_proof=(mode in ("preview", "full")),
+        )
         ranking["diversity_check"] = div_check
-        candidate_decision = adopt_candidate(ranking, run_dir=rdir)
+        candidate_decision = adopt_candidate(
+            ranking,
+            owner_override_candidate_id=owner_override_candidate_id,
+            owner_selection_receipt=owner_selection_receipt,
+            mode=mode,
+            require_preview_proof=(mode in ("preview", "full")),
+            expected_selection_sha=sel_sha,
+            run_dir=rdir,
+        )
+        cands_by_id = {c["candidate_id"]: c for c in cand_list}
+        bind_res = bind_winner_to_execution(
+            candidate_decision,
+            cands_by_id,
+            run_dir=rdir,
+            selection_receipt_sha256=sel_sha,
+            source_hashes=source_hashes,
+            mode=mode,
+        )
+        winner_binding_doc = bind_res["binding"]
+        if not bind_res["bound"]:
+            blk_st = str(candidate_decision.get("status") or "CANDIDATE_BLOCKED")
+            transition_state(rdir, STATE_BLOCKED, reason=f"Candidate competition halted without valid winner ({blk_st}).", run_id=run_id)
+            return {
+                "exit_code": 2,
+                "status": blk_st,
+                "run_id": run_id,
+                "selected_skill_id": skill_id,
+                "candidate_decision": candidate_decision,
+                "winner_binding": winner_binding_doc,
+                "reason": candidate_decision.get("reason") or "No valid consensus/adopted candidate; refusing silent fallback to original plan.",
+            }
+        # REPLACE authoritative creative_plan, layout_plan, motion_graph with adopted winner bundle BEFORE sound & KH-02 compile!
+        creative_plan = bind_res["creative_plan"]
+        layout_plan = bind_res["layout_plan"]
+        if bind_res["motion_graph"] is not None:
+            motion_graph = bind_res["motion_graph"]
+        winning_candidate_id = str(winner_binding_doc["winning_candidate_id"])
+        winner_binding_sha = str(winner_binding_doc["winner_binding_sha256"])
+        competition_status = str(winner_binding_doc["status"])
 
     fps = inp["media"]["fps_num"] / float(max(1, inp["media"]["fps_den"]))
 
-    # 5. Multi-Layer Sound Director (anchored to spatial layout transitions AND CMI-02 motion-graph sub-events!)
+    # 5. Multi-Layer Sound Director (anchored to WINNER layout transitions AND WINNER motion-graph sub-events!)
     snd_res = plan_soundscape_for_skill(
         run_id=run_id,
         run_dir=rdir,
@@ -555,7 +658,7 @@ def run_execute(
         allow_test_only_sfx=allow_test_only_sfx,
     )
 
-    # 6. Build KH-02 Brief & Invoke Normal KH-02 Pipeline (passing authoritative layout_plan + motion_graph + hook + sound_plan!)
+    # 6. Build KH-02 Brief & Invoke Normal KH-02 Pipeline (passing WINNER creative_plan + layout_plan + motion_graph + sound_plan!)
     sk = get_skill_contract(skill_id)
     kh03_ov = compile_to_kh02_overrides(
         creative_plan,
@@ -564,6 +667,9 @@ def run_execute(
         layout_plan=layout_plan,
         motion_graph=motion_graph,
         caption_policy=eff_caption,
+        winning_candidate_id=winning_candidate_id,
+        winner_binding_sha256=winner_binding_sha,
+        competition_status=competition_status,
     )
 
     sources_list = [{
@@ -830,6 +936,9 @@ def run_execute(
         "qa_report": qa_rep,
         "final_render_qa": final_render_qa,
         "candidate_decision": candidate_decision,
+        "winner_binding": winner_binding_doc,
+        "winning_candidate_id": winning_candidate_id,
+        "competition_status": competition_status,
         "kh02_status": kh02_res.get("status"),
     }
 
@@ -849,8 +958,14 @@ def run_status(*, run_root: Path) -> dict[str, Any]:
     }
 
 
-def run_verify(*, run_root: Path, production_mode: bool = True, require_render: bool = False) -> dict[str, Any]:
-    """Fail-closed verifier requiring full KH-03 + KH-02 artifact presence and SHA linkage (R1.07)."""
+def run_verify(
+    *,
+    run_root: Path,
+    production_mode: bool = True,
+    require_render: bool = False,
+    verify_mode: str | None = None,
+) -> dict[str, Any]:
+    """Fail-closed verifier requiring full KH-03 + KH-02 SHA linkage, winner binding & raw gate recomputation (R4.1-02)."""
     rdir = Path(os.path.realpath(str(run_root.expanduser())))
     issues: list[str] = []
     try:
@@ -874,9 +989,14 @@ def run_verify(*, run_root: Path, production_mode: bool = True, require_render: 
 
     cp = rdir / "manifests" / "CREATIVE_PLAN.json"
     sb = rdir / "SHOTBOOK_V2.json"
+    wb_p = rdir / "manifests" / "WINNER_BINDING.json"
     if cp.is_file() and sb.is_file():
         plan = parse_json_strict(cp)
         shot = parse_json_strict(sb)
+        # Re-verify canonical CREATIVE_PLAN SHA (blocks manual tampering!)
+        plan_body = {k: v for k, v in plan.items() if k != "plan_sha256"}
+        if plan.get("plan_sha256") and hash_artifact(plan_body) != plan["plan_sha256"]:
+            issues.append("TAMPERED_CREATIVE_PLAN: plan_sha256 does not match CREATIVE_PLAN.json body.")
         if sel and plan["selected_skill_id"] != sel["selected_skill_id"]:
             issues.append("Skill mismatch between SELECTION_RECEIPT and CREATIVE_PLAN.")
         prov = shot.get("provenance") or {}
@@ -904,9 +1024,38 @@ def run_verify(*, run_root: Path, production_mode: bool = True, require_render: 
                 issues.append("MISSING_REQUIRED_ARTIFACT: ANTI_REPETITION_REPORT.json")
             if prov.get("kh03_layout_policy") != "ADAPTIVE_DYNAMIC":
                 issues.append(f"SHOTBOOK_V2 missing kh03_layout_policy=ADAPTIVE_DYNAMIC ({prov.get('kh03_layout_policy')!r}).")
+        # R4.1-01 Winner Binding SHA chain validation when candidate competition ran
+        if wb_p.is_file():
+            wb = parse_json_strict(wb_p)
+            if not wb.get("bound"):
+                issues.append(f"CANDIDATE_WINNER_NOT_BOUND: {wb.get('status')}")
+            else:
+                if sel and wb.get("selection_receipt_sha256") != sel["receipt_sha256"]:
+                    issues.append("WINNER_BINDING selection_receipt_sha256 mismatch.")
+                if wb.get("creative_plan_sha256") != plan.get("plan_sha256"):
+                    issues.append("WINNER_BINDING creative_plan_sha256 != CREATIVE_PLAN.json plan_sha256.")
+                if prov.get("kh03_winning_candidate_id") != wb.get("winning_candidate_id"):
+                    issues.append(f"SHOTBOOK_V2 kh03_winning_candidate_id mismatch ({prov.get('kh03_winning_candidate_id')!r} != {wb.get('winning_candidate_id')!r}).")
+                if prov.get("kh03_winner_binding_sha256") != wb.get("winner_binding_sha256"):
+                    issues.append("SHOTBOOK_V2 kh03_winner_binding_sha256 mismatch.")
+                wb_body = {k: v for k, v in wb.items() if k not in ("winner_binding_sha256", "bound_at_utc")}
+                if wb.get("winner_binding_sha256") and hash_artifact(wb_body) != wb["winner_binding_sha256"]:
+                    issues.append("TAMPERED_WINNER_BINDING: winner_binding_sha256 does not match body.")
+
+    recomputed_matrix = None
+    dimensions = {
+        "plan_status": "PLAN_VALID" if not issues else "VERIFY_FAIL",
+        "technical_status": "NOT_RUN",
+        "editorial_status": "NOT_RUN",
+        "native_status": "NOT_RUN",
+        "owner_visual": "PENDING",
+        "owner_audio": "PENDING",
+        "release_status": "RELEASE_BLOCKED",
+    }
 
     rec4 = rdir / "STAGE_RECEIPTS" / "KH03_04_execute_and_qa.json"
     if require_render:
+        eff_vmode = str(verify_mode or "ENGINEERING").upper()
         if not rec4.is_file():
             issues.append("MISSING_RENDER_RECEIPT: KH03_04_execute_and_qa.json absent.")
         else:
@@ -931,12 +1080,69 @@ def run_verify(*, run_root: Path, production_mode: bool = True, require_render: 
                 fgm_doc = parse_json_strict(fgm)
                 if fpq_doc.get("final_mp4_sha256") != mp4_sha or fgm_doc.get("final_mp4_sha256") != mp4_sha:
                     issues.append("STALE_OR_TAMPERED_FINAL_QA: FINAL_PIXEL_QA/FINAL_GATE_MATRIX SHA does not match final MP4.")
-                if not fgm_doc.get("technical_pass"):
-                    issues.append(f"FINAL_QA_GATES_FAILED: {fgm_doc.get('failing_gates') or fgm_doc.get('overall_technical_status')}")
+
+                # R4.1-02: Recompute aggregate_gate_results from raw gate artifacts on disk — NEVER trust stored technical_pass!
+                raw_gates = dict(fgm_doc.get("gates") or {})
+                prof = resolve_gate_profile(fgm_doc.get("mode") or eff_vmode)
+                # Cross-check key raw evidence files on disk against stored gate status & MP4 SHA!
+                evidence_file_checks = [
+                    ("G_HOOK_PIXELS", rdir / "qc" / "HOOK_PIXEL_QA.json"),
+                    ("G_COMPONENT_ROI_MOTION", rdir / "qc" / "COMPONENT_PIXEL_QA.json"),
+                    ("G_COMPONENT_COVERAGE", rdir / "qc" / "COMPONENT_COVERAGE.json"),
+                    ("G_FRAME_AUDIT", rdir / "qc" / "FRAME_AUDIT.json"),
+                    ("G_FRAME_COVERAGE", rdir / "qc" / "FRAME_COVERAGE.json"),
+                    ("G_AUDIO_SYNC", rdir / "qc" / "MOTION_SOUND_SYNC.json"),
+                    ("G_EXPORT_QA", rdir / "qc" / "EXPORT_QA.json"),
+                    ("G_ACTION_PROTECTION", rdir / "qc" / "ACTION_PROTECTION.json"),
+                ]
+                for gid_k, ef_p in evidence_file_checks:
+                    if gid_k in raw_gates and raw_gates[gid_k].get("status") == "PASS":
+                        if ef_p.is_file():
+                            ed = parse_json_strict(ef_p)
+                            if ed.get("final_mp4_sha256") and ed.get("final_mp4_sha256") != mp4_sha:
+                                issues.append(f"STALE_GATE_EVIDENCE({gid_k}): {ef_p.name} MP4 SHA mismatch.")
+                                raw_gates[gid_k] = {**raw_gates[gid_k], "status": "FAIL", "reason": "MP4_SHA_MISMATCH"}
+                            if ed.get("pass") is False:
+                                issues.append(f"FORGED_GATE_PASS({gid_k}): raw {ef_p.name} reports pass=False while matrix claims PASS.")
+                                raw_gates[gid_k] = {**raw_gates[gid_k], "status": "FAIL", "reason": "RAW_EVIDENCE_FAILED"}
+                        elif gid_k in prof["mandatory_gates"]:
+                            issues.append(f"MISSING_RAW_GATE_EVIDENCE({gid_k}): {ef_p.name} missing on disk.")
+                            raw_gates[gid_k] = {**raw_gates[gid_k], "status": "BLOCKED", "reason": "MISSING_RAW_EVIDENCE"}
+
+                recomputed_matrix = aggregate_gate_results(
+                    raw_gates,
+                    mandatory_gates=prof["mandatory_gates"],
+                    mode=prof["mode"],
+                )
+                if recomputed_matrix["technical_pass"] != bool(fgm_doc.get("technical_pass")):
+                    issues.append(
+                        f"TAMPERED_GATE_MATRIX: stored technical_pass={fgm_doc.get('technical_pass')} != recomputed={recomputed_matrix['technical_pass']} "
+                        f"(missing={recomputed_matrix.get('missing_gates')}, failing={recomputed_matrix.get('failing_gates')}, blocked={recomputed_matrix.get('blocked_gates')})"
+                    )
+                if not recomputed_matrix["technical_pass"]:
+                    issues.append(
+                        f"FINAL_QA_GATES_FAILED: failing={recomputed_matrix['failing_gates']}, "
+                        f"blocked={recomputed_matrix['blocked_gates']}, missing={recomputed_matrix['missing_gates']}, pending={recomputed_matrix['pending_gates']}"
+                    )
+                dimensions["technical_status"] = recomputed_matrix["overall_technical_status"]
+                dimensions["editorial_status"] = recomputed_matrix.get("editorial_status", "PENDING_REVIEW")
+                dimensions["native_status"] = recomputed_matrix.get("native_status", "NOT_RUN")
+                dimensions["release_status"] = recomputed_matrix.get("release_status", "RELEASE_BLOCKED")
+
+                # Verify OWNER_APPROVAL.json binds exact MP4 SHA
+                oa_p = rdir / "qc" / "OWNER_APPROVAL.json"
+                if oa_p.is_file():
+                    oa = parse_json_strict(oa_p)
+                    if oa.get("final_mp4_sha256") != mp4_sha:
+                        issues.append("STALE_OWNER_APPROVAL: OWNER_APPROVAL.json final_mp4_sha256 mismatch.")
+                    dimensions["owner_visual"] = str(oa.get("owner_visual_approval") or "PENDING")
+                    dimensions["owner_audio"] = str(oa.get("owner_audio_approval") or "PENDING")
 
     return {
         "exit_code": 0 if not issues else 1,
         "status": "VERIFY_PASS" if not issues else "VERIFY_FAIL",
+        "dimensions": dimensions,
+        "recomputed_gate_matrix": recomputed_matrix,
         "issues": issues,
     }
 

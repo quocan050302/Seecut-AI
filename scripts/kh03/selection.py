@@ -87,10 +87,16 @@ def record_user_selection(
     if rec["video_sha256"] != inp["video_sha256"] or rec["script_sha256"] != inp["script_sha256"]:
         raise SelectionGateError("Input hashes changed since recommendation; re-run `recommend` before selecting.")
 
-    # Verify fresh bytes on disk at selection time too (prevent stale selection over mutated source)
+    # Verify fresh bytes on disk for primary video AND any bound secondary sources
     vp = Path(inp["video_path"])
     if vp.is_file() and _hash_file_bytes(vp) != inp["video_sha256"]:
         raise SelectionGateError("Source video bytes on disk changed since recommendation; re-run `recommend`.")
+    for sec in (inp.get("secondary_sources") or []):
+        sp_sec = Path(str(sec.get("path") or ""))
+        if not sp_sec.is_file() or _hash_file_bytes(sp_sec) != sec.get("sha256"):
+            raise SelectionGateError(
+                f"Secondary source {sec.get('source_id')} bytes changed/missing since recommendation; re-run `recommend`."
+            )
     sp_raw = inp.get("script_source_path")
     if sp_raw and Path(sp_raw).is_file() and inp.get("raw_script_sha256"):
         if _hash_file_bytes(Path(sp_raw)) != inp["raw_script_sha256"]:
@@ -102,6 +108,7 @@ def record_user_selection(
         "schema_version": "kh03.selection.v1",
         "run_id": rec["run_id"],
         "video_sha256": inp["video_sha256"],
+        "secondary_sources_sha256": inp.get("secondary_sources_sha256"),
         "script_sha256": inp["script_sha256"],
         "raw_script_sha256": inp.get("raw_script_sha256"),
         "script_source_path": inp.get("script_source_path"),
@@ -211,6 +218,21 @@ def validate_user_selection(
         )
     if expected_video_sha256 and receipt["video_sha256"] != expected_video_sha256:
         raise SelectionGateError("Expected video SHA differs from bound selection receipt; selection invalidated.")
+
+    # Fresh disk re-hash of any bound secondary sources (invalidates selection if B V1 -> B V2 changed!)
+    bound_sec_sha = receipt.get("secondary_sources_sha256")
+    cur_sec_sha = inp.get("secondary_sources_sha256")
+    if bound_sec_sha != cur_sec_sha:
+        raise SelectionGateError("SECONDARY_SOURCE_DRIFT: secondary_sources_sha256 changed after selection; re-run recommend.")
+    for sec in (inp.get("secondary_sources") or []):
+        sp_sec = Path(str(sec.get("path") or ""))
+        if not sp_sec.is_file():
+            raise SelectionGateError(f"SECONDARY_SOURCE_MISSING: {sec.get('source_id')} missing on disk.")
+        fresh_sec_sha = _hash_file_bytes(sp_sec)
+        if fresh_sec_sha != sec.get("sha256"):
+            raise SelectionGateError(
+                f"FRESH_SECONDARY_HASH_MISMATCH({sec.get('source_id')}): {fresh_sec_sha[:12]} != {str(sec.get('sha256'))[:12]}."
+            )
 
     # Fresh disk re-hash of raw script file whenever script_source_path was bound
     sp_raw = receipt.get("script_source_path") or inp.get("script_source_path")

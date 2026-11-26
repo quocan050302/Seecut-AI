@@ -13,7 +13,10 @@ import hashlib
 import json
 import os
 import platform
-import resource
+try:
+    import resource as _resource
+except ImportError:
+    _resource = None
 import shutil
 import signal
 import subprocess
@@ -102,15 +105,43 @@ def get_host_memory_mib() -> tuple[float, float]:
 
 
 def get_process_rss_mib() -> float:
-    """Measure current process high-water RSS in MiB (platform-calibrated ru_maxrss)."""
+    """Measure current process high-water RSS in MiB cleanly across macOS, Linux, and Windows."""
     try:
-        ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        # macOS returns bytes; Linux returns KiB
-        if platform.system().lower() == "darwin":
-            return round(ru / (1024.0 * 1024.0), 2)
-        return round(ru / 1024.0, 2)
+        if _resource is not None:
+            ru = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+            # macOS returns bytes; Linux returns KiB
+            if platform.system().lower() == "darwin":
+                return round(ru / (1024.0 * 1024.0), 2)
+            return round(ru / 1024.0, 2)
+        if platform.system().lower() == "windows":
+            import ctypes
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [
+                    ("cb", ctypes.c_ulong),
+                    ("PageFaultCount", ctypes.c_ulong),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            pmc = _PMC()
+            pmc.cb = ctypes.sizeof(_PMC)
+            hproc = ctypes.windll.kernel32.GetCurrentProcess()
+            fn = getattr(ctypes.windll.kernel32, "K32GetProcessMemoryInfo", None)
+            if fn is None:
+                fn = ctypes.windll.psapi.GetProcessMemoryInfo
+            if fn(hproc, ctypes.byref(pmc), pmc.cb):
+                val = pmc.PeakWorkingSetSize or pmc.WorkingSetSize
+                return round(val / (1024.0 * 1024.0), 2)
     except Exception:
-        return 0.0
+        pass
+    return 0.0
 
 
 def compute_resource_budget(
@@ -302,6 +333,8 @@ class StreamingRGBFrameDecoder:
         }
         if os.name == "posix":
             popen_kw["start_new_session"] = True
+        elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+            popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         self.started_monotonic = time.monotonic()
         self._proc = subprocess.Popen(cmd, **popen_kw)
 
@@ -710,12 +743,39 @@ class TaskLease:
 
 
 class CoordinatorPublisher:
-    """Single-coordinator atomic publisher enforcing active lease, no cancellation, and schema/SHA validation."""
+    """Single-coordinator atomic publisher enforcing active lease, no cancellation, path containment, and schema/SHA validation."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, allowed_root: Path | None = None) -> None:
         self._lock = threading.Lock()
+        self.allowed_root = Path(os.path.realpath(str(allowed_root))) if allowed_root is not None else None
         self.published: list[dict[str, Any]] = []
         self.rejected: list[dict[str, Any]] = []
+
+    def _validate_target_path(self, final_path: Path) -> Path:
+        # Reject symlink components & path traversal outside allowed_root
+        raw_parts = Path(final_path).parts
+        if ".." in raw_parts:
+            raise ValueError(f"PATH_TRAVERSAL_REJECTED: '..' forbidden in target {final_path}")
+        if final_path.is_symlink():
+            raise ValueError(f"SYMLINK_TARGET_REJECTED: {final_path}")
+        cur = final_path.parent
+        checked_ancestors = 0
+        while cur != cur.parent and checked_ancestors < 8:
+            if cur.is_symlink():
+                raise ValueError(f"SYMLINK_ANCESTOR_REJECTED: {cur}")
+            cur = cur.parent
+            checked_ancestors += 1
+        real_final = Path(os.path.realpath(str(final_path)))
+        if self.allowed_root is not None:
+            root_s = str(self.allowed_root)
+            fin_s = str(real_final)
+            if os.name == "nt":
+                root_cmp, fin_cmp = root_s.lower(), fin_s.lower()
+            else:
+                root_cmp, fin_cmp = root_s, fin_s
+            if fin_cmp != root_cmp and not fin_cmp.startswith(root_cmp + os.sep):
+                raise ValueError(f"OUTSIDE_ALLOWED_ROOT_REJECTED: {real_final} outside {self.allowed_root}")
+        return real_final
 
     def publish_staged_file(
         self,
@@ -725,6 +785,7 @@ class CoordinatorPublisher:
         final_path: Path,
         *,
         schema_name: str | None = None,
+        expected_sha256: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if not lease.is_active or cancel_token.is_cancelled:
@@ -741,23 +802,37 @@ class CoordinatorPublisher:
                 raise LateWriteRejectedError(
                     f"LATE_WRITE_REJECTED({lease.task_id}#{lease.attempt}): {rec['reason']}"
                 )
+            if staged_path.is_symlink():
+                raise ValueError(f"SYMLINK_STAGED_PATH_REJECTED: {staged_path}")
             st_real = Path(os.path.realpath(str(staged_path)))
             stage_root = Path(os.path.realpath(str(lease.staging_dir)))
-            if not str(st_real).startswith(str(stage_root) + os.sep) or not st_real.is_file():
+            st_cmp = str(st_real).lower() if os.name == "nt" else str(st_real)
+            sr_cmp = str(stage_root).lower() if os.name == "nt" else str(stage_root)
+            if not st_cmp.startswith(sr_cmp + os.sep) or not st_real.is_file():
                 raise ValueError(f"INVALID_STAGED_PATH: {staged_path} outside {lease.staging_dir}")
+            target_real = self._validate_target_path(final_path)
             if schema_name is not None:
                 doc = parse_json_strict(st_real)
                 assert_kh03_schema(doc, schema_name)
             sha = hash_artifact(st_real)
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_dst = final_path.parent / f".{final_path.name}.{lease.lease_id}.part"
+            if expected_sha256 is not None and sha != expected_sha256:
+                raise ValueError(f"STAGED_SHA_MISMATCH: {sha[:12]} != {expected_sha256[:12]}")
+            target_real.parent.mkdir(parents=True, exist_ok=True)
+            tmp_dst = target_real.parent / f".{target_real.name}.{lease.lease_id}.part"
             shutil.copy2(st_real, tmp_dst)
-            os.replace(tmp_dst, final_path)
+            for attempt_r in range(5):
+                try:
+                    os.replace(tmp_dst, target_real)
+                    break
+                except PermissionError:
+                    if attempt_r == 4:
+                        raise
+                    time.sleep(0.03 * (attempt_r + 1))
             rec = {
                 "task_id": lease.task_id,
                 "attempt": lease.attempt,
                 "lease_id": lease.lease_id,
-                "final_path": str(final_path),
+                "final_path": str(target_real),
                 "sha256": sha,
                 "status": "PUBLISHED",
                 "at_utc": now_utc(),
@@ -870,9 +945,33 @@ class TaskContext:
         write_json_atomic(dst, payload)
         return dst
 
+    def stage_text(self, rel_name: str, content: str) -> Path:
+        self.check_cancelled()
+        safe_rel = Path(rel_name).name
+        dst = self.staging_dir / safe_rel
+        self.staging_dir.mkdir(parents=True, exist_ok=True)
+        dst.write_text(content, encoding="utf-8")
+        return dst
+
+    def stage_bytes(self, rel_name: str, data: bytes) -> Path:
+        self.check_cancelled()
+        safe_rel = Path(rel_name).name
+        dst = self.staging_dir / safe_rel
+        self.staging_dir.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(data)
+        return dst
+
     def publish_json(self, rel_name: str, payload: Any, final_path: Path, *, schema_name: str | None = None) -> dict[str, Any]:
         st = self.stage_json(rel_name, payload)
         return self.publisher.publish_staged_file(self.lease, self.cancel_token, st, final_path, schema_name=schema_name)
+
+    def publish_text(self, rel_name: str, content: str, final_path: Path) -> dict[str, Any]:
+        st = self.stage_text(rel_name, content)
+        return self.publisher.publish_staged_file(self.lease, self.cancel_token, st, final_path)
+
+    def publish_file(self, staged_path: Path, final_path: Path, *, schema_name: str | None = None) -> dict[str, Any]:
+        self.check_cancelled()
+        return self.publisher.publish_staged_file(self.lease, self.cancel_token, staged_path, final_path, schema_name=schema_name)
 
     def run_subprocess(self, cmd: list[str], *, timeout_sec: float = 120.0, cwd: str | Path | None = None) -> dict[str, Any]:
         self.check_cancelled()
@@ -923,7 +1022,7 @@ class BoundedAsyncExecutor:
         self.peak_rss_mib = get_process_rss_mib()
         self.min_free_disk_gib = float(budget.get("free_disk_gib", 10.0))
         self.disk_reserve_gib = float(budget.get("disk_reserve_gib", DEFAULT_DISK_RESERVE_GIB))
-        self.publisher = CoordinatorPublisher()
+        self.publisher = CoordinatorPublisher(allowed_root=run_dir)
         self.global_cancel = CancellationToken()
 
     def _validate_dag(self, tasks: list[DAGTask]) -> dict[str, DAGTask]:
@@ -1055,10 +1154,12 @@ class BoundedAsyncExecutor:
                     return
 
                 dep_outputs = {d: results[d] for d in sorted(t.deps)}
+                t_queued = time.monotonic()
                 sem = semaphores.get(t.pool, semaphores["cpu"])
                 async with sem:
                     t0 = time.monotonic()
-                    trace_events.append({"task_id": tid, "event": "start", "pool": t.pool})
+                    wait_sec = round(max(0.0, t0 - t_queued), 4)
+                    trace_events.append({"task_id": tid, "event": "start", "pool": t.pool, "rel_start_sec": round(t0 - t_start_all, 4), "wait_sec": wait_sec, "ctx_aware": takes_ctx})
                     last_err: Exception | None = None
                     final_status: str | None = None
                     max_attempts = max(0, int(t.retries)) + 1
@@ -1167,7 +1268,8 @@ class BoundedAsyncExecutor:
                             break
 
                         val = box["val"]
-                        dur = round(time.monotonic() - t0, 4)
+                        t_end = time.monotonic()
+                        dur = round(t_end - t0, 4)
                         rss = get_process_rss_mib()
                         self.peak_rss_mib = max(self.peak_rss_mib, rss)
                         results[tid] = val
@@ -1175,9 +1277,13 @@ class BoundedAsyncExecutor:
                         receipts[tid] = {
                             "task_id": tid, "deps": list(t.deps), "pool": t.pool,
                             "status": "PASS", "attempts": attempt, "lease_id": lease_id,
+                            "ctx_aware": takes_ctx,
+                            "rel_start_sec": round(t0 - t_start_all, 4),
+                            "rel_end_sec": round(t_end - t_start_all, 4),
+                            "wait_sec": wait_sec,
                             "output_sha256": out_sha, "duration_sec": dur, "rss_mib": rss,
                         }
-                        trace_events.append({"task_id": tid, "event": "pass", "attempts": attempt, "duration_sec": dur, "rss_mib": rss})
+                        trace_events.append({"task_id": tid, "event": "pass", "attempts": attempt, "rel_end_sec": round(t_end - t_start_all, 4), "duration_sec": dur, "rss_mib": rss})
                         lease.revoke("COMPLETED_OK")
                         if staging_base is not None and stage_dir.is_dir():
                             shutil.rmtree(stage_dir, ignore_errors=True)
@@ -1244,6 +1350,28 @@ class BoundedAsyncExecutor:
             "all_workers_reaped": len(quarantined_workers) == 0,
         }
 
+        # Measure actual independent task overlap & critical path
+        spans = [
+            (r["task_id"], float(r.get("rel_start_sec", 0.0)), float(r.get("rel_end_sec", 0.0)))
+            for r in ordered_receipts if r.get("status") == "PASS" and "rel_start_sec" in r
+        ]
+        overlap_pairs: list[list[str]] = []
+        for i in range(len(spans)):
+            for j in range(i + 1, len(spans)):
+                if spans[i][1] < spans[j][2] and spans[j][1] < spans[i][2]:
+                    overlap_pairs.append([spans[i][0], spans[j][0]])
+        sum_task_sec = round(sum(float(r.get("duration_sec", 0.0)) for r in ordered_receipts), 4)
+        # Longest dependency chain duration (critical path)
+        cp_memo: dict[str, float] = {}
+        def _cp(tid_k: str) -> float:
+            if tid_k in cp_memo:
+                return cp_memo[tid_k]
+            d_self = float(receipts[tid_k].get("duration_sec", 0.0))
+            d_deps = max((_cp(d) for d in by_id[tid_k].deps), default=0.0)
+            cp_memo[tid_k] = d_self + d_deps
+            return cp_memo[tid_k]
+        critical_path_sec = round(max((_cp(tid) for tid in ordered_ids), default=0.0), 4)
+
         async_metrics = {
             "schema_version": "kh03.async_metrics.v1",
             "run_id": self.run_id,
@@ -1253,11 +1381,28 @@ class BoundedAsyncExecutor:
             "decoder_pool": self.decoder_pool,
             "task_count": len(ordered_receipts),
             "passed_tasks": sum(1 for r in ordered_receipts if r["status"] == "PASS"),
+            "ctx_aware_task_count": sum(1 for r in ordered_receipts if r.get("ctx_aware")),
             "wall_sec": wall_sec,
+            "sum_task_sec": sum_task_sec,
+            "critical_path_sec": critical_path_sec,
+            "effective_parallel_ratio": round(sum_task_sec / max(0.0001, wall_sec), 3),
+            "overlap_detected": len(overlap_pairs) > 0,
+            "overlap_pair_count": len(overlap_pairs),
             "peak_rss_mib": self.peak_rss_mib,
             "min_free_disk_gib": self.min_free_disk_gib,
             "canonical_dag_sha256": dag_doc["canonical_dag_sha256"],
             "blocked_cancellation": blocked_cancellation,
+        }
+        dag_trace = {
+            "schema_version": "kh03.dag_trace.v1",
+            "run_id": self.run_id,
+            "workers": self.workers,
+            "wall_sec": wall_sec,
+            "critical_path_sec": critical_path_sec,
+            "overlap_detected": len(overlap_pairs) > 0,
+            "overlap_pairs": overlap_pairs[:32],
+            "tasks": ordered_receipts,
+            "events": trace_events,
         }
 
         if self.run_dir is not None:
@@ -1266,6 +1411,7 @@ class BoundedAsyncExecutor:
             write_json_atomic(mdir / "TASK_DAG.json", dag_doc)
             write_json_atomic(mdir / "CANCELLATION_PROOF.json", cancel_proof)
             write_json_atomic(mdir / "ASYNC_METRICS.json", async_metrics)
+            write_json_atomic(mdir / "DAG_TRACE.json", dag_trace)
             rec_tmp = mdir / "TASK_RECEIPTS.jsonl.part"
             rec_tmp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in ordered_receipts) + "\n", encoding="utf-8")
             rec_tmp.replace(mdir / "TASK_RECEIPTS.jsonl")

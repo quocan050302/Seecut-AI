@@ -669,22 +669,48 @@ def _valid_norm_box(box: Any) -> list[float] | None:
     return [max(0.0, x), max(0.0, y), min(1.0 - max(0.0, x), w), min(1.0 - max(0.0, y), h)]
 
 
+def collect_streaming_qa_frames(
+    media_path: str | Path,
+    wanted_frames: set[int] | list[int],
+    *,
+    width: int = 360,
+    height: int = 640,
+    ffmpeg_threads: int = 2,
+    timeout_sec: float = 120.0,
+) -> dict[int, Image.Image]:
+    """Single bounded O(1)-stream pass capturing only explicitly requested frame indices for shared QA reuse (R4.1-05)."""
+    mp = Path(media_path).resolve()
+    wanted = {max(0, int(f)) for f in wanted_frames}
+    if not mp.is_file() or not wanted:
+        return {}
+    captured: dict[int, Image.Image] = {}
+    max_needed = max(wanted)
+    idx = 0
+    with StreamingRGBFrameDecoder(mp, width, height, ffmpeg_threads=ffmpeg_threads, timeout_sec=timeout_sec) as dec:
+        while idx <= max_needed:
+            raw = dec.read_frame()
+            if raw is None:
+                break
+            if idx in wanted:
+                captured[idx] = Image.frombytes("RGB", (width, height), raw)
+            idx += 1
+    return captured
+
+
 def verify_component_internal_roi_motion(
     final_mp4: str | Path,
     node_bindings: list[dict[str, Any]],
     *,
     source_mp4: str | Path | None = None,
     presenter_box_norm_by_frame: dict[int, list[float]] | None = None,
+    predecoded_fin_frames: dict[int, Image.Image] | None = None,
+    predecoded_src_frames: dict[int, Image.Image] | None = None,
     codec_noise_floor: float = 1.6,
     probe_w: int = 360,
     probe_h: int = 640,
     out_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """CMI-02 / CMI-09 / PED-08 pixel verifier: checks internal component ROI motion strictly EXCLUDING presenter/source-plate motion!
-
-    Catches frozen static components even when live presenter moves elsewhere on screen, rejects offscreen/invalid ROIs,
-    and supports source-plate delta subtraction when `source_mp4` is supplied.
-    """
+    """CMI-02 / CMI-09 / PED-08 / R4.1-05 pixel verifier: checks ALL internal component ROIs excluding presenter/source motion!"""
     fin_p = Path(final_mp4).resolve()
     if not fin_p.is_file():
         return {"schema_version": "kh03.component_pixel_qa.v1", "pass": False, "status": "MISSING_MP4", "nodes": []}
@@ -698,30 +724,24 @@ def verify_component_internal_roi_motion(
         ef = max(stf + 1, int(nb.get("end_frame", stf + 6)))
         needed_frames.update({max(0, sf - 2), sf, (sf + stf) // 2, stf, max(sf, ef - 2)})
 
-    captured: dict[int, Image.Image] = {}
-    src_captured: dict[int, Image.Image] = {}
-    max_needed = max(needed_frames) if needed_frames else 0
-    idx = 0
-    with StreamingRGBFrameDecoder(fin_p, probe_w, probe_h, ffmpeg_threads=2, timeout_sec=120.0) as dec:
-        while idx <= max_needed:
-            raw = dec.read_frame()
-            if raw is None:
-                break
-            if idx in needed_frames:
-                captured[idx] = Image.frombytes("RGB", (probe_w, probe_h), raw)
-            idx += 1
+    if predecoded_fin_frames is not None:
+        captured = {
+            f: (predecoded_fin_frames[f] if predecoded_fin_frames[f].size == (probe_w, probe_h) else predecoded_fin_frames[f].resize((probe_w, probe_h), Image.BILINEAR))
+            for f in needed_frames if f in predecoded_fin_frames
+        }
+    else:
+        captured = collect_streaming_qa_frames(fin_p, needed_frames, width=probe_w, height=probe_h)
 
     src_p = Path(source_mp4).resolve() if (source_mp4 and Path(source_mp4).is_file()) else None
-    if src_p is not None:
-        s_idx = 0
-        with StreamingRGBFrameDecoder(src_p, probe_w, probe_h, ffmpeg_threads=2, timeout_sec=120.0) as sdec:
-            while s_idx <= max_needed:
-                raw = sdec.read_frame()
-                if raw is None:
-                    break
-                if s_idx in needed_frames:
-                    src_captured[s_idx] = Image.frombytes("RGB", (probe_w, probe_h), raw)
-                s_idx += 1
+    if predecoded_src_frames is not None:
+        src_captured = {
+            f: (predecoded_src_frames[f] if predecoded_src_frames[f].size == (probe_w, probe_h) else predecoded_src_frames[f].resize((probe_w, probe_h), Image.BILINEAR))
+            for f in needed_frames if f in predecoded_src_frames
+        }
+    elif src_p is not None:
+        src_captured = collect_streaming_qa_frames(src_p, needed_frames, width=probe_w, height=probe_h)
+    else:
+        src_captured = {}
 
     results: list[dict[str, Any]] = []
     frozen_nodes: list[str] = []
@@ -858,6 +878,8 @@ def verify_hook_pixels(
     presenter_box_norm: list[float] | None = None,
     reveal_constraints: dict[str, Any] | None = None,
     intentional_static: bool | None = None,
+    predecoded_fin_frames: dict[int, Image.Image] | None = None,
+    predecoded_src_frames: dict[int, Image.Image] | None = None,
     codec_noise_floor: float = 1.8,
     out_dir: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -911,31 +933,25 @@ def verify_hook_pixels(
         min(h, max(2, int(round((ry + rh) * h)))),
     )
     sample_f = sorted({0, max(1, int(round(fps * 0.45))), max(2, int(round(fps * 1.25))), max(3, int(round(fps * 2.4)))})
-    max_f = max(sample_f)
 
-    imgs: dict[int, Image.Image] = {}
-    idx = 0
-    with StreamingRGBFrameDecoder(fin_p, w, h, ffmpeg_threads=2, timeout_sec=60.0) as dec:
-        while idx <= max_f:
-            raw = dec.read_frame()
-            if raw is None:
-                break
-            if idx in sample_f:
-                imgs[idx] = Image.frombytes("RGB", (w, h), raw)
-            idx += 1
+    if predecoded_fin_frames is not None:
+        imgs = {
+            f: (predecoded_fin_frames[f] if predecoded_fin_frames[f].size == (w, h) else predecoded_fin_frames[f].resize((w, h), Image.BILINEAR))
+            for f in sample_f if f in predecoded_fin_frames
+        }
+    else:
+        imgs = collect_streaming_qa_frames(fin_p, sample_f, width=w, height=h, timeout_sec=60.0)
 
-    src_imgs: dict[int, Image.Image] = {}
     src_p = Path(source_mp4).resolve() if (source_mp4 and Path(source_mp4).is_file()) else None
-    if src_p is not None:
-        s_idx = 0
-        with StreamingRGBFrameDecoder(src_p, w, h, ffmpeg_threads=2, timeout_sec=60.0) as sdec:
-            while s_idx <= max_f:
-                raw = sdec.read_frame()
-                if raw is None:
-                    break
-                if s_idx in sample_f:
-                    src_imgs[s_idx] = Image.frombytes("RGB", (w, h), raw)
-                s_idx += 1
+    if predecoded_src_frames is not None:
+        src_imgs = {
+            f: (predecoded_src_frames[f] if predecoded_src_frames[f].size == (w, h) else predecoded_src_frames[f].resize((w, h), Image.BILINEAR))
+            for f in sample_f if f in predecoded_src_frames
+        }
+    elif src_p is not None:
+        src_imgs = collect_streaming_qa_frames(src_p, sample_f, width=w, height=h, timeout_sec=60.0)
+    else:
+        src_imgs = {}
 
     def _crop_hook_roi(im: Image.Image) -> Image.Image:
         cr = im.crop(roi_px).copy()
@@ -1247,7 +1263,11 @@ window.gsap = (function(){
     const yp = props.yPercent !== undefined ? props.yPercent : 0;
     const sc = props.scale !== undefined ? props.scale : 1;
     if (props.x !== undefined || props.y !== undefined || props.yPercent !== undefined || props.scale !== undefined) {
-      el.style.transform = `translate(${tx}px, ${ty}px) translateY(${yp}%) scale(${sc})`;
+      if (tx === 0 && ty === 0 && yp === 0 && sc === 1) {
+        el.style.transform = 'none';
+      } else {
+        el.style.transform = `translate(${tx}px, ${ty}px) translateY(${yp}%) scale(${sc})`;
+      }
     }
   }
   function resolveEls(target) {
@@ -1267,6 +1287,17 @@ window.gsap = (function(){
         time(t) {
           curT = Number(t || 0);
           const sorted = ops.slice().sort((a, b) => a.at - b.at);
+          // Reset touched elements cleanly before replaying ops up to curT so reverse/repeat seeks are 100% deterministic!
+          const seen = new Set();
+          for (const op of sorted) {
+            for (const el of resolveEls(op.target)) {
+              if (!seen.has(el)) {
+                seen.add(el);
+                el.style.transform = '';
+                el.style.clipPath = '';
+              }
+            }
+          }
           const opState = new WeakMap();
           for (const op of sorted) {
             if (curT < op.at) continue;
@@ -1500,7 +1531,9 @@ async function runPass(plan) {
   const proc = spawn(chromePath, [
     `--remote-debugging-port=${port}`, `--user-data-dir=${udir}`,
     '--headless=new', '--disable-gpu', '--no-sandbox', '--hide-scrollbars',
-    '--mute-audio', '--force-device-scale-factor=1', `--window-size=${W},${H}`, 'about:blank'
+    '--mute-audio', '--force-device-scale-factor=1',
+    '--disable-lcd-text', '--font-render-hinting=none', '--disable-font-subpixel-positioning',
+    `--window-size=${W},${H}`, 'about:blank'
   ], { stdio: 'ignore' });
   let wsUrl = null;
   for (let i = 0; i < 60; i++) {
@@ -1540,8 +1573,9 @@ async function runPass(plan) {
       if (rr?.result?.value === true) break;
       await new Promise(r => setTimeout(r, 80));
     }
+    await send('Runtime.evaluate', { expression: `document.fonts ? document.fonts.ready.then(() => true) : true`, awaitPromise: true, returnByValue: true });
     for (const item of plan) {
-      await send('Runtime.evaluate', { expression: `window.__timelines.master.time(${item.t}).pause(); void document.body.offsetHeight; true;`, returnByValue: true });
+      await send('Runtime.evaluate', { expression: `new Promise(res => { window.__timelines.master.time(${item.t}).pause(); void document.body.offsetHeight; requestAnimationFrame(() => requestAnimationFrame(() => res(true))); })`, awaitPromise: true, returnByValue: true });
       const shot = await send('Page.captureScreenshot', { format: 'png', fromSurface: true });
       fs.writeFileSync(path.join(outDir, item.label + '.png'), Buffer.from(shot.data, 'base64'));
     }

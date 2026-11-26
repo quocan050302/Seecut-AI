@@ -14,6 +14,7 @@
     "schema_version": { "type": "string", "const": "kh03.selection.v1" },
     "run_id": { "type": "string", "minLength": 1 },
     "video_sha256": { "type": "string", "minLength": 16 },
+    "secondary_sources_sha256": { "type": ["string", "null"] },
     "script_sha256": { "type": "string", "minLength": 16 },
     "recommendation_sha256": { "type": "string", "minLength": 16 },
     "registry_version": { "type": "string", "minLength": 1 },

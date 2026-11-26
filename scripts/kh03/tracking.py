@@ -101,43 +101,80 @@ if let data = try? JSONSerialization.data(withJSONObject: results, options: []),
 """
 
 
-def resolve_detector_capabilities(*, allow_macos_vision: bool = True) -> dict[str, Any]:
-    """Audit available real local visual detectors with honest provenance, license, and capability status (PED-02)."""
-    is_macos = platform.system().lower() == "darwin"
+def resolve_detector_capabilities(*, allow_macos_vision: bool = True, out_dir: Path | None = None) -> dict[str, Any]:
+    """Audit available real local visual detectors with honest OS provenance, license & non-semantic motion limits (R4.1-04)."""
+    sys_low = platform.system().lower()
+    is_macos = sys_low == "darwin"
     swift_bin = shutil.which("swift") if (is_macos and allow_macos_vision) else None
     has_cv2 = False
+    cv2_ver = None
     has_mp = False
+    mp_ver = None
     try:
-        __import__("cv2")
+        mod_cv2 = __import__("cv2")
         has_cv2 = True
+        cv2_ver = getattr(mod_cv2, "__version__", "unknown")
     except Exception:
         pass
     try:
-        __import__("mediapipe")
+        mod_mp = __import__("mediapipe")
         has_mp = True
+        mp_ver = getattr(mod_mp, "__version__", "unknown")
     except Exception:
         pass
     primary = (
         "MACOS_VISION_DETECTOR" if swift_bin
         else ("OPENCV_DETECTOR" if has_cv2 else "NUMPY_STREAMING_MOTION_DETECTOR")
     )
-    return {
-        "schema_version": "kh03.detector_capabilities.v1",
+    if swift_bin:
+        cap_class = "SEMANTIC_FACE_HAND_TEXT_KEYFRAME_DETECTOR"
+        sem_obj_cls = True
+        roles = ["face", "hand", "screen_text", "motion_region"]
+        limits = [
+            "Apple Vision detects face rectangles, hand pose keypoints, and screen text on sampled keyframes; does NOT classify arbitrary physical objects.",
+            "Inter-keyframe intervals are temporally associated/interpolated, never labeled detector hits.",
+        ]
+    elif has_cv2:
+        cap_class = "OPENCV_LOCAL_NON_SEMANTIC_OR_CASCADE"
+        sem_obj_cls = False
+        roles = ["motion_region"]
+        limits = ["OpenCV installed without pinned semantic object weights; optical motion regions only."]
+    else:
+        cap_class = "MOTION_SALIENT_REGION_NON_SEMANTIC"
+        sem_obj_cls = False
+        roles = ["motion_region"]
+        limits = [
+            f"Apple Vision unavailable on OS={platform.system()}; no OpenCV/MediaPipe semantic weights installed.",
+            "NumPy/Pillow streaming motion detects luminance/pixel change clusters ONLY — NEVER claims semantic object identity (hands, envelopes, tools, devices).",
+        ]
+
+    caps = {
+        "schema_version": "kh03.detector_capabilities.v2",
+        "os": platform.system(),
+        "platform": platform.platform(),
         "primary_detector": primary,
+        "capability_class": cap_class,
+        "semantic_object_classification": sem_obj_cls,
         "macos_vision_available": bool(swift_bin),
+        "macos_vision_status": "AVAILABLE" if swift_bin else f"UNAVAILABLE_ON_{platform.system().upper()}",
         "swift_executable": swift_bin,
         "opencv_available": has_cv2,
+        "opencv_version": cv2_ver,
         "mediapipe_available": has_mp,
+        "mediapipe_version": mp_ver,
         "streaming_motion_available": True,
-        "supported_roles": (
-            ["face", "hand", "screen_text", "object", "motion_region"] if swift_bin
-            else ["motion_region", "screen_text", "object"]
-        ),
+        "offline_supported": True,
+        "supported_roles": roles,
+        "limitations": limits,
         "license_note": (
             "Apple macOS system Vision framework + local Pillow/NumPy streaming motion (zero unlicensed external weights)."
-            if swift_bin else "Local Pillow/NumPy streaming motion & edge saliency (zero external downloads)."
+            if swift_bin else "Local Pillow/NumPy streaming motion & edge saliency (zero external downloads; non-semantic motion clusters only)."
         ),
     }
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(out_dir / "DETECTOR_CAPABILITIES.json", caps)
+    return caps
 
 
 def _run_macos_vision_batch(
@@ -232,7 +269,7 @@ def detect_semantic_entities(
     ]
     raw_hits: list[dict[str, Any]] = list(valid_ext)
     detector_used = "INJECTED_VERIFIED_DETECTOR" if valid_ext else "NONE"
-    scene_cuts: list[int] = []
+    scene_cuts: list[int] = [int(c) for c in (source_media.get("scene_cuts") or [])]
     scan_samples: list[dict[str, Any]] = []
 
     vp = Path(video_path).resolve() if (video_path and Path(video_path).is_file()) else None
@@ -268,8 +305,9 @@ def detect_semantic_entities(
                         "frame": int(s["frame"]),
                         "time_sec": float(s["time_sec"]),
                         "track_id": "mot_region_01",
-                        "object_class": "interaction_region" if not is_faceless else "faceless_active_subject",
-                        "role": "object" if is_faceless else "motion_region",
+                        "object_class": "motion_salient_region_non_semantic",
+                        "role": "motion_region",
+                        "semantic_classification_verified": False,
                         "bbox_norm": list(bb),
                         "confidence": round(_clamp(0.55 + float(s["peak_cell_energy"]) / 85.0, 0.40, 0.85), 3),
                         "verified_detector": False,
@@ -277,43 +315,50 @@ def detect_semantic_entities(
                         "provider_version": TRACKER_VERSION,
                     })
 
-    # Group into canonical versioned tracked_entity records with honest uncertainty & pre-cropped detection
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for h in raw_hits:
-        role = str(h.get("role") or h.get("object_class") or "object").lower()
-        key = str(h.get("track_id") or f"ent_{role}")
-        # Merge same-role detections per track stably
-        if detector_used == "MACOS_VISION_DETECTOR":
-            key = f"ent_{role}"
-        grouped.setdefault(key, []).append(h)
+    # Per-instance temporal association with scene-cut resets (R4.1-04: never merges distinct instances by role!)
+    grouped = _associate_temporal_instances(raw_hits, scene_cuts=scene_cuts)
 
     entities: list[dict[str, Any]] = []
     for eid in sorted(grouped.keys()):
         hits = sorted(grouped[eid], key=lambda x: int(x.get("frame", 0)))
-        role = str(hits[0].get("role") or hits[0].get("object_class") or "object").lower()
+        role = str(hits[0].get("role") or hits[0].get("object_class") or "motion_region").lower()
         x0 = _clamp(min(float(x["bbox_norm"][0]) for x in hits), 0.0, 0.98)
         y0 = _clamp(min(float(x["bbox_norm"][1]) for x in hits), 0.0, 0.98)
         x1 = _clamp(max(float(x["bbox_norm"][0]) + float(x["bbox_norm"][2]) for x in hits), x0 + 0.02, 1.0)
         y1 = _clamp(max(float(x["bbox_norm"][1]) + float(x["bbox_norm"][3]) for x in hits), y0 + 0.02, 1.0)
         mean_c = round(sum(float(x.get("confidence", 0.65)) for x in hits) / len(hits), 3)
-        # Detect if source itself crops the entity against frame borders
         source_pre_cropped = (x0 <= 0.015 or y0 <= 0.015 or x1 >= 0.985 or y1 >= 0.985)
         imp = 1.0 if role in ("face", "hand", "hands", "mouth") else (0.9 if role in ("screen_text", "screen", "object") else 0.75)
+        f_first = int(hits[0].get("frame", 0))
+        f_last = int(hits[-1].get("frame", nb_frames - 1))
+        span_len = max(1, (f_last - f_first) + 1)
+        obs_cnt = len({int(x.get("frame", 0)) for x in hits})
+        interp_cnt = max(0, span_len - obs_cnt)
+        unk_cnt = max(0, nb_frames - span_len)
         entities.append({
             "id": eid,
             "role": "hand" if role == "hands" else role,
-            "time_span": [round(int(hits[0].get("frame", 0)) / max(1.0, fps), 4), round((int(hits[-1].get("frame", nb_frames - 1)) + 1) / max(1.0, fps), 4)],
-            "frame_span": [int(hits[0].get("frame", 0)), int(hits[-1].get("frame", nb_frames - 1)) + 1],
+            "semantic_class": str(hits[0].get("object_class") or role),
+            "scene_id": int(hits[0].get("scene_id", 0)),
+            "time_span": [round(f_first / max(1.0, fps), 4), round((f_last + 1) / max(1.0, fps), 4)],
+            "frame_span": [f_first, f_last + 1],
             "bbox_norm": [round(x0, 4), round(y0, 4), round(x1 - x0, 4), round(y1 - y0, 4)],
             "coordinate_space": "SOURCE_NORMALIZED_TOP_LEFT",
             "source": str(hits[0].get("provider") or detector_used),
+            "capability_class": caps["capability_class"] if not any(x.get("verified_detector") for x in hits) else "VERIFIED_DETECTOR_OBSERVATIONS",
             "verified_detector": bool(any(x.get("verified_detector") for x in hits)),
             "confidence": mean_c,
             "occlusion": 0.0,
             "semantic_importance": imp,
             "uncertainty": round(max(0.01, (1.0 - mean_c) * 0.08), 4),
-            "estimated": len(hits) < nb_frames,
+            "estimated": obs_cnt < nb_frames,
             "source_pre_cropped": source_pre_cropped,
+            "temporal_coverage": {
+                "observed_frame_count": obs_cnt,
+                "interpolated_frame_count": interp_cnt,
+                "unknown_frame_count": unk_cnt,
+                "observed_coverage_ratio": round(obs_cnt / float(max(1, nb_frames)), 4),
+            },
             "observations": [
                 {"frame": int(x.get("frame", 0)), "bbox_norm": [round(float(v), 4) for v in x["bbox_norm"]], "confidence": round(float(x.get("confidence", 0.65)), 3)}
                 for x in hits
@@ -321,9 +366,11 @@ def detect_semantic_entities(
         })
 
     return {
-        "schema_version": "kh03.tracked_entities.v1",
+        "schema_version": "kh03.tracked_entities.v2",
         "detector_capabilities": caps,
         "detector_used": detector_used,
+        "capability_class": caps["capability_class"],
+        "sampling_mode": "ADAPTIVE_KEYFRAME_SAMPLED" if len(scan_samples) < nb_frames else "FULL_FRAME",
         "scene_cuts": scene_cuts,
         "scan_samples": scan_samples,
         "raw_hits": raw_hits,
@@ -380,6 +427,113 @@ def _rect_intersection_area(a: list[float], b: list[float]) -> float:
     return (ix1 - ix0) * (iy1 - iy0)
 
 
+def _box_iou_norm(a: list[float], b: list[float]) -> float:
+    inter = _rect_intersection_area(a, b)
+    if inter <= 0.0:
+        return 0.0
+    union = max(1e-9, a[2] * a[3] + b[2] * b[3] - inter)
+    return inter / union
+
+
+def _associate_temporal_instances(
+    raw_hits: list[dict[str, Any]],
+    *,
+    scene_cuts: list[int],
+    max_gap_frames: int = 48,
+) -> dict[str, list[dict[str, Any]]]:
+    """Per-instance temporal association respecting scene-cut resets (never merges distinct hands/faces into 1 giant box!)."""
+    cuts_sorted = sorted(set(int(c) for c in scene_cuts if int(c) > 0))
+
+    def _scene_id(fidx: int) -> int:
+        sid = 0
+        for c in cuts_sorted:
+            if fidx >= c:
+                sid += 1
+        return sid
+
+    # Explicit pre-labeled track_ids stay distinct per scene segment
+    hits_sorted = sorted(raw_hits, key=lambda h: (int(h.get("frame", 0)), str(h.get("role") or ""), float((h.get("bbox_norm") or [0])[0])))
+    tracks: dict[str, list[dict[str, Any]]] = {}
+    track_meta: dict[str, dict[str, Any]] = {}
+    role_counters: dict[str, int] = {}
+
+    for h in hits_sorted:
+        fidx = int(h.get("frame", 0))
+        sid = _scene_id(fidx)
+        role = str(h.get("role") or h.get("object_class") or "motion_region").lower()
+        if role == "hands":
+            role = "hand"
+        bb = [float(v) for v in h["bbox_norm"]]
+        cx, cy = bb[0] + bb[2] * 0.5, bb[1] + bb[3] * 0.5
+        explicit_tid = h.get("track_id")
+
+        # If caller gave an explicit distinct verified track_id (not auto-generated vis_role_idx), honor per scene!
+        if explicit_tid and not str(explicit_tid).startswith("vis_"):
+            key = f"{explicit_tid}_s{sid}" if sid > 0 else str(explicit_tid)
+            tracks.setdefault(key, []).append({**h, "scene_id": sid})
+            track_meta[key] = {"role": role, "scene_id": sid, "last_frame": fidx, "last_bbox": bb, "cx": cx, "cy": cy}
+            continue
+
+        # Match to best active track of same role in SAME scene_id (strict scene-cut reset!)
+        best_key: str | None = None
+        best_score = -1.0
+        for tid_k, meta in track_meta.items():
+            if meta["role"] != role or meta["scene_id"] != sid:
+                continue
+            dt = fidx - int(meta["last_frame"])
+            if dt <= 0 or dt > max_gap_frames:
+                continue
+            iou = _box_iou_norm(bb, meta["last_bbox"])
+            dist = math.hypot(cx - meta["cx"], cy - meta["cy"])
+            if iou >= 0.15 or dist <= 0.18:
+                sc = iou * 2.0 + max(0.0, 0.25 - dist)
+                if sc > best_score:
+                    best_score = sc
+                    best_key = tid_k
+
+        if best_key is None:
+            role_counters[role] = role_counters.get(role, 0) + 1
+            best_key = f"trk_{role}_{role_counters[role]:02d}"
+        tracks.setdefault(best_key, []).append({**h, "scene_id": sid})
+        track_meta[best_key] = {"role": role, "scene_id": sid, "last_frame": fidx, "last_bbox": bb, "cx": cx, "cy": cy}
+
+    return tracks
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[0] + a[2], b[0] + b[2]), min(a[1] + a[3], b[1] + b[3])
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    return (ix1 - ix0) * (iy1 - iy0)
+
+
+def _map_src_span_via_edl(sf: int, ef: int, edl: dict[str, Any] | None) -> tuple[int, int] | None:
+    """Map source frame span [sf, ef) onto output EDL frame span; returns None if completely trimmed out."""
+    if not edl or not edl.get("segments"):
+        return sf, ef
+    lo, hi = None, None
+    for seg in edl["segments"]:
+        s0, s1 = int(seg["src_start_frame"]), int(seg["src_end_frame"])
+        o0 = int(seg["out_start_frame"])
+        ov0, ov1 = max(sf, s0), min(ef, s1)
+        if ov1 > ov0:
+            ms, me = o0 + (ov0 - s0), o0 + (ov1 - s0)
+            lo = ms if lo is None else min(lo, ms)
+            hi = me if hi is None else max(hi, me)
+    if lo is None or hi is None or hi <= lo:
+        return None
+    return lo, hi
+
+
+def _map_out_frame_to_src(out_f: int, edl: dict[str, Any] | None) -> int:
+    if not edl or not edl.get("segments"):
+        return out_f
+    for seg in edl["segments"]:
+        o0, o1 = int(seg["out_start_frame"]), int(seg["out_end_frame"])
+        s0 = int(seg["src_start_frame"])
+        if o0 <= out_f < o1:
+            return s0 + (out_f - o0)
+    return out_f
+
+
 def evaluate_action_visibility(
     final_mp4: str | Path | None,
     protection_windows: list[dict[str, Any]],
@@ -387,15 +541,24 @@ def evaluate_action_visibility(
     layout_plan: dict[str, Any] | None = None,
     overlay_boxes: list[dict[str, Any]] | None = None,
     source_mp4: str | Path | None = None,
+    edl: dict[str, Any] | None = None,
+    require_edl_mapping: bool = False,
     min_retained_area: float = 0.95,
     max_overlay_coverage: float = 0.05,
     out_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Final-pixel & exact crop-transform action visibility gate (PED-02): enforces >=95% retained area & <=5% overlay coverage."""
+    """Final-pixel & exact crop-transform action visibility gate (R4.1-04 / PED-02).
+
+    - Synchronizes source protection windows through EDL source->output PTS mapping (`BLOCKED_CLOCK_MAPPING` if mismatched/absent).
+    - Evaluates actual transformed crop/split/PIP geometry AND pixel compositing across ALL layouts.
+    - Distinguishes `VERIFIED_ACTION_PROTECTION` (>=0.95 retained & <=0.05 overlay on verified tracks) from
+      `SAFE_FALLBACK_GEOMETRY_ONLY` (unverified conservative placeholders — NEVER silently certified as detector-verified!).
+    """
     if not protection_windows:
         rep = {
-            "schema_version": "kh03.action_protection.v1",
+            "schema_version": "kh03.action_protection.v2",
             "status": "NOT_APPLICABLE_NO_CRITICAL_REGIONS",
+            "certification": "NOT_APPLICABLE_NO_CRITICAL_REGIONS",
             "windows_checked": 0,
             "violations": [],
             "pass": True,
@@ -405,45 +568,101 @@ def evaluate_action_visibility(
             write_json_atomic(Path(out_dir) / "ACTION_PROTECTION.json", rep)
         return rep
 
+    # Verify EDL source->output clock mapping before pixel comparison!
+    if require_edl_mapping and not (isinstance(edl, dict) and edl.get("segments")):
+        rep_blk = {
+            "schema_version": "kh03.action_protection.v2",
+            "status": "BLOCKED_CLOCK_MAPPING",
+            "certification": "BLOCKED_CLOCK_MAPPING",
+            "pixel_level_verified": False,
+            "windows_checked": 0,
+            "violations": [{"window_id": "CLOCK", "role": "edl", "reason": "Missing EDL source->output PTS mapping."}],
+            "pass": False,
+        }
+        if out_dir is not None:
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            write_json_atomic(Path(out_dir) / "ACTION_PROTECTION.json", rep_blk)
+        return rep_blk
+
     beats = (layout_plan or {}).get("beats") or []
     overlays = list(overlay_boxes or [])
     checked: list[dict[str, Any]] = []
     violations: list[dict[str, Any]] = []
 
-    # Optional final-pixel occlusion check if both final_mp4 and source_mp4 are supplied
-    pixel_checked = False
+    # Map every window onto output clock via EDL
+    mapped_windows: list[tuple[dict[str, Any], int, int]] = []
+    for w in protection_windows:
+        sf_src, ef_src = int(w["start_frame"]), int(w["end_frame"])
+        sp_out = _map_src_span_via_edl(sf_src, ef_src, edl)
+        if sp_out is not None:
+            mapped_windows.append((w, sp_out[0], sp_out[1]))
+
     fin_frames: dict[int, Image.Image] = {}
     src_frames: dict[int, Image.Image] = {}
-    sample_f_set: set[int] = set()
-    for w in protection_windows:
-        sf, ef = int(w["start_frame"]), int(w["end_frame"])
-        sample_f_set.update({sf, (sf + ef) // 2, max(sf, ef - 1)})
+    out_sample_set: set[int] = set()
+    src_sample_set: set[int] = set()
+    for _w, sf_o, ef_o in mapped_windows:
+        for f_o in (sf_o, (sf_o + ef_o) // 2, max(sf_o, ef_o - 1)):
+            out_sample_set.add(f_o)
+            src_sample_set.add(_map_out_frame_to_src(f_o, edl))
+
     pw, ph = 270, 480
-    if final_mp4 and Path(final_mp4).is_file() and source_mp4 and Path(source_mp4).is_file() and sample_f_set:
-        pixel_checked = True
-        max_f = max(sample_f_set)
-        for path_obj, target_dict in ((Path(final_mp4), fin_frames), (Path(source_mp4), src_frames)):
+    clock_mismatch = False
+    if final_mp4 and Path(final_mp4).is_file() and source_mp4 and Path(source_mp4).is_file() and out_sample_set:
+        # Check whether source vs final lengths diverge without an EDL mapping!
+        if not (isinstance(edl, dict) and edl.get("segments")):
+            from .visual_qa import _probe_video_meta
+            try:
+                sm = _probe_video_meta(Path(source_mp4))
+                fm = _probe_video_meta(Path(final_mp4))
+                if sm.get("nb_frames") and fm.get("nb_frames") and abs(int(sm["nb_frames"]) - int(fm["nb_frames"])) > 2:
+                    clock_mismatch = True
+            except Exception:
+                pass
+
+        if clock_mismatch:
+            rep_cm = {
+                "schema_version": "kh03.action_protection.v2",
+                "final_mp4_sha256": hash_artifact(Path(final_mp4)),
+                "status": "BLOCKED_CLOCK_MAPPING",
+                "certification": "BLOCKED_CLOCK_MAPPING",
+                "pixel_level_verified": False,
+                "windows_checked": 0,
+                "violations": [{"window_id": "CLOCK", "role": "edl", "reason": "Source and final frame counts diverge with no EDL mapping supplied."}],
+                "pass": False,
+            }
+            if out_dir is not None:
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+                write_json_atomic(Path(out_dir) / "ACTION_PROTECTION.json", rep_cm)
+            return rep_cm
+
+        for path_obj, target_dict, wanted_set in (
+            (Path(final_mp4), fin_frames, out_sample_set),
+            (Path(source_mp4), src_frames, src_sample_set),
+        ):
+            max_f = max(wanted_set)
             idx = 0
             with StreamingRGBFrameDecoder(path_obj, pw, ph, ffmpeg_threads=2, timeout_sec=90.0) as dec:
                 while idx <= max_f:
                     raw = dec.read_frame()
                     if raw is None:
                         break
-                    if idx in sample_f_set:
+                    if idx in wanted_set:
                         target_dict[idx] = Image.frombytes("RGB", (pw, ph), raw)
                     idx += 1
 
-    for w in protection_windows:
-        sf, ef = int(w["start_frame"]), int(w["end_frame"])
+    pixel_samples_evaluated = 0
+    any_unverified_placeholder = False
+
+    for w, sf, ef in mapped_windows:
         mid_f = (sf + ef) // 2
         src_box = [float(v) for v in w["protected_bbox_norm"]]
         area_src = max(1e-6, src_box[2] * src_box[3])
-        is_conservative_placeholder = bool(
-            str(w.get("entity_id") or "").endswith("_conservative") and not w.get("verified_detector")
-        )
+        is_verified = bool(w.get("verified_detector") is True)
+        is_conservative_placeholder = bool(not is_verified)
+        if is_conservative_placeholder:
+            any_unverified_placeholder = True
 
-        # Evaluate EVERY layout beat slice overlapping [sf, ef) so overlays are ONLY checked
-        # against the presenter geometry active AT THE SAME TIME (never cross-beat false positives!)
         overlapping_beats = [b for b in beats if int(b["end_frame"]) > sf and int(b["start_frame"]) < ef]
         if not overlapping_beats:
             overlapping_beats = [{"start_frame": sf, "end_frame": ef, "layout_mode": "FULL_CANVAS", "presenter_box_norm": [0.0, 0.0, 1.0, 1.0]}]
@@ -458,9 +677,10 @@ def evaluate_action_visibility(
             be = min(ef, int(b["end_frame"]))
             if be <= bs:
                 continue
+            p_box = [float(v) for v in b.get("presenter_box_norm", [0.0, 0.0, 1.0, 1.0])]
+            crop = None
             if isinstance(b.get("source_crop"), dict) and b["source_crop"].get("crop_rect_norm"):
                 crop = [float(v) for v in b["source_crop"]["crop_rect_norm"]]
-                p_box = [float(v) for v in b.get("presenter_box_norm", [0.0, 0.0, 1.0, 1.0])]
                 inter_crop = _rect_intersection_area(src_box, crop)
                 b_retained = round(inter_crop / area_src, 4)
                 vx0 = max(src_box[0], crop[0])
@@ -477,7 +697,12 @@ def evaluate_action_visibility(
                     c_box = [0.0, 0.0, 0.0, 0.0]
             else:
                 b_retained = 1.0
-                c_box = list(src_box)
+                c_box = [
+                    round(p_box[0] + src_box[0] * p_box[2], 4),
+                    round(p_box[1] + src_box[1] * p_box[3], 4),
+                    round(src_box[2] * p_box[2], 4),
+                    round(src_box[3] * p_box[3], 4),
+                ]
 
             if b_retained < worst_retained:
                 worst_retained = b_retained
@@ -497,30 +722,59 @@ def evaluate_action_visibility(
                         worst_ov_cov = cov
                         worst_canvas_box = c_box
 
-            if pixel_checked and bs <= mid_f < be and mid_f in fin_frames and mid_f in src_frames and b.get("layout_mode") in ("FULL_CANVAS", "FULL_SCREEN_RETURN"):
-                bx0 = max(0, int(c_box[0] * pw))
-                by0 = max(0, int(c_box[1] * ph))
-                bx1 = min(pw, max(bx0 + 2, int((c_box[0] + c_box[2]) * pw)))
-                by1 = min(ph, max(by0 + 2, int((c_box[1] + c_box[3]) * ph)))
-                diff_im = ImageChops.difference(fin_frames[mid_f].crop((bx0, by0, bx1, by1)), src_frames[mid_f].crop((bx0, by0, bx1, by1))).convert("L")
+            # Pixel comparison supporting BOTH FULL_CANVAS AND split/PIP/inset transforms via registered crop+resize!
+            src_mid = _map_out_frame_to_src(mid_f, edl)
+            if bs <= mid_f < be and mid_f in fin_frames and src_mid in src_frames and c_box[2] > 0.02 and c_box[3] > 0.02:
+                fin_im = fin_frames[mid_f]
+                src_im = src_frames[src_mid]
+                if crop is not None:
+                    scx0 = max(0, int(round(crop[0] * pw)))
+                    scy0 = max(0, int(round(crop[1] * ph)))
+                    scx1 = min(pw, max(scx0 + 4, int(round((crop[0] + crop[2]) * pw))))
+                    scy1 = min(ph, max(scy0 + 4, int(round((crop[1] + crop[3]) * ph))))
+                    pb_w = max(4, int(round(p_box[2] * pw)))
+                    pb_h = max(4, int(round(p_box[3] * ph)))
+                    reg_src = src_im.crop((scx0, scy0, scx1, scy1)).resize((pb_w, pb_h), Image.BILINEAR)
+                    pb_x0 = max(0, int(round(p_box[0] * pw)))
+                    pb_y0 = max(0, int(round(p_box[1] * ph)))
+                    reg_fin = fin_im.crop((pb_x0, pb_y0, min(pw, pb_x0 + pb_w), min(ph, pb_y0 + pb_h))).resize((pb_w, pb_h), Image.BILINEAR)
+                    rx0 = max(0, int(round((c_box[0] - p_box[0]) / max(1e-6, p_box[2]) * pb_w)))
+                    ry0 = max(0, int(round((c_box[1] - p_box[1]) / max(1e-6, p_box[3]) * pb_h)))
+                    rx1 = min(pb_w, max(rx0 + 2, int(round((c_box[0] + c_box[2] - p_box[0]) / max(1e-6, p_box[2]) * pb_w))))
+                    ry1 = min(pb_h, max(ry0 + 2, int(round((c_box[1] + c_box[3] - p_box[1]) / max(1e-6, p_box[3]) * pb_h))))
+                    diff_im = ImageChops.difference(reg_fin.crop((rx0, ry0, rx1, ry1)), reg_src.crop((rx0, ry0, rx1, ry1))).convert("L")
+                else:
+                    bx0 = max(0, int(c_box[0] * pw))
+                    by0 = max(0, int(c_box[1] * ph))
+                    bx1 = min(pw, max(bx0 + 2, int((c_box[0] + c_box[2]) * pw)))
+                    by1 = min(ph, max(by0 + 2, int((c_box[1] + c_box[3]) * ph)))
+                    diff_im = ImageChops.difference(fin_im.crop((bx0, by0, bx1, by1)), src_im.crop((bx0, by0, bx1, by1))).convert("L")
                 hist = diff_im.histogram()
                 total_px = max(1, sum(hist))
                 changed_px = sum(hist[28:])
                 pixel_diff_ratio = round(changed_px / float(total_px), 4)
+                pixel_samples_evaluated += 1
                 worst_ov_cov = max(worst_ov_cov, pixel_diff_ratio)
 
         retained = worst_retained
         ov_cov = worst_ov_cov
         canvas_box = worst_canvas_box
 
-        # Real tracked/explicit entities enforce strict >=95% retention; unverified full-width conservative
-        # placeholders still enforce strict <=5% overlay coverage and core visibility without blocking split layouts.
-        eff_min_ret = 0.50 if is_conservative_placeholder else (0.85 if w.get("source_pre_cropped") else min_retained_area)
-        win_ok = (retained >= eff_min_ret) and (ov_cov <= max_overlay_coverage)
+        # R4.1-04: STRICT >=0.95 retained & <=0.05 overlay for verified tracks! NO silent 0.50/0.85 PASS downgrade!
+        if is_verified:
+            win_ok = (retained >= min_retained_area) and (ov_cov <= max_overlay_coverage)
+            win_cert = "VERIFIED_AVAILABLE_PORTION_SOURCE_PRE_CROPPED" if w.get("source_pre_cropped") else "VERIFIED_ACTION_PROTECTION"
+        else:
+            # Unverified conservative placeholders check overlay clearance strictly and NEVER claim VERIFIED_ACTION_PROTECTION!
+            win_ok = (ov_cov <= max_overlay_coverage) and (retained >= min_retained_area or str(w.get("entity_id") or "").endswith("_conservative"))
+            win_cert = "SAFE_FALLBACK_GEOMETRY_ONLY"
+
         rec = {
             "window_id": w["window_id"],
             "role": w["role"],
             "frame_span": [sf, ef],
+            "verified_detector": is_verified,
+            "certification": win_cert,
             "retained_visible_area_ratio": retained,
             "overlay_coverage_ratio": ov_cov,
             "pixel_occlusion_ratio": pixel_diff_ratio,
@@ -534,21 +788,34 @@ def evaluate_action_visibility(
                 "window_id": w["window_id"],
                 "role": w["role"],
                 "reason": (
-                    f"ACTION_CROPPED(retained={retained:.3f}<{eff_min_ret})" if retained < eff_min_ret
+                    f"ACTION_CROPPED(retained={retained:.3f}<{min_retained_area})" if retained < min_retained_area
                     else f"ACTION_OCCLUDED_BY_OVERLAY(coverage={ov_cov:.3f}>{max_overlay_coverage})"
                 ),
             })
 
+    if violations:
+        overall_st = "FAIL"
+        cert = "ACTION_PROTECTION_FAILED"
+    elif any_unverified_placeholder:
+        overall_st = "SAFE_FALLBACK_GEOMETRY_ONLY"
+        cert = "SAFE_FALLBACK_GEOMETRY_ONLY_PENDING_DETECTOR"
+    else:
+        overall_st = "PASS"
+        cert = "VERIFIED_ACTION_PROTECTION"
+
     rep = {
-        "schema_version": "kh03.action_protection.v1",
+        "schema_version": "kh03.action_protection.v2",
         "final_mp4_sha256": hash_artifact(Path(final_mp4)) if (final_mp4 and Path(final_mp4).is_file()) else None,
-        "pixel_level_verified": pixel_checked,
+        "pixel_level_verified": pixel_samples_evaluated > 0,
+        "pixel_samples_evaluated": pixel_samples_evaluated,
+        "edl_mapped": bool(isinstance(edl, dict) and edl.get("segments")),
         "min_retained_area_policy": min_retained_area,
         "max_overlay_coverage_policy": max_overlay_coverage,
+        "certification": cert,
         "windows_checked": len(checked),
         "windows": checked,
         "violations": violations,
-        "status": "PASS" if len(violations) == 0 else "FAIL",
+        "status": overall_st,
         "pass": len(violations) == 0,
     }
     if out_dir is not None:
@@ -1189,6 +1456,7 @@ def analyze_subject_object_tracks(
     if run_dir is not None:
         adir = run_dir / "analysis"
         adir.mkdir(parents=True, exist_ok=True)
+        resolve_detector_capabilities(out_dir=adir)
         write_json_atomic(adir / "TRACKING_PROVENANCE.json", provenance)
         write_json_atomic(adir / "TRACKING_CONFIDENCE_REPORT.json", conf_report)
         write_json_atomic(adir / "TRACKS.json", {

@@ -192,10 +192,123 @@ def ensure_run_tree(run_dir: Path) -> Path:
     for sub in (
         "logs", "evidence", "analysis", "selection", "research", "assets",
         "layouts", "build", "qc", "tests", "stems", "exports", "manifests", "cache",
-        "staging", "STAGE_RECEIPTS",
+        "staging", "candidates", "STAGE_RECEIPTS",
     ):
         (r / sub).mkdir(parents=True, exist_ok=True)
     return r
+
+
+_PLACEHOLDER_PERM_RE = re.compile(
+    r"(?i)^(?:ok|yes|true|approved|approved_ok|test|dummy|placeholder|fake|bypass|none|n/a|12345678\d*)$"
+)
+
+
+def verify_commercial_permission_evidence(
+    evidence: Any,
+    *,
+    expected_upstream_sha: str | None = None,
+) -> dict[str, Any]:
+    """Fail-closed verifier for written commercial authorization receipts (R4.1-02 / PROBLEM-01).
+
+    Rejects arbitrary free-form strings (even len >= 8). Requires a structured JSON receipt
+    (dict or path to non-symlink JSON file) containing verified licensor, scope, upstream pin,
+    issued_at_utc, non-expired expiry, non-placeholder written_authorization_ref,
+    verified_by_owner=True, and matching receipt_sha256 (when present).
+    """
+    from . import UPSTREAM_SEECUT_SHA
+
+    want_pin = (expected_upstream_sha or UPSTREAM_SEECUT_SHA)[:7].lower()
+    if evidence is None:
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Missing commercial_permission_evidence.", "receipt_sha256": None}
+
+    doc: dict[str, Any] | None = None
+    source_path: str | None = None
+    if isinstance(evidence, dict):
+        doc = dict(evidence)
+    elif isinstance(evidence, (str, Path)):
+        raw_s = str(evidence).strip()
+        if not raw_s or _PLACEHOLDER_PERM_RE.match(raw_s):
+            return {
+                "verified": False,
+                "status": "BLOCKED_COMMERCIAL_LICENSE",
+                "reason": f"Unstructured or placeholder commercial_permission_evidence rejected ({raw_s[:32]!r}).",
+                "receipt_sha256": None,
+            }
+        # Reject plain non-JSON free-form strings (even if len >= 8!)
+        if raw_s.startswith("{"):
+            try:
+                parsed = json.loads(raw_s)
+                if isinstance(parsed, dict):
+                    doc = parsed
+            except Exception as ex:
+                return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Malformed JSON permission receipt: {ex}", "receipt_sha256": None}
+        else:
+            p = Path(raw_s)
+            if p.is_symlink():
+                return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Symlink commercial permission receipt rejected.", "receipt_sha256": None}
+            if not p.is_file():
+                return {
+                    "verified": False,
+                    "status": "BLOCKED_COMMERCIAL_LICENSE",
+                    "reason": "Free-form string commercial_permission_evidence rejected: supply a verified structured JSON permission receipt file.",
+                    "receipt_sha256": None,
+                }
+            try:
+                loaded = parse_json_strict(p)
+                if isinstance(loaded, dict):
+                    doc = loaded
+                    source_path = str(p.resolve())
+            except Exception as ex:
+                return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Invalid permission receipt file: {ex}", "receipt_sha256": None}
+    else:
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Unsupported commercial_permission_evidence type.", "receipt_sha256": None}
+
+    if not isinstance(doc, dict):
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Commercial permission receipt must be a JSON object.", "receipt_sha256": None}
+
+    licensor = str(doc.get("licensor") or "").strip()
+    scope = str(doc.get("scope") or "").strip()
+    pin = str(doc.get("upstream_pin") or "").strip().lower()
+    issued = str(doc.get("issued_at_utc") or "").strip()
+    expires = str(doc.get("expires_at_utc") or "").strip()
+    auth_ref = str(doc.get("written_authorization_ref") or "").strip()
+    owner_ok = is_strict_bool(doc.get("verified_by_owner")) and bool(doc.get("verified_by_owner"))
+
+    if not any(tok in licensor.lower() for tok in ("yeje-cpu", "aiesecxuanli@gmail.com")):
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Unrecognized licensor {licensor!r}; must authorize YeJe-cpu (aiesecxuanli@gmail.com).", "receipt_sha256": None}
+    if len(scope) < 8 or _PLACEHOLDER_PERM_RE.match(scope):
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Commercial permission receipt missing concrete scope.", "receipt_sha256": None}
+    if not pin.startswith(want_pin):
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Commercial permission upstream_pin {pin!r} does not match pinned {want_pin!r}.", "receipt_sha256": None}
+    if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", issued):
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Invalid issued_at_utc {issued!r}.", "receipt_sha256": None}
+    if expires:
+        if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", expires):
+            return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Invalid expires_at_utc {expires!r}.", "receipt_sha256": None}
+        if expires < now_utc():
+            return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Commercial permission receipt expired at {expires}.", "receipt_sha256": None}
+    if len(auth_ref) < 8 or _PLACEHOLDER_PERM_RE.match(auth_ref) or "test_only" in auth_ref.lower():
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Missing or placeholder written_authorization_ref.", "receipt_sha256": None}
+    if not owner_ok:
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Commercial permission receipt lacks verified_by_owner=true.", "receipt_sha256": None}
+    if doc.get("test_only") is True:
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "TEST_ONLY permission receipt cannot authorize commercial execution.", "receipt_sha256": None}
+
+    body_for_hash = {k: v for k, v in doc.items() if k != "receipt_sha256"}
+    computed_sha = hash_artifact(body_for_hash)
+    if doc.get("receipt_sha256") and str(doc["receipt_sha256"]) != computed_sha:
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Tampered commercial permission receipt_sha256 mismatch.", "receipt_sha256": None}
+
+    return {
+        "verified": True,
+        "status": "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED",
+        "reason": f"Verified structured commercial authorization receipt ({auth_ref[:40]}).",
+        "receipt_sha256": computed_sha,
+        "source_path": source_path,
+        "licensor": licensor,
+        "scope": scope,
+        "upstream_pin": pin,
+    }
 
 
 __all__ = [
@@ -235,5 +348,6 @@ __all__ = [
     "sanitize_untrusted_text",
     "transition_state",
     "validate_kh03_schema",
+    "verify_commercial_permission_evidence",
     "write_json_atomic",
 ]

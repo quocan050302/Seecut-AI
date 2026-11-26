@@ -455,9 +455,14 @@ def acquire_and_bind_footage(
     intended_purpose: str = "NONCOMMERCIAL_ONLY",
     workers: int = 2,
     offline: bool = True,
+    ctx: Any | None = None,
 ) -> dict[str, Any]:
     """End-to-end KH-03 footage planning, rights validation, caching, beat binding & artifact emission."""
+    if ctx is not None:
+        ctx.check_cancelled()
     needs = plan_visual_evidence_needs(semantic_graph, skill_id, constraints=constraints)
+    if ctx is not None:
+        ctx.check_cancelled()
     q_res = query_footage_candidates(
         needs,
         local_libraries=local_libraries,
@@ -542,20 +547,16 @@ def acquire_and_bind_footage(
     }
     assert_kh03_schema(manifest, "footage_manifest")
 
-    # Emit all Section 07 footage & rights artifacts
+    # Emit all Section 07 footage & rights artifacts (strictly through CoordinatorPublisher when ctx supplied!)
     assets_dir = run_dir / "assets"
-    assets_dir.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(assets_dir / "FOOTAGE_QUERY_PLAN.json", {"run_id": run_id, "skill_id": skill_id, "needs": needs})
-    write_json_atomic(assets_dir / "FOOTAGE_CANDIDATES.json", {"run_id": run_id, "candidates": candidates, "rejected": rejected})
-    write_json_atomic(assets_dir / "FOOTAGE_MANIFEST.json", manifest)
-    write_json_atomic(assets_dir / "ASSET_CACHE_MANIFEST.json", {
+    query_doc = {"run_id": run_id, "skill_id": skill_id, "needs": needs}
+    cands_doc = {"run_id": run_id, "candidates": candidates, "rejected": rejected}
+    cache_doc = {
         "schema_version": "kh03.asset_cache.v1",
         "run_id": run_id,
         "entries": [{"asset_id": c["asset_id"], "sha256": c["sha256"], "rights_identity_hash": c["rights_identity_hash"]} for c in candidates],
-    })
+    }
 
-    # Append acquisition JSONL log
-    log_p = assets_dir / "FOOTAGE_ACQUISITION_LOG.jsonl"
     log_lines = [
         json.dumps({"ts": now_utc(), "event": "asset_verified", "asset_id": c["asset_id"], "sha256": c["sha256"], "license": c["license_status"]})
         for c in candidates
@@ -563,32 +564,53 @@ def acquire_and_bind_footage(
         json.dumps({"ts": now_utc(), "event": "candidate_rejected", **r})
         for r in rejected
     ]
-    log_p.write_text("\n".join(log_lines) + ("\n" if log_lines else ""), encoding="utf-8")
+    log_text = "\n".join(log_lines) + ("\n" if log_lines else "")
 
-    # RIGHTS_LEDGER.csv
-    csv_p = run_dir / "evidence" / "RIGHTS_LEDGER.csv"
-    csv_p.parent.mkdir(parents=True, exist_ok=True)
-    with csv_p.open("w", newline="", encoding="utf-8") as cf:
-        w = csv.DictWriter(cf, fieldnames=[
-            "asset_id", "source_label", "media_type", "evidence_kind", "license_name",
-            "license_status", "provider_terms", "attribution_required", "attribution_text", "sha256",
-        ])
-        w.writeheader()
-        for c in clean_assets:
-            w.writerow({k: c.get(k, "") for k in w.fieldnames})
+    import io
+    csv_buf = io.StringIO()
+    w = csv.DictWriter(csv_buf, fieldnames=[
+        "asset_id", "source_label", "media_type", "evidence_kind", "license_name",
+        "license_status", "provider_terms", "attribution_required", "attribution_text", "sha256",
+    ])
+    w.writeheader()
+    for c in clean_assets:
+        w.writerow({k: c.get(k, "") for k in w.fieldnames})
+    csv_text = csv_buf.getvalue()
 
-    # FOOTAGE_GAPS.md & EVIDENCE_LEDGER.md
     gap_lines = [f"# Footage Gaps — `{run_id}` (`{skill_id}`)", "", f"- **Status:** `{status}`", ""]
     if gaps:
         for g in gaps:
             gap_lines.append(f"- `{g['beat_id']}` (`{g['priority']}`, `{g['evidence_kind']}`): {g['search_intent']} → *{g['fallback']}*")
     else:
         gap_lines.append("- None (all visual evidence needs matched with verified assets).")
-    (assets_dir / "FOOTAGE_GAPS.md").write_text("\n".join(gap_lines) + "\n", encoding="utf-8")
+    gap_text = "\n".join(gap_lines) + "\n"
 
     ev_lines = [f"# Visual Evidence Ledger — `{run_id}` (`{skill_id}`)", "", "| Beat | Asset ID | Label | Rationale |", "|---|---|---|---|"]
     for b in bindings:
         ev_lines.append(f"| `{b['beat_id']}` | `{b['asset_id'] or 'NONE'}` | `{b['evidence_label']}` | {b['why_selected']} |")
-    (run_dir / "evidence" / "EVIDENCE_LEDGER.md").write_text("\n".join(ev_lines) + "\n", encoding="utf-8")
+    ev_text = "\n".join(ev_lines) + "\n"
+
+    if ctx is not None:
+        ctx.check_cancelled()
+        ctx.publish_json("FOOTAGE_QUERY_PLAN.json", query_doc, assets_dir / "FOOTAGE_QUERY_PLAN.json")
+        ctx.publish_json("FOOTAGE_CANDIDATES.json", cands_doc, assets_dir / "FOOTAGE_CANDIDATES.json")
+        ctx.publish_json("FOOTAGE_MANIFEST.json", manifest, assets_dir / "FOOTAGE_MANIFEST.json", schema_name="footage_manifest")
+        ctx.publish_json("ASSET_CACHE_MANIFEST.json", cache_doc, assets_dir / "ASSET_CACHE_MANIFEST.json")
+        ctx.publish_text("FOOTAGE_ACQUISITION_LOG.jsonl", log_text, assets_dir / "FOOTAGE_ACQUISITION_LOG.jsonl")
+        ctx.publish_text("RIGHTS_LEDGER.csv", csv_text, run_dir / "evidence" / "RIGHTS_LEDGER.csv")
+        ctx.publish_text("FOOTAGE_GAPS.md", gap_text, assets_dir / "FOOTAGE_GAPS.md")
+        ctx.publish_text("EVIDENCE_LEDGER.md", ev_text, run_dir / "evidence" / "EVIDENCE_LEDGER.md")
+    else:
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(assets_dir / "FOOTAGE_QUERY_PLAN.json", query_doc)
+        write_json_atomic(assets_dir / "FOOTAGE_CANDIDATES.json", cands_doc)
+        write_json_atomic(assets_dir / "FOOTAGE_MANIFEST.json", manifest)
+        write_json_atomic(assets_dir / "ASSET_CACHE_MANIFEST.json", cache_doc)
+        (assets_dir / "FOOTAGE_ACQUISITION_LOG.jsonl").write_text(log_text, encoding="utf-8")
+        csv_p = run_dir / "evidence" / "RIGHTS_LEDGER.csv"
+        csv_p.parent.mkdir(parents=True, exist_ok=True)
+        csv_p.write_text(csv_text, encoding="utf-8")
+        (assets_dir / "FOOTAGE_GAPS.md").write_text(gap_text, encoding="utf-8")
+        (run_dir / "evidence" / "EVIDENCE_LEDGER.md").write_text(ev_text, encoding="utf-8")
 
     return manifest

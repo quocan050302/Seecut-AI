@@ -168,8 +168,11 @@ def plan_explanation(
     *,
     skill_id: str,
     run_dir: Path | None = None,
+    ctx: Any | None = None,
 ) -> dict[str, Any]:
     """Construct validated EXPLANATION_GRAPH.json, VIEWER_QUESTIONS.md & EXPLANATION_COVERAGE.json."""
+    if ctx is not None:
+        ctx.check_cancelled()
     phrases = semantic_graph.get("phrases") or []
     num_checks = validate_numeric_claims(
         input_analysis.get("numeric_claims") or [],
@@ -314,9 +317,7 @@ def plan_explanation(
     assert_kh03_schema(graph, "explanation_graph")
 
     if run_dir is not None:
-        write_json_atomic(run_dir / "analysis" / "EXPLANATION_GRAPH.json", graph)
         cov_doc = verify_explanation_coverage(graph)
-        write_json_atomic(run_dir / "analysis" / "EXPLANATION_COVERAGE.json", cov_doc)
         q_lines = [
             f"# Viewer Comprehension Questions — `{input_analysis['run_id']}` (`{skill_id}`)",
             "",
@@ -329,7 +330,16 @@ def plan_explanation(
             q_lines.append(f"- **Expected Grounded Answer:** {q['expected_answer']}")
             q_lines.append(f"- **Evidence Nodes:** `{', '.join(q['evidence_node_ids'])}` | **Frames:** `{q.get('target_frame_range')}`")
             q_lines.append("")
-        (run_dir / "analysis" / "VIEWER_QUESTIONS.md").write_text("\n".join(q_lines), encoding="utf-8")
+        q_md = "\n".join(q_lines)
+        if ctx is not None:
+            ctx.check_cancelled()
+            ctx.publish_json("EXPLANATION_GRAPH.json", graph, run_dir / "analysis" / "EXPLANATION_GRAPH.json", schema_name="explanation_graph")
+            ctx.publish_json("EXPLANATION_COVERAGE.json", cov_doc, run_dir / "analysis" / "EXPLANATION_COVERAGE.json")
+            ctx.publish_text("VIEWER_QUESTIONS.md", q_md, run_dir / "analysis" / "VIEWER_QUESTIONS.md")
+        else:
+            write_json_atomic(run_dir / "analysis" / "EXPLANATION_GRAPH.json", graph)
+            write_json_atomic(run_dir / "analysis" / "EXPLANATION_COVERAGE.json", cov_doc)
+            (run_dir / "analysis" / "VIEWER_QUESTIONS.md").write_text(q_md, encoding="utf-8")
 
     return graph
 

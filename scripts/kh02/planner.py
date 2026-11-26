@@ -1436,6 +1436,9 @@ def resolve_editorial_plan(
                 **({"kh03_layout_policy": kh03_metadata["layout_policy"]} if kh03_metadata.get("layout_policy") else {}),
                 **({"kh03_layout_plan_sha256": kh03_metadata["layout_plan_sha256"]} if kh03_metadata.get("layout_plan_sha256") else {}),
                 **({"kh03_motion_graph_sha256": kh03_metadata["motion_graph_sha256"]} if kh03_metadata.get("motion_graph_sha256") else {}),
+                **({"kh03_winning_candidate_id": kh03_metadata["winning_candidate_id"]} if kh03_metadata.get("winning_candidate_id") else {}),
+                **({"kh03_winner_binding_sha256": kh03_metadata["winner_binding_sha256"]} if kh03_metadata.get("winner_binding_sha256") else {}),
+                **({"kh03_competition_status": kh03_metadata["competition_status"]} if kh03_metadata.get("competition_status") else {}),
             } if kh03_metadata else {}),
         },
     }

@@ -44,6 +44,11 @@
     "type_system_ref": { "type": ["string", "null"] },
     "visual_density_ref": { "type": ["string", "null"] },
     "hook_microbeats_ref": { "type": ["string", "null"] },
+    "candidate_id": { "type": ["string", "null"] },
+    "candidate_strategy": { "type": ["string", "null"] },
+    "winning_candidate_id": { "type": ["string", "null"] },
+    "winner_bundle_sha256": { "type": ["string", "null"] },
+    "competition_status": { "type": ["string", "null"] },
     "plan_sha256": { "type": "string", "minLength": 16 }
   }
 }

@@ -228,6 +228,108 @@ def _synthesize_word_timing_from_script(script_text: str, duration_sec: float) -
     return out
 
 
+def probe_secondary_source(
+    path: str | Path,
+    *,
+    source_id: str = "secondary_screen_01",
+    role: str = "secondary_screen_evidence",
+    audio_policy: str = "MUTE_DEFAULT",
+    rights: str = "OWNER_SUPPLIED_NONCOMMERCIAL",
+) -> dict[str, Any]:
+    """Probe generic secondary video/image evidence with exact SHA, rational fps, container vs video duration & MUTE_DEFAULT audio policy."""
+    sp = Path(path).resolve()
+    if sp.is_symlink():
+        raise ValueError(f"SYMLINK_SECONDARY_SOURCE_REJECTED: {sp}")
+    if not sp.is_file():
+        raise FileNotFoundError(f"Secondary source missing: {sp}")
+    probed = probe_source(sp)
+    m = dict(probed.get("media") or {})
+    # Measure exact video stream duration vs container format duration via ffprobe so audio tail never stretches picture!
+    ff_raw = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(sp)],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    ff = json.loads(ff_raw.stdout)
+    streams = ff.get("streams") or []
+    v_st = next((s for s in streams if s.get("codec_type") == "video"), {})
+    a_st = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    fmt = ff.get("format") or {}
+    v_dur = float(v_st.get("duration") or m.get("duration_sec") or 0.0)
+    c_dur = float(fmt.get("duration") or v_dur)
+    a_dur = float(a_st.get("duration") or 0.0) if a_st else 0.0
+    delta_cv = round(abs(c_dur - v_dur), 4)
+    eff_audio_pol = str(audio_policy or "MUTE_DEFAULT").strip().upper()
+    if eff_audio_pol not in ("MUTE_DEFAULT", "AUTHORIZED_STEM_APPROVED"):
+        eff_audio_pol = "MUTE_DEFAULT"
+    return {
+        "source_id": source_id,
+        "role": role,
+        "path": str(sp),
+        "sha256": probed["sha256"],
+        "size_bytes": sp.stat().st_size,
+        "rights": rights,
+        "width": int(m.get("width") or 0),
+        "height": int(m.get("height") or 0),
+        "fps_num": int(m.get("fps_num") or 30),
+        "fps_den": max(1, int(m.get("fps_den") or 1)),
+        "nb_frames": int(m.get("nb_frames") or 0),
+        "video_duration_sec": round(v_dur, 4),
+        "container_duration_sec": round(c_dur, 4),
+        "audio_duration_sec": round(a_dur, 4),
+        "container_vs_video_delta_sec": delta_cv,
+        "audio_present": bool(a_st is not None),
+        "audio_codec": a_st.get("codec_name") if a_st else None,
+        "audio_sample_rate": int(a_st["sample_rate"]) if (a_st and str(a_st.get("sample_rate", "")).isdigit()) else None,
+        "audio_channels": int(a_st["channels"]) if (a_st and a_st.get("channels") is not None) else None,
+        "audio_policy": eff_audio_pol,
+    }
+
+
+def map_secondary_source_pts_to_master(
+    sec_source: dict[str, Any],
+    *,
+    master_fps_num: int,
+    master_fps_den: int = 1,
+    src_in_sec: float,
+    src_out_sec: float,
+) -> dict[str, Any]:
+    """Map secondary mixed-fps source time span onto master timeline PTS using exact rational Fraction math (zero speed drift)."""
+    from fractions import Fraction
+
+    v_dur = float(sec_source.get("video_duration_sec") or 0.0)
+    c_dur = float(sec_source.get("container_duration_sec") or v_dur)
+    if v_dur <= 0.0:
+        raise ValueError("INVALID_SECONDARY_VIDEO_DURATION: video_duration_sec must be > 0")
+    if src_in_sec < 0.0 or src_out_sec <= src_in_sec:
+        raise ValueError(f"INVALID_SECONDARY_INTERVAL: [{src_in_sec}, {src_out_sec})")
+    # Fail closed if caller tries to map beyond actual video stream duration into container/audio overhang!
+    if src_out_sec > v_dur + 1e-4:
+        raise ValueError(
+            f"CONTAINER_VS_VIDEO_DURATION_DRIFT: requested out={src_out_sec:.4f}s exceeds actual video_duration_sec={v_dur:.4f}s "
+            f"(container={c_dur:.4f}s)."
+        )
+    sec_fps = Fraction(int(sec_source.get("fps_num") or 30), max(1, int(sec_source.get("fps_den") or 1)))
+    mst_fps = Fraction(int(master_fps_num), max(1, int(master_fps_den)))
+    span_sec = Fraction(str(round(src_out_sec - src_in_sec, 6)))
+    src_start_f = int(round(float(Fraction(str(round(src_in_sec, 6))) * sec_fps)))
+    src_end_f = int(round(float(Fraction(str(round(src_out_sec, 6))) * sec_fps)))
+    mst_frames = max(1, int(round(float(span_sec * mst_fps))))
+    return {
+        "source_id": sec_source.get("source_id"),
+        "source_sha256": sec_source.get("sha256"),
+        "source_fps": f"{sec_fps.numerator}/{sec_fps.denominator}",
+        "master_fps": f"{mst_fps.numerator}/{mst_fps.denominator}",
+        "src_in_sec": round(src_in_sec, 4),
+        "src_out_sec": round(src_out_sec, 4),
+        "src_frame_span": [src_start_f, src_end_f],
+        "master_duration_frames": mst_frames,
+        "master_duration_sec": round(float(Fraction(mst_frames) / mst_fps), 4),
+        "speed_ratio": 1.0,
+        "audio_policy": sec_source.get("audio_policy", "MUTE_DEFAULT"),
+        "container_overhang_guarded": True,
+    }
+
+
 def analyze_inputs(
     *,
     video_path: str | Path,
@@ -238,6 +340,7 @@ def analyze_inputs(
     video_rights: str = "OWNER_SUPPLIED_NONCOMMERCIAL",
     language: str | None = None,
     constraints: dict[str, Any] | None = None,
+    secondary_sources: list[dict[str, Any]] | None = None,
     run_asr: bool = False,
     run_dir: Path | None = None,
 ) -> dict[str, Any]:
@@ -423,12 +526,30 @@ def analyze_inputs(
         if asr_words else None
     )
 
+    probed_secondaries: list[dict[str, Any]] = []
+    for s_idx, sec_cfg in enumerate(secondary_sources or []):
+        if not isinstance(sec_cfg, dict) or not sec_cfg.get("path"):
+            continue
+        probed_secondaries.append(probe_secondary_source(
+            sec_cfg["path"],
+            source_id=str(sec_cfg.get("source_id") or f"secondary_{s_idx + 1:02d}"),
+            role=str(sec_cfg.get("role") or "secondary_screen_evidence"),
+            audio_policy=str(sec_cfg.get("audio_policy") or "MUTE_DEFAULT"),
+            rights=str(sec_cfg.get("rights") or video_rights),
+        ))
+    sec_sha = (
+        hash_artifact([{"source_id": s["source_id"], "sha256": s["sha256"], "audio_policy": s["audio_policy"]} for s in probed_secondaries])
+        if probed_secondaries else None
+    )
+
     analysis = {
         "schema_version": "kh03.input_analysis.v1",
         "run_id": run_id,
         "video_path": str(vp),
         "video_sha256": probed["sha256"],
         "video_rights": video_rights,
+        "secondary_sources": probed_secondaries,
+        "secondary_sources_sha256": sec_sha,
         "media": {
             "width": width,
             "height": height,

@@ -365,19 +365,22 @@ def execute_pipeline(
             ),
         }
     intended_purpose = str(brief.get("intended_purpose") or "").strip().upper()
-    comm_evid = str(brief.get("commercial_permission_evidence") or "").strip()
-    if intended_purpose == "COMMERCIAL_MARKETING" and (lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" or len(comm_evid) < 8):
-        return {
-            "status": "BLOCKED_COMMERCIAL_LICENSE",
-            "exit_code": 2,
-            "reason": "COMMERCIAL_MARKETING requires WRITTEN_COMMERCIAL_PERMISSION_VERIFIED plus verified commercial_permission_evidence.",
-        }
-    if lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" and kh03_overrides is not None and len(comm_evid) < 8:
-        return {
-            "status": "BLOCKED_COMMERCIAL_LICENSE",
-            "exit_code": 2,
-            "reason": "Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED rejected: missing commercial_permission_evidence.",
-        }
+    comm_evid = brief.get("commercial_permission_evidence")
+    if intended_purpose == "COMMERCIAL_MARKETING" or (lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" and kh03_overrides is not None):
+        from scripts.kh03.contracts import verify_commercial_permission_evidence as _verify_comm_perm
+        perm_res = _verify_comm_perm(comm_evid)
+        if intended_purpose == "COMMERCIAL_MARKETING" and (lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" or not perm_res["verified"]):
+            return {
+                "status": "BLOCKED_COMMERCIAL_LICENSE",
+                "exit_code": 2,
+                "reason": f"COMMERCIAL_MARKETING requires WRITTEN_COMMERCIAL_PERMISSION_VERIFIED with verified structured receipt: {perm_res['reason']}",
+            }
+        if lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" and kh03_overrides is not None and not perm_res["verified"]:
+            return {
+                "status": "BLOCKED_COMMERCIAL_LICENSE",
+                "exit_code": 2,
+                "reason": f"Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED rejected: {perm_res['reason']}",
+            }
 
     if not dry_run:
         for sub in (
@@ -737,6 +740,9 @@ def execute_pipeline(
                 "layout_policy": eff_kh03_overrides.get("layout_policy"),
                 "layout_plan_sha256": eff_kh03_overrides.get("layout_plan_sha256"),
                 "motion_graph_sha256": eff_kh03_overrides.get("motion_graph_sha256"),
+                "winning_candidate_id": eff_kh03_overrides.get("winning_candidate_id"),
+                "winner_binding_sha256": eff_kh03_overrides.get("winner_binding_sha256"),
+                "competition_status": eff_kh03_overrides.get("competition_status"),
             }
             if eff_kh03_overrides else None
         )

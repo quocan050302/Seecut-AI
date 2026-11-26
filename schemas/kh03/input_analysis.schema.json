@@ -17,6 +17,8 @@
     "video_path": { "type": "string", "minLength": 1 },
     "video_sha256": { "type": "string", "minLength": 16 },
     "video_rights": { "type": "string", "minLength": 1 },
+    "secondary_sources": { "type": "array", "items": { "type": "object" } },
+    "secondary_sources_sha256": { "type": ["string", "null"] },
     "media": {
       "type": "object",
       "required": ["width", "height", "fps_num", "fps_den", "nb_frames", "duration_sec", "has_audio", "aspect_ratio"],
