@@ -132,10 +132,14 @@ def get_process_rss_mib() -> float:
 
             pmc = _PMC()
             pmc.cb = ctypes.sizeof(_PMC)
-            hproc = ctypes.windll.kernel32.GetCurrentProcess()
-            fn = getattr(ctypes.windll.kernel32, "K32GetProcessMemoryInfo", None)
+            k32 = ctypes.windll.kernel32
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            hproc = k32.GetCurrentProcess()
+            fn = getattr(k32, "K32GetProcessMemoryInfo", None)
             if fn is None:
                 fn = ctypes.windll.psapi.GetProcessMemoryInfo
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
+            fn.restype = ctypes.c_int
             if fn(hproc, ctypes.byref(pmc), pmc.cb):
                 val = pmc.PeakWorkingSetSize or pmc.WorkingSetSize
                 return round(val / (1024.0 * 1024.0), 2)

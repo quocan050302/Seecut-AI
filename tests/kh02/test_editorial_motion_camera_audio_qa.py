@@ -138,12 +138,15 @@ class TestEditorialMotionCameraAudioQA(unittest.TestCase):
             # Real headless Chromium deterministic seek verification (if tools installed)
             pw_dir = STANDALONE / "tools/node_modules/playwright-core"
             if pw_dir.is_dir():
-                (bdir / "node_modules").symlink_to(STANDALONE / "tools/node_modules")
+                from scripts.kh02.render_guard import _ensure_node_link, resolve_local_chromium
+                _ensure_node_link(bdir, STANDALONE / "tools")
+                common_url = (STANDALONE / "third_party/SeeCut/skill/seecut/scripts/_common.mjs").resolve().as_uri()
+                html_url = (bdir / "master.html").resolve().as_uri()
                 check_js = f"""
-import {{ chromium, chromePath }} from '{(STANDALONE / "third_party/SeeCut/skill/seecut/scripts/_common.mjs").as_posix()}';
+import {{ chromium, chromePath }} from '{common_url}';
 const b = await chromium('{bdir.as_posix()}').launch({{ headless: true, executablePath: chromePath() }});
 const pg = await (await b.newContext({{ viewport: {{ width: 720, height: 1280 }} }})).newPage();
-await pg.goto('file://{(bdir / "master.html").as_posix()}', {{ waitUntil: 'load' }});
+await pg.goto('{html_url}', {{ waitUntil: 'load' }});
 const res = await pg.evaluate(() => {{
   const tl = window.__timelines.master;
   const probe = (t) => {{
@@ -159,7 +162,12 @@ const res = await pg.evaluate(() => {{
 await b.close();
 console.log(JSON.stringify(res));
 """
-                p = subprocess.run(["node", "--input-type=module", "-e", check_js], capture_output=True, text=True, timeout=30)
+                env = dict(os.environ)
+                if not env.get("JIANJI_CHROME"):
+                    cp = resolve_local_chromium()
+                    if cp is not None:
+                        env["JIANJI_CHROME"] = str(cp)
+                p = subprocess.run(["node", "--input-type=module", "-e", check_js], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
                 self.assertEqual(p.returncode, 0, p.stderr)
                 out = json.loads(p.stdout.strip())
                 self.assertFalse(out["xss"])

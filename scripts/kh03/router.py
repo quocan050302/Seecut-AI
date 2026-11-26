@@ -45,6 +45,8 @@ from .contracts import (
 from .candidates import (
     adopt_candidate,
     bind_winner_to_execution,
+    build_live_pairwise_judge,
+    build_native_candidate_preview_runner,
     generate_creative_candidates,
     rank_candidates,
     validate_candidate_diversity,
@@ -63,41 +65,166 @@ from .sound_director import plan_soundscape_for_skill
 from .visual_qa import audit_fullscreen_and_collisions
 
 
-def run_preflight(*, run_dir: Path | None = None) -> dict[str, Any]:
-    """Read-only offline environment, disk floor & license status preflight."""
-    disk = shutil.disk_usage(str(run_dir or Path.cwd()))
+def run_preflight(
+    *,
+    run_dir: Path | None = None,
+    mode: str = "plan",
+    intended_purpose: str = "NONCOMMERCIAL_ENGINEERING",
+    commercial_permission_evidence: str | None = None,
+    compete_candidates: bool = False,
+    online_opt_in: bool = False,
+    export_layers: bool = False,
+    seecut_root: Path | None = None,
+    tools_root: Path | None = None,
+) -> dict[str, Any]:
+    """Mode-aware render readiness preflight (R4.2-06): separates PLAN_READY, NATIVE_PREVIEW_READY,
+    NATIVE_FULL_RENDER_READY, and RELEASE_READY; lists ALL blockers and next actions in parallel!
+    """
+    import subprocess
+    from scripts.kh02.render_guard import resolve_local_chromium
+    from .tracking import resolve_detector_capabilities
+
+    req_mode = str(mode or "plan").strip().lower()
+    if req_mode not in ("plan", "preview", "full", "release"):
+        req_mode = "plan"
+
+    chk_disk = Path(run_dir or Path.cwd()).expanduser()
+    while not chk_disk.exists() and chk_disk != chk_disk.parent:
+        chk_disk = chk_disk.parent
+    disk = shutil.disk_usage(str(chk_disk))
     free_gib = round(disk.free / (1024 ** 3), 2)
     ffmpeg_bin = shutil.which("ffmpeg")
     ffprobe_bin = shutil.which("ffprobe")
     node_bin = shutil.which("node")
+    agy_bin = (
+        os.environ.get("AGY_BIN")
+        or shutil.which("agy")
+        or (str(Path.home() / ".gemini/bin/agy") if (Path.home() / ".gemini/bin/agy").is_file() else None)
+    )
+    chrome_bin = resolve_local_chromium()
+
     standalone = Path(os.environ.get("SEECUT_STANDALONE_ROOT", os.path.expanduser("~/Projects/SeeCut-Olivia-Standalone")))
-    seecut_root = Path(os.environ.get("SEECUT_UPSTREAM_ROOT", str(standalone / "third_party/SeeCut")))
-    tools_root = standalone / "tools"
-    has_upstream = (seecut_root / "skill/seecut/scripts/render.mjs").is_file()
-    has_hf = any(tools_root.glob("node_modules/hyperframes/dist/vendor/npm/gsap@*/dist/gsap.min.js"))
+    up_root = seecut_root or Path(os.environ.get("SEECUT_UPSTREAM_ROOT", str(standalone / "third_party/SeeCut")))
+    troot = tools_root or (standalone / "tools")
+
+    render_mjs = up_root / "skill/seecut/scripts/render.mjs"
+    geom_mjs = up_root / "skill/seecut/scripts/geom-check.mjs"
+    layers_mjs = up_root / "skill/seecut/scripts/jianying_layers.mjs"
+    plan_py = up_root / "skill/seecut/scripts/jianying_plan.py"
+    has_upstream_render = render_mjs.is_file()
+    has_h1 = geom_mjs.is_file()
+    has_layers = layers_mjs.is_file() and plan_py.is_file()
+
+    up_head = None
+    up_pin_match = False
+    if (up_root / ".git").exists():
+        try:
+            up_head = subprocess.check_output(["git", "-C", str(up_root), "rev-parse", "HEAD"], text=True, timeout=10).strip()
+            up_pin_match = (up_head == UPSTREAM_SEECUT_SHA)
+        except Exception:
+            pass
+
+    hf_pkg = troot / "node_modules/hyperframes/package.json"
+    pw_pkg = troot / "node_modules/playwright-core/package.json"
+    hf_ver = json.loads(hf_pkg.read_text(encoding="utf-8")).get("version") if hf_pkg.is_file() else None
+    pw_ver = json.loads(pw_pkg.read_text(encoding="utf-8")).get("version") if pw_pkg.is_file() else None
+    gsaps = sorted(troot.glob("node_modules/hyperframes/dist/vendor/npm/gsap@*/dist/gsap.min.js"))
+    has_hf = bool(gsaps)
+    gsap_sha = hash_artifact(gsaps[-1]) if gsaps else None
+
+    is_comm = str(intended_purpose or "").strip().upper() == "COMMERCIAL_MARKETING"
+    perm_check = verify_commercial_permission_evidence(commercial_permission_evidence) if is_comm else {"verified": True, "status": "NONCOMMERCIAL_PERMITTED"}
+    license_ok = (not is_comm) or bool(perm_check.get("verified"))
+    det_caps = resolve_detector_capabilities()
+
+    blockers: list[dict[str, str]] = []
+    next_actions: list[str] = []
+
+    if not ffmpeg_bin or not ffprobe_bin:
+        blockers.append({"code": "MISSING_FFMPEG", "scope": "PLAN", "detail": "ffmpeg/ffprobe not found on PATH"})
+        next_actions.append("Install ffmpeg and ffprobe and add them to PATH.")
+    if free_gib < DEFAULT_DISK_RESERVE_GIB:
+        blockers.append({"code": "LOW_DISK_RESERVE", "scope": "PLAN", "detail": f"free_disk_gib={free_gib} < {DEFAULT_DISK_RESERVE_GIB}"})
+        next_actions.append(f"Free at least {DEFAULT_DISK_RESERVE_GIB} GiB disk space.")
+    if not node_bin:
+        blockers.append({"code": "MISSING_NODE", "scope": "NATIVE_PREVIEW", "detail": "Node.js >= 22 not found on PATH"})
+        next_actions.append("Install workspace-local Node.js >= 22.")
+    if not has_upstream_render or not up_pin_match:
+        blockers.append({"code": "MISSING_OR_DRIFTED_UPSTREAM_SEECUT", "scope": "NATIVE_PREVIEW", "detail": f"Expected {UPSTREAM_SEECUT_SHA}, observed={up_head}, render.mjs={has_upstream_render}"})
+        next_actions.append(f"Checkout unmodified YeJe-cpu/SeeCut @ {UPSTREAM_SEECUT_SHA} into {up_root}.")
+    if not has_hf or not pw_ver or chrome_bin is None:
+        blockers.append({"code": "MISSING_NATIVE_RENDER_DEPS", "scope": "NATIVE_PREVIEW", "detail": f"hyperframes={hf_ver}, playwright-core={pw_ver}, gsap={has_hf}, chromium={bool(chrome_bin)}"})
+        next_actions.append("Install pinned hyperframes@0.9.86 + playwright-core@1.65.1 + local Chromium in tools root.")
+    if not has_h1:
+        blockers.append({"code": "MISSING_H1_GEOM_CHECK", "scope": "NATIVE_PREVIEW", "detail": f"Missing {geom_mjs}"})
+    if export_layers and not has_layers:
+        blockers.append({"code": "MISSING_JIANYING_EXPORTERS", "scope": "NATIVE_FULL", "detail": "Missing jianying_layers.mjs or jianying_plan.py"})
+    if not license_ok:
+        blockers.append({"code": "BLOCKED_COMMERCIAL_LICENSE", "scope": "COMMERCIAL", "detail": str(perm_check.get("reason") or "Commercial permission required from aiesecxuanli@gmail.com")})
+        next_actions.append("Obtain verified written commercial authorization from YeJe-cpu (aiesecxuanli@gmail.com) and supply structured JSON receipt.")
+    if (compete_candidates or req_mode in ("full", "release")) and online_opt_in and not agy_bin:
+        blockers.append({"code": "MISSING_AGY_LIVE_JUDGE", "scope": "EDITORIAL_H2_PAIRWISE", "detail": "agy CLI binary not found for live H2/pairwise judging"})
+        next_actions.append("Install and authenticate non-bypass agy CLI, or run owner visual review for pairwise selection.")
+
+    plan_ready = bool(ffmpeg_bin and ffprobe_bin and free_gib >= DEFAULT_DISK_RESERVE_GIB)
+    native_preview_ready = bool(plan_ready and node_bin and has_upstream_render and up_pin_match and has_hf and pw_ver and chrome_bin and has_h1 and license_ok)
+    native_full_ready = bool(native_preview_ready and (has_layers or not export_layers))
+    release_ready = False  # Always False at preflight: requires post-render QA + explicit OWNER_VISUAL & OWNER_AUDIO approval on final SHA!
+
+    mode_ready_map = {
+        "plan": plan_ready,
+        "preview": native_preview_ready,
+        "full": native_full_ready,
+        "release": release_ready,
+    }
+    requested_ready = mode_ready_map[req_mode]
 
     rep = {
-        "schema_version": "kh03.preflight.v1",
+        "schema_version": "kh03.preflight.v2",
         "kh03_version": __version__,
         "registry_version": REGISTRY_VERSION,
         "base_qa_sha": BASE_QA_SHA,
         "upstream_seecut_sha": UPSTREAM_SEECUT_SHA,
+        "upstream_observed_sha": up_head,
+        "upstream_pin_match": up_pin_match,
         "upstream_license": "PolyForm Noncommercial License 1.0.0 (commercial contact: aiesecxuanli@gmail.com)",
+        "intended_purpose": intended_purpose,
+        "commercial_license_ok": license_ok,
         "commercial_release_default": "BLOCKED",
+        "requested_mode": req_mode,
         "os": platform.platform(),
         "python": sys.version.split()[0],
         "cpu_count": os.cpu_count() or 1,
         "free_disk_gib": free_gib,
         "disk_floor_ok": free_gib >= DEFAULT_DISK_RESERVE_GIB,
+        "readiness": {
+            "PLAN_READY": plan_ready,
+            "NATIVE_PREVIEW_READY": native_preview_ready,
+            "NATIVE_FULL_RENDER_READY": native_full_ready,
+            "RELEASE_READY": release_ready,
+        },
         "tools": {
             "ffmpeg": bool(ffmpeg_bin),
             "ffprobe": bool(ffprobe_bin),
             "node": bool(node_bin),
-            "upstream_seecut_render_mjs": has_upstream,
+            "chromium": bool(chrome_bin),
+            "upstream_seecut_render_mjs": has_upstream_render,
+            "upstream_h1_geom_check_mjs": has_h1,
+            "upstream_jianying_layers_mjs": has_layers,
+            "pinned_hyperframes_version": hf_ver,
+            "pinned_playwright_version": pw_ver,
             "pinned_hyperframes_gsap": has_hf,
+            "pinned_gsap_sha256": gsap_sha,
+            "agy_cli_present": bool(agy_bin),
+            "candidate_preview_adapter_wired": True,
+            "live_pairwise_adapter_wired": True,
+            "detector_primary": det_caps.get("primary_detector"),
+            "detector_semantic_classification": det_caps.get("semantic_object_classification"),
         },
-        "render_capability": "FULL_SEECUT_CORE_READY" if (has_upstream and has_hf and ffmpeg_bin and node_bin) else "PLAN_AND_OFFLINE_QA_ONLY_UPSTREAM_MISSING",
-        "pass": bool(ffmpeg_bin and ffprobe_bin and free_gib >= DEFAULT_DISK_RESERVE_GIB),
+        "render_capability": "FULL_SEECUT_CORE_READY" if native_preview_ready else "PLAN_AND_OFFLINE_QA_ONLY_UPSTREAM_OR_LICENSE_BLOCKED",
+        "blockers": blockers,
+        "next_actions": next_actions,
+        "pass": requested_ready,
     }
     if run_dir is not None:
         write_json_atomic(run_dir / "manifests" / "ENV_REPORT.json", rep)
@@ -576,23 +703,89 @@ def run_execute(
                     "diversity_check": div_check,
                 }
 
-        # Preview/Full competition: run bounded isolated preview runner (concurrency=1) when supplied
-        if mode in ("preview", "full") and candidate_preview_runner is not None:
+        # Preview/Full competition: wire default native preview runner & live pairwise judge when not injected (R4.2-03/04)
+        eff_preview_runner = candidate_preview_runner
+        if mode in ("preview", "full") and eff_preview_runner is None:
+            _fs_lk = bool(saved_c.get("fullscreen_lock"))
+            _lp_pol = str(saved_c.get("layout_policy") or ("FULLSCREEN_LOCK" if _fs_lk else "LEGACY_DYNAMIC"))
+            _pres_pol_prev = (
+                {"mode": "LEGACY_DYNAMIC", "visibility": "ALWAYS_VISIBLE", "allow_hide": False, "allow_fullscreen": True, "fullscreen_lock": True, "layout_policy": "FULLSCREEN_LOCK"}
+                if _fs_lk else (
+                    {"mode": "LEGACY_DYNAMIC", "visibility": "ALWAYS_VISIBLE", "allow_hide": False, "allow_fullscreen": True, "fullscreen_lock": False, "layout_policy": "ADAPTIVE_DYNAMIC"}
+                    if _lp_pol == "ADAPTIVE_DYNAMIC" else {"mode": presenter_mode or "LEGACY_DYNAMIC"}
+                )
+            )
+            _srcs_prev = [{
+                "asset_id": "primary_aroll",
+                "path": inp["video_path"],
+                "kind": "a_roll",
+                "rights": inp["video_rights"] if inp["video_rights"] in (
+                    "OWNER_SUPPLIED_NONCOMMERCIAL", "LICENSED_COMMERCIAL", "CAPTURED_REAL_EVIDENCE_MASKED",
+                ) else "OWNER_SUPPLIED_NONCOMMERCIAL",
+                "label": "Primary source A-roll",
+            }]
+            for fa in footage_manifest["assets"]:
+                _srcs_prev.append({
+                    "asset_id": fa["asset_id"],
+                    "path": fa["local_path"],
+                    "kind": "still_asset" if fa["media_type"] in ("image", "screen_capture", "diagram_asset") else "b_roll",
+                    "rights": "LICENSED_COMMERCIAL" if asset_purpose == "COMMERCIAL_AND_NONCOMMERCIAL" else "OWNER_SUPPLIED_NONCOMMERCIAL",
+                    "label": fa["source_label"],
+                })
+            eff_preview_runner = build_native_candidate_preview_runner(
+                run_id=run_id, parent_run_dir=rdir, inp=inp, skill_id=skill_id,
+                selection_receipt=sel_val["receipt"], sources_list=_srcs_prev,
+                pres_pol=_pres_pol_prev, eff_cut=eff_cut, eff_caption=eff_caption,
+                eff_music=eff_music, sfx_policy=sfx_policy, eff_purpose=eff_purpose,
+                eff_lic=eff_lic, eff_evid=eff_evid,
+                sfx_library_dirs=sfx_library_dirs, sfx_config_path=sfx_config_path,
+                offline=eff_offline, production_mode=production_mode,
+                allow_test_only_sfx=allow_test_only_sfx,
+                seecut_root=seecut_root, tools_root=tools_root, render_scale=0.5,
+            )
+
+        preview_receipts: list[dict[str, Any]] = []
+        if mode in ("preview", "full") and eff_preview_runner is not None:
             for c_item in cand_list:
                 if not c_item.get("plan_gate_pass"):
                     continue
-                prev_res = candidate_preview_runner(c_item, Path(c_item["workspace_dir"]))
+                prev_res = eff_preview_runner(c_item, Path(c_item["workspace_dir"]))
                 c_item["preview_mp4_path"] = prev_res.get("preview_mp4_path")
                 c_item["preview_mp4_sha256"] = prev_res.get("preview_mp4_sha256")
+                c_item["html_path"] = prev_res.get("html_path")
                 c_item["preview_qa_pass"] = bool(prev_res.get("preview_qa_pass", False))
+                preview_receipts.append(dict(prev_res, candidate_id=c_item["candidate_id"]))
+            write_json_atomic(rdir / "manifests" / "CANDIDATE_PREVIEW_RECEIPTS.json", {
+                "schema_version": "kh03.candidate_preview_receipts.v1",
+                "run_id": run_id,
+                "mode": mode,
+                "receipts": preview_receipts,
+            })
+
+        eff_pairwise_fn = pairwise_fn
+        if eff_pairwise_fn is None and mode in ("preview", "full") and online_opt_in:
+            eff_pairwise_fn = build_live_pairwise_judge(
+                online_opt_in=online_opt_in,
+                seecut_root=seecut_root,
+                out_dir=rdir / "qc" / "pairwise",
+            )
 
         ranking = rank_candidates(
             cand_list,
-            pairwise_fn=pairwise_fn,
+            pairwise_fn=eff_pairwise_fn,
             mode=mode,
             require_preview_proof=(mode in ("preview", "full")),
         )
         ranking["diversity_check"] = div_check
+        if ranking.get("pairwise_records"):
+            write_json_atomic(rdir / "qc" / "PAIRWISE_AB_BA.json", {
+                "schema_version": "kh03.pairwise_ab_ba.v1",
+                "run_id": run_id,
+                "mode": mode,
+                "pairwise_status": ranking.get("pairwise_status"),
+                "winner_candidate_id": (ranking.get("winner") or {}).get("candidate_id"),
+                "records": ranking.get("pairwise_records") or [],
+            })
         candidate_decision = adopt_candidate(
             ranking,
             owner_override_candidate_id=owner_override_candidate_id,
@@ -832,6 +1025,8 @@ def run_execute(
         trks_p = rdir / "analysis" / "TRACKS.json"
         trks_list = (parse_json_strict(trks_p).get("entities") or []) if trks_p.is_file() else []
         src_for_qa = kh02_res.get("derived_source_path") or inp.get("video_path")
+        _default_up = Path(os.environ.get("SEECUT_UPSTREAM_ROOT", os.path.expanduser("~/Projects/SeeCut-Olivia-Standalone/third_party/SeeCut")))
+        eff_seecut_root_qa = seecut_root or (_default_up if _default_up.is_dir() else None)
         final_render_qa = orchestrate_final_render_qa(
             run_id=run_id,
             run_dir=rdir,
@@ -848,7 +1043,7 @@ def run_execute(
             fps=fps,
             license_decision=eff_lic,
             engine_kind="NATIVE_SEECUT",
-            seecut_root=seecut_root,
+            seecut_root=eff_seecut_root_qa,
         )
         (rdir / "FINAL_RENDER_SHA256.txt").write_text(f"{final_mp4_sha}  {Path(final_mp4_raw).name}\n", encoding="utf-8")
         write_json_atomic(rdir / "qc" / "FINAL_QA.json", {
@@ -1151,10 +1346,18 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m scripts.kh03", description="KH-03 Universal Editing Intelligence CLI")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p_pre = sub.add_parser("preflight", help="Run read-only offline environment & license preflight")
+    p_pre = sub.add_parser("preflight", help="Run mode-aware environment, native pin, license & readiness preflight")
     p_pre.add_argument("--run-root", type=Path, default=None)
+    p_pre.add_argument("--mode", choices=["plan", "preview", "full", "release"], default="plan")
+    p_pre.add_argument("--purpose", choices=sorted(_VALID_PURPOSES), default="NONCOMMERCIAL_ENGINEERING")
+    p_pre.add_argument("--commercial-permission-evidence", default=None)
+    p_pre.add_argument("--compete-candidates", action="store_true", default=False)
+    p_pre.add_argument("--online-opt-in", action="store_true", default=False)
+    p_pre.add_argument("--export-layers", action="store_true", default=False)
+    p_pre.add_argument("--seecut-root", type=Path, default=None)
+    p_pre.add_argument("--tools-root", type=Path, default=None)
 
-    p_rec = sub.add_parser("recommend", help="Analyze video + script and issue 5-skill menu (STOPS for user selection)")
+    p_rec = sub.add_parser("recommend", help="Analyze video + optional secondary sources + script and issue 5-skill menu (STOPS for user selection)")
     p_rec.add_argument("--video", required=True, type=Path)
     p_rec.add_argument("--run-root", required=True, type=Path)
     p_rec.add_argument("--script", type=Path, default=None)
@@ -1169,6 +1372,11 @@ def main(argv: list[str] | None = None) -> int:
     p_rec.add_argument("--purpose", choices=sorted(_VALID_PURPOSES), default="NONCOMMERCIAL_ENGINEERING")
     p_rec.add_argument("--license-decision", default="NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED")
     p_rec.add_argument("--commercial-permission-evidence", default=None)
+    p_rec.add_argument("--secondary-video", action="append", default=None, help="Repeatable path to secondary evidence video (MUTE_DEFAULT audio)")
+    p_rec.add_argument("--secondary-role", default="secondary_screen_evidence")
+    p_rec.add_argument("--secondary-audio-policy", choices=["MUTE_DEFAULT", "AUTHORIZED_STEM_APPROVED"], default="MUTE_DEFAULT")
+    p_rec.add_argument("--sources-manifest", type=Path, default=None, help="JSON manifest describing secondary sources (path/role/audio_policy/rights)")
+    p_rec.add_argument("--voice-master", default="primary_aroll")
     p_rec.add_argument("--run-asr", action="store_true")
 
     p_sel = sub.add_parser("select", help="Record explicit user selection of ONE universal skill (SK-01..SK-05)")
@@ -1201,10 +1409,14 @@ def main(argv: list[str] | None = None) -> int:
     p_exe.add_argument("--reduced-motion", action="store_true", default=False)
     p_exe.add_argument("--compete-candidates", action="store_true", default=False)
     p_exe.add_argument("--max-candidates", type=int, default=3)
+    p_exe.add_argument("--owner-override-candidate", default=None)
+    p_exe.add_argument("--owner-selection-receipt", type=Path, default=None)
     p_exe.add_argument("--online-opt-in", action="store_true", default=False)
     p_exe.add_argument("--run-h2", action="store_true", default=False)
     p_exe.add_argument("--compare-baseline", action="append", type=Path, default=None)
     p_exe.add_argument("--export-layers", action="store_true", default=False)
+    p_exe.add_argument("--seecut-root", type=Path, default=None)
+    p_exe.add_argument("--tools-root", type=Path, default=None)
 
     p_st = sub.add_parser("status", help="Inspect KH-03 state machine and binding receipt")
     p_st.add_argument("--run-root", required=True, type=Path)
@@ -1215,10 +1427,40 @@ def main(argv: list[str] | None = None) -> int:
 
     args = ap.parse_args(argv)
     if args.cmd == "preflight":
-        out = run_preflight(run_dir=args.run_root)
+        out = run_preflight(
+            run_dir=args.run_root,
+            mode=args.mode,
+            intended_purpose=args.purpose,
+            commercial_permission_evidence=args.commercial_permission_evidence,
+            compete_candidates=args.compete_candidates,
+            online_opt_in=args.online_opt_in,
+            export_layers=args.export_layers,
+            seecut_root=args.seecut_root,
+            tools_root=args.tools_root,
+        )
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0 if out["pass"] else 1
     if args.cmd == "recommend":
+        sec_list: list[dict[str, Any]] = []
+        if args.sources_manifest is not None:
+            m_doc = parse_json_strict(args.sources_manifest)
+            entries = m_doc.get("secondary_sources") if isinstance(m_doc, dict) else (m_doc if isinstance(m_doc, list) else [])
+            for idx_m, ent in enumerate(entries or []):
+                if isinstance(ent, dict) and ent.get("path"):
+                    sec_list.append({
+                        "source_id": str(ent.get("source_id") or ent.get("asset_id") or f"secondary_{idx_m + 1:02d}"),
+                        "path": str(ent["path"]),
+                        "role": str(ent.get("role") or args.secondary_role),
+                        "audio_policy": str(ent.get("audio_policy") or args.secondary_audio_policy),
+                        "rights": str(ent.get("rights") or "OWNER_SUPPLIED_NONCOMMERCIAL"),
+                    })
+        for idx_s, sp in enumerate(args.secondary_video or []):
+            sec_list.append({
+                "source_id": f"secondary_{len(sec_list) + idx_s + 1:02d}",
+                "path": str(sp),
+                "role": args.secondary_role,
+                "audio_policy": args.secondary_audio_policy,
+            })
         out = run_recommend(
             video_path=args.video,
             run_root=args.run_root,
@@ -1234,6 +1476,7 @@ def main(argv: list[str] | None = None) -> int:
             intended_purpose=args.purpose,
             license_decision=args.license_decision,
             commercial_permission_evidence=args.commercial_permission_evidence,
+            secondary_sources=sec_list or None,
             run_asr=args.run_asr,
         )
         print(out["menu_text"])
@@ -1249,6 +1492,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return int(out["exit_code"])
     if args.cmd == "execute":
+        owner_sel_rec = parse_json_strict(args.owner_selection_receipt) if args.owner_selection_receipt else None
         out = run_execute(
             run_root=args.run_root,
             mode=args.mode,
@@ -1273,11 +1517,15 @@ def main(argv: list[str] | None = None) -> int:
             reduced_motion=args.reduced_motion,
             compete_candidates=args.compete_candidates,
             max_candidates=args.max_candidates,
+            owner_override_candidate_id=args.owner_override_candidate,
+            owner_selection_receipt=owner_sel_rec,
             offline=(not args.online_opt_in),
             online_opt_in=args.online_opt_in,
             run_h2=args.run_h2,
             compare_baselines=args.compare_baseline,
             export_layers=args.export_layers,
+            seecut_root=args.seecut_root,
+            tools_root=args.tools_root,
         )
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return int(out["exit_code"])

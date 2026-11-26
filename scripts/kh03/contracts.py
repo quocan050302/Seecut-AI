@@ -217,9 +217,10 @@ def verify_commercial_permission_evidence(
     """
     from . import UPSTREAM_SEECUT_SHA
 
-    want_pin = (expected_upstream_sha or UPSTREAM_SEECUT_SHA)[:7].lower()
+    want_pin_full = (expected_upstream_sha or UPSTREAM_SEECUT_SHA).strip().lower()
+    want_pin = want_pin_full if len(want_pin_full) >= 40 else want_pin_full[:7]
     if evidence is None:
-        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Missing commercial_permission_evidence.", "receipt_sha256": None}
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Missing commercial_permission_evidence.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
 
     doc: dict[str, Any] | None = None
     source_path: str | None = None
@@ -233,6 +234,7 @@ def verify_commercial_permission_evidence(
                 "status": "BLOCKED_COMMERCIAL_LICENSE",
                 "reason": f"Unstructured or placeholder commercial_permission_evidence rejected ({raw_s[:32]!r}).",
                 "receipt_sha256": None,
+                "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE",
             }
         # Reject plain non-JSON free-form strings (even if len >= 8!)
         if raw_s.startswith("{"):
@@ -241,17 +243,18 @@ def verify_commercial_permission_evidence(
                 if isinstance(parsed, dict):
                     doc = parsed
             except Exception as ex:
-                return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Malformed JSON permission receipt: {ex}", "receipt_sha256": None}
+                return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Malformed JSON permission receipt: {ex}", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
         else:
             p = Path(raw_s)
-            if p.is_symlink():
-                return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Symlink commercial permission receipt rejected.", "receipt_sha256": None}
+            if p.is_symlink() or (hasattr(os.path, "isjunction") and os.path.isjunction(str(p))):
+                return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Symlink/junction commercial permission receipt rejected.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
             if not p.is_file():
                 return {
                     "verified": False,
                     "status": "BLOCKED_COMMERCIAL_LICENSE",
                     "reason": "Free-form string commercial_permission_evidence rejected: supply a verified structured JSON permission receipt file.",
                     "receipt_sha256": None,
+                    "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE",
                 }
             try:
                 loaded = parse_json_strict(p)
@@ -259,12 +262,14 @@ def verify_commercial_permission_evidence(
                     doc = loaded
                     source_path = str(p.resolve())
             except Exception as ex:
-                return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Invalid permission receipt file: {ex}", "receipt_sha256": None}
+                return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Invalid permission receipt file: {ex}", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
     else:
-        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Unsupported commercial_permission_evidence type.", "receipt_sha256": None}
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Unsupported commercial_permission_evidence type.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
 
     if not isinstance(doc, dict):
-        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Commercial permission receipt must be a JSON object.", "receipt_sha256": None}
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Commercial permission receipt must be a JSON object.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
+
+    from datetime import datetime, timezone
 
     licensor = str(doc.get("licensor") or "").strip()
     scope = str(doc.get("scope") or "").strip()
@@ -275,39 +280,179 @@ def verify_commercial_permission_evidence(
     owner_ok = is_strict_bool(doc.get("verified_by_owner")) and bool(doc.get("verified_by_owner"))
 
     if not any(tok in licensor.lower() for tok in ("yeje-cpu", "aiesecxuanli@gmail.com")):
-        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Unrecognized licensor {licensor!r}; must authorize YeJe-cpu (aiesecxuanli@gmail.com).", "receipt_sha256": None}
-    if len(scope) < 8 or _PLACEHOLDER_PERM_RE.match(scope):
-        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Commercial permission receipt missing concrete scope.", "receipt_sha256": None}
-    if not pin.startswith(want_pin):
-        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Commercial permission upstream_pin {pin!r} does not match pinned {want_pin!r}.", "receipt_sha256": None}
-    if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", issued):
-        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Invalid issued_at_utc {issued!r}.", "receipt_sha256": None}
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Unrecognized licensor {licensor!r}; must authorize YeJe-cpu (aiesecxuanli@gmail.com).", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
+    scope_low = scope.lower()
+    if len(scope) < 8 or _PLACEHOLDER_PERM_RE.match(scope) or not any(tok in scope_low for tok in ("commercial", "marketing", "seecut", "render")):
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Commercial permission receipt missing concrete commercial/marketing/renderer scope.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
+    if len(want_pin) == 40:
+        if pin != want_pin:
+            return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Commercial permission upstream_pin {pin!r} must match full 40-char pin {want_pin!r}.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
+    elif not pin.startswith(want_pin):
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Commercial permission upstream_pin {pin!r} does not match pinned {want_pin!r}.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
+
+    def _parse_utc(ts: str) -> datetime | None:
+        if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
+            return None
+        try:
+            return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    issued_dt = _parse_utc(issued)
+    if issued_dt is None:
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Invalid issued_at_utc {issued!r}.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
     if expires:
-        if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", expires):
-            return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Invalid expires_at_utc {expires!r}.", "receipt_sha256": None}
-        if expires < now_utc():
-            return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Commercial permission receipt expired at {expires}.", "receipt_sha256": None}
+        exp_dt = _parse_utc(expires)
+        if exp_dt is None:
+            return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Invalid expires_at_utc {expires!r}.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
+        if exp_dt <= issued_dt:
+            return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Commercial permission expires_at_utc ({expires}) <= issued_at_utc ({issued}).", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
+        if exp_dt < datetime.now(timezone.utc):
+            return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Commercial permission receipt expired at {expires}.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
     if len(auth_ref) < 8 or _PLACEHOLDER_PERM_RE.match(auth_ref) or "test_only" in auth_ref.lower():
-        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Missing or placeholder written_authorization_ref.", "receipt_sha256": None}
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Missing or placeholder written_authorization_ref.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
     if not owner_ok:
-        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Commercial permission receipt lacks verified_by_owner=true.", "receipt_sha256": None}
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Commercial permission receipt lacks verified_by_owner=true.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
     if doc.get("test_only") is True:
-        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "TEST_ONLY permission receipt cannot authorize commercial execution.", "receipt_sha256": None}
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "TEST_ONLY permission receipt cannot authorize commercial execution.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
+
+    # Optional written authorization attachment verification (R4.2-01)
+    att_path_raw = doc.get("authorization_document_path")
+    att_sha_want = doc.get("authorization_document_sha256")
+    if att_path_raw:
+        ap = Path(str(att_path_raw))
+        if ap.is_symlink() or not ap.is_file():
+            return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": f"Authorization attachment missing or symlink: {att_path_raw}", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
+        actual_att_sha = hash_artifact(ap)
+        if att_sha_want and str(att_sha_want).lower() != actual_att_sha.lower():
+            return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Authorization attachment SHA-256 mismatch.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
 
     body_for_hash = {k: v for k, v in doc.items() if k != "receipt_sha256"}
     computed_sha = hash_artifact(body_for_hash)
     if doc.get("receipt_sha256") and str(doc["receipt_sha256"]) != computed_sha:
-        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Tampered commercial permission receipt_sha256 mismatch.", "receipt_sha256": None}
+        return {"verified": False, "status": "BLOCKED_COMMERCIAL_LICENSE", "reason": "Tampered commercial permission receipt_sha256 mismatch.", "receipt_sha256": None, "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE"}
 
     return {
         "verified": True,
         "status": "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED",
-        "reason": f"Verified structured commercial authorization receipt ({auth_ref[:40]}).",
+        "reason": f"Manual owner-verified structured commercial authorization receipt ({auth_ref[:40]}).",
         "receipt_sha256": computed_sha,
+        "verification_method": "MANUAL_OWNER_VERIFIED_RECEIPT_NOT_CRYPTOGRAPHIC_SIGNATURE",
         "source_path": source_path,
         "licensor": licensor,
         "scope": scope,
         "upstream_pin": pin,
+    }
+
+
+def audit_license_and_dependencies(
+    *,
+    seecut_root: Path | None = None,
+    tools_root: Path | None = None,
+    intended_purpose: str = "NONCOMMERCIAL_ENGINEERING",
+    commercial_permission_evidence: Any = None,
+    out_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Emit R4.2-01 LICENSE_AUDIT.json, DEPENDENCY_PROVENANCE.json, RIGHTS_LEDGER.json, COMMERCIAL_READINESS.json."""
+    import subprocess
+    from . import UPSTREAM_SEECUT_SHA
+    repo_root = Path(__file__).resolve().parents[2]
+    standalone = Path(os.environ.get("SEECUT_STANDALONE_ROOT", os.path.expanduser("~/Projects/SeeCut-Olivia-Standalone")))
+    up_root = seecut_root or Path(os.environ.get("SEECUT_UPSTREAM_ROOT", str(standalone / "third_party/SeeCut")))
+    troot = tools_root or (standalone / "tools")
+
+    up_head = None
+    up_clean = False
+    if (up_root / ".git").exists():
+        try:
+            up_head = subprocess.check_output(["git", "-C", str(up_root), "rev-parse", "HEAD"], text=True, timeout=10).strip()
+            up_clean = subprocess.check_output(["git", "-C", str(up_root), "status", "--short"], text=True, timeout=10).strip() == ""
+        except Exception:
+            pass
+
+    hf_ver = None
+    pw_ver = None
+    gsap_path = None
+    gsap_sha = None
+    hf_pkg = troot / "node_modules" / "hyperframes" / "package.json"
+    pw_pkg = troot / "node_modules" / "playwright-core" / "package.json"
+    if hf_pkg.is_file():
+        hf_ver = json.loads(hf_pkg.read_text(encoding="utf-8")).get("version")
+    if pw_pkg.is_file():
+        pw_ver = json.loads(pw_pkg.read_text(encoding="utf-8")).get("version")
+    gsaps = sorted(troot.glob("node_modules/hyperframes/dist/vendor/npm/gsap@*/dist/gsap.min.js"))
+    if gsaps:
+        gsap_path = gsaps[-1]
+        gsap_sha = hash_artifact(gsap_path)
+
+    perm_check = verify_commercial_permission_evidence(commercial_permission_evidence)
+    is_comm = str(intended_purpose or "").strip().upper() == "COMMERCIAL_MARKETING"
+    comm_ready = bool(perm_check["verified"]) if is_comm else False
+
+    lic_audit = {
+        "schema_version": "kh03.license_audit.v1",
+        "audited_at_utc": now_utc(),
+        "intended_purpose": intended_purpose,
+        "upstream_project": "https://github.com/YeJe-cpu/SeeCut",
+        "upstream_pin_expected": UPSTREAM_SEECUT_SHA,
+        "upstream_pin_observed": up_head,
+        "upstream_pin_exact_match": bool(up_head and up_head == UPSTREAM_SEECUT_SHA),
+        "upstream_worktree_clean": up_clean,
+        "upstream_license": "PolyForm Noncommercial License 1.0.0",
+        "commercial_contact": "aiesecxuanli@gmail.com",
+        "repo_license_present": (repo_root / "LICENSE").is_file(),
+        "repo_notice_present": (repo_root / "NOTICE").is_file(),
+        "commercial_permission_check": perm_check,
+        "noncommercial_engineering_permitted": True,
+        "commercial_marketing_permitted": comm_ready,
+        "effective_commercial_status": "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" if comm_ready else "BLOCKED_COMMERCIAL_LICENSE",
+    }
+    dep_prov = {
+        "schema_version": "kh03.dependency_provenance.v1",
+        "audited_at_utc": now_utc(),
+        "components": [
+            {"name": "YeJe-cpu/SeeCut", "version_or_sha": up_head or "NOT_INSTALLED", "license": "PolyForm Noncommercial 1.0.0", "commercial_ok": comm_ready},
+            {"name": "browser-use/video-use (selective MIT helpers only)", "version_or_sha": "43cfc566833548093455c9d4a46bd69913b7e552", "license": "MIT", "commercial_ok": True, "note": "Does NOT re-license SeeCut renderer."},
+            {"name": "hyperframes", "version_or_sha": hf_ver or "NOT_INSTALLED", "license": "Apache-2.0", "commercial_ok": True},
+            {"name": "playwright-core", "version_or_sha": pw_ver or "NOT_INSTALLED", "license": "Apache-2.0", "commercial_ok": True},
+            {"name": "gsap.min.js (vendored in hyperframes)", "version_or_sha": gsap_sha or "NOT_INSTALLED", "license": "GreenSock Standard License", "commercial_ok": True},
+            {"name": "faster-whisper", "version_or_sha": "local_venv", "license": "MIT", "commercial_ok": True},
+            {"name": "ffmpeg/ffprobe", "version_or_sha": "system_path", "license": "LGPL/GPL", "commercial_ok": True},
+        ],
+        "rule": "Permissive licenses on individual dependencies NEVER override PolyForm Noncommercial 1.0.0 on the YeJe-cpu/SeeCut core renderer.",
+    }
+    rights_ledger = {
+        "schema_version": "kh03.rights_ledger.v1",
+        "audited_at_utc": now_utc(),
+        "entries": [
+            {"asset_class": "native_seecut_renderer", "license": "PolyForm Noncommercial 1.0.0", "noncommercial_ok": True, "commercial_ok": comm_ready},
+            {"asset_class": "kh02_kh03_derivative_code", "license": "PolyForm Noncommercial 1.0.0 (derivative)", "noncommercial_ok": True, "commercial_ok": comm_ready},
+            {"asset_class": "synthetic_engineering_fixtures", "license": "ORIGINAL_NONCOMMERCIAL_TEST_ONLY", "noncommercial_ok": True, "commercial_ok": False},
+        ],
+    }
+    comm_readiness = {
+        "schema_version": "kh03.commercial_readiness.v1",
+        "audited_at_utc": now_utc(),
+        "status": "COMMERCIAL_AUTHORIZED" if comm_ready else "BLOCKED_COMMERCIAL_LICENSE",
+        "native_seecut_commercial_authorized": comm_ready,
+        "path_b_bypass_permitted": False,
+        "required_owner_actions": [] if comm_ready else [
+            "Obtain written commercial license authorization from YeJe-cpu (aiesecxuanli@gmail.com) covering SeeCut core renderer + commercial Gumroad marketing for upstream pin b05d7ed27404a064060e0d370402f562b0c0c02e.",
+            "Record the verified written authorization into a structured JSON permission receipt with full 40-char upstream_pin, scope, issued/expires UTC timestamps, attachment SHA-256, and verified_by_owner=true.",
+            "Alternative (requires explicit owner decision & clean-room audit): authorize a separate commercially licensed renderer with zero PolyForm Noncommercial code/assets (never labeled native SeeCut).",
+        ],
+    }
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(out_dir / "LICENSE_AUDIT.json", lic_audit)
+        write_json_atomic(out_dir / "DEPENDENCY_PROVENANCE.json", dep_prov)
+        write_json_atomic(out_dir / "RIGHTS_LEDGER.json", rights_ledger)
+        write_json_atomic(out_dir / "COMMERCIAL_READINESS.json", comm_readiness)
+    return {
+        "license_audit": lic_audit,
+        "dependency_provenance": dep_prov,
+        "rights_ledger": rights_ledger,
+        "commercial_readiness": comm_readiness,
     }
 
 
@@ -331,6 +476,7 @@ __all__ = [
     "StateTransitionError",
     "VALID_STATES",
     "assert_kh03_schema",
+    "audit_license_and_dependencies",
     "canonicalize",
     "ensure_run_tree",
     "hash_artifact",

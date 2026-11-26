@@ -271,6 +271,7 @@ def execute_pipeline(
     allow_test_only_sfx: bool = False,
     sfx_tool_invoker: Any = None,
     kh03_selection_receipt: dict[str, Any] | None = None,
+    kh03_selection_run_dir: Path | None = None,
     kh03_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Single-entry orchestrated KH-02.R2 pipeline (Stages A -> N) with strict license gate, stage receipts & SHA linkage."""
@@ -335,7 +336,7 @@ def execute_pipeline(
         try:
             from scripts.kh03.selection import validate_user_selection as _kh03_validate_selection
             _kh03_validate_selection(
-                run_dir=run_dir,
+                run_dir=Path(kh03_selection_run_dir) if kh03_selection_run_dir is not None else run_dir,
                 production_mode=production_mode,
                 expected_skill_id=str(kh03_overrides.get("selected_skill_id")),
                 supplied_receipt=kh03_selection_receipt,

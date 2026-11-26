@@ -16,6 +16,7 @@ user-selected universal editing skill (SK-01..SK-05) and upstream <=3 iteration 
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -173,13 +174,13 @@ def build_candidate_bundle(
                 if bi % 2 == 1:
                     lb["layout_mode"] = "FULL_CANVAS"
                     lb["presenter_box_norm"] = [0.0, 0.0, 1.0, 1.0]
-                    lb["graphic_box_norm"] = [0.06, 0.06, 0.88, 0.16]
+                    lb["graphic_box_norm"] = [0.045, 0.042, 0.91, 0.112]
                     lb["caption_slot_norm"] = [0.06, 0.78, 0.80, 0.08]
                 else:
                     lb["layout_mode"] = "PRESENTER_RIGHT_SPLIT"
-                    lb["presenter_box_norm"] = [0.48, 0.0, 0.52, 1.0]
-                    lb["graphic_box_norm"] = [0.04, 0.14, 0.42, 0.68]
-                    lb["caption_slot_norm"] = [0.04, 0.84, 0.42, 0.07]
+                    lb["presenter_box_norm"] = [0.494, 0.145, 0.468, 0.72]
+                    lb["graphic_box_norm"] = [0.038, 0.145, 0.436, 0.72]
+                    lb["caption_slot_norm"] = [0.038, 0.88, 0.924, 0.06]
                 pbox = lb["presenter_box_norm"]
                 fc = tuple(lb.get("anchor") or [0.5, 0.36])
                 lb["source_crop"] = compute_source_crop_for_box(
@@ -191,13 +192,13 @@ def build_candidate_bundle(
                 lb = lp["beats"][bi]
                 if bi % 2 == 1:
                     lb["layout_mode"] = "FLOATING_INSET_PRESENTER"
-                    lb["presenter_box_norm"] = [0.04, 0.58, 0.36, 0.34]
-                    lb["graphic_box_norm"] = [0.04, 0.07, 0.92, 0.48]
-                    lb["caption_slot_norm"] = [0.42, 0.68, 0.50, 0.08]
+                    lb["presenter_box_norm"] = [0.04, 0.52, 0.44, 0.36]
+                    lb["graphic_box_norm"] = [0.04, 0.06, 0.92, 0.42]
+                    lb["caption_slot_norm"] = [0.50, 0.66, 0.44, 0.08]
                 else:
                     lb["layout_mode"] = "LOWER_COMPANION_SPLIT"
-                    lb["presenter_box_norm"] = [0.0, 0.48, 1.0, 0.52]
-                    lb["graphic_box_norm"] = [0.04, 0.06, 0.92, 0.40]
+                    lb["presenter_box_norm"] = [0.04, 0.48, 0.92, 0.44]
+                    lb["graphic_box_norm"] = [0.04, 0.06, 0.92, 0.39]
                     lb["caption_slot_norm"] = [0.06, 0.41, 0.80, 0.06]
                 pbox = lb["presenter_box_norm"]
                 fc = tuple(lb.get("anchor") or [0.5, 0.36])
@@ -534,6 +535,7 @@ def _blind_view(cand: dict[str, Any], blind_slot: str) -> dict[str, Any]:
         "layout_plan_sha256": cand.get("layout_plan_sha256"),
         "preview_mp4_path": cand.get("preview_mp4_path"),
         "preview_mp4_sha256": cand.get("preview_mp4_sha256"),
+        "html_path": cand.get("html_path"),
         "layout_rhythm": cand.get("layout_rhythm"),
     }
 
@@ -961,3 +963,257 @@ def bind_winner_to_execution(
         "layout_plan": mat["layout_plan"],
         "motion_graph": mat["motion_graph"],
     }
+
+
+def build_native_candidate_preview_runner(
+    *,
+    run_id: str,
+    parent_run_dir: Path | None = None,
+    inp: dict[str, Any],
+    skill_id: str,
+    selection_receipt: dict[str, Any],
+    sources_list: list[dict[str, Any]],
+    pres_pol: dict[str, Any],
+    eff_cut: str,
+    eff_caption: str,
+    eff_music: str,
+    sfx_policy: str,
+    eff_purpose: str,
+    eff_lic: str,
+    eff_evid: str | None,
+    sfx_library_dirs: list[str | Path] | None = None,
+    sfx_config_path: Path | None = None,
+    offline: bool = True,
+    production_mode: bool = True,
+    allow_test_only_sfx: bool = False,
+    seecut_root: Path | None = None,
+    tools_root: Path | None = None,
+    render_scale: float = 0.5,
+) -> Callable[[dict[str, Any], Path], dict[str, Any]]:
+    """Production native candidate preview runner (R4.2-03): compiles & renders each candidate in its isolated
+    workspace using the exact same KH-02 -> YeJe-cpu/SeeCut native HyperFrames/GSAP renderer (`mode='preview'`,
+    bounded concurrency=1, NO recursive router call, NO self-adoption) and verifies preview MP4 SHA + H1 + decode!
+    """
+    from scripts.kh02.run import execute_pipeline as execute_kh02_pipeline
+    from .director import compile_to_kh02_overrides
+    from .recommend import get_skill_contract
+    from .sound_director import plan_soundscape_for_skill
+
+    fps_num = int(inp["media"]["fps_num"])
+    fps_den = max(1, int(inp["media"]["fps_den"]))
+    fps = fps_num / float(fps_den)
+    sk = get_skill_contract(skill_id)
+    asset_purpose = "COMMERCIAL_AND_NONCOMMERCIAL" if eff_purpose == "COMMERCIAL_MARKETING" else "NONCOMMERCIAL_ONLY"
+
+    def _run_preview(cand: dict[str, Any], cand_ws: Path) -> dict[str, Any]:
+        cid = str(cand["candidate_id"])
+        cand_ws.mkdir(parents=True, exist_ok=True)
+        cp = dict(cand["creative_plan"])
+        lp = dict(cand["layout_plan"])
+        mg = dict(cand["motion_graph"]) if cand.get("motion_graph") else None
+
+        # Candidate-specific sound plan
+        snd = plan_soundscape_for_skill(
+            run_id=f"{run_id}_{cid}",
+            run_dir=cand_ws,
+            creative_plan=cp,
+            layout_plan=lp,
+            motion_graph=mg,
+            fps=fps,
+            fps_num=fps_num,
+            fps_den=fps_den,
+            sample_rate=int(inp["media"].get("audio_sample_rate") or 48000),
+            voice_policy=eff_cut,
+            sfx_policy=sfx_policy,
+            bgm_policy=eff_music,
+            sfx_library_dirs=sfx_library_dirs,
+            sfx_config_path=sfx_config_path,
+            intended_purpose=asset_purpose,
+            offline=offline,
+            workers=1,
+            production_mode=production_mode,
+            allow_test_only_sfx=allow_test_only_sfx,
+        )
+        ov = compile_to_kh02_overrides(
+            cp,
+            fps=fps,
+            sound_plan=snd["sound_plan"],
+            layout_plan=lp,
+            motion_graph=mg,
+            caption_policy=eff_caption,
+            winning_candidate_id=cid,
+            winner_binding_sha256=cand.get("bundle_sha256"),
+            competition_status="CANDIDATE_PREVIEW_EVALUATION",
+        )
+        brief = {
+            "schema_version": "kh02.brief.v2",
+            "brief_id": f"kh03_{cid}_{run_id[:20]}",
+            "title": f"KH-03 Preview {cid} ({skill_id}: {sk['name']})",
+            "mode": "talking_head",
+            "profile": ov["profile"],
+            "objective": f"Isolated native preview render for {cid} within {skill_id}.",
+            "audience": inp["audience_profile"],
+            "platform": "reels" if inp["media"]["aspect_ratio"] == "9:16" else "youtube",
+            "aspect_ratio": inp["media"]["aspect_ratio"],
+            "language": inp["language"],
+            "tone": sk["preferred_energy"],
+            "key_message": (inp.get("normalized_script") or "Visual showcase")[:140],
+            "voice_policy": eff_cut,
+            "cut_policy": eff_cut,
+            "energy_mode": ov["energy_mode"],
+            "caption_policy": eff_caption,
+            "music_policy": eff_music,
+            "sfx_policy": sfx_policy,
+            "intended_purpose": eff_purpose,
+            "commercial_permission_evidence": eff_evid or None,
+            "license_decision": eff_lic,
+            "creative_theme": cp["art_direction"]["theme"],
+            "presenter_policy": pres_pol,
+            "sources": sources_list,
+        }
+        bp = write_json_atomic(cand_ws / "KH02_CANDIDATE_BRIEF.json", brief)
+        res = execute_kh02_pipeline(
+            brief_path=bp,
+            run_root=cand_ws,
+            mode="preview",
+            dry_run=False,
+            workers=1,
+            sfx_library_dirs=sfx_library_dirs,
+            sfx_config_path=sfx_config_path,
+            offline=offline,
+            seecut_root=seecut_root,
+            tools_root=tools_root,
+            run_h2=False,
+            export_layers=False,
+            production_mode=production_mode,
+            allow_test_only_sfx=allow_test_only_sfx,
+            kh03_selection_receipt=selection_receipt,
+            kh03_selection_run_dir=parent_run_dir,
+            kh03_overrides=ov,
+        )
+        mp4_p_raw = res.get("final_mp4_path") or res.get("preview_mp4_path")
+        mp4_p = Path(mp4_p_raw) if mp4_p_raw else None
+        # Fallback: locate rendered preview MP4 in exports/ if execute_kh02_pipeline ran full preview mux
+        if (mp4_p is None or not mp4_p.is_file()) and (cand_ws / "exports").is_dir():
+            mp4s = sorted((cand_ws / "exports").glob("*.mp4"))
+            if mp4s:
+                mp4_p = mp4s[-1]
+        # If KH-02 preview mode only rendered probe PNGs (no muxed MP4 yet), invoke run_render_checked full @ render_scale=0.5!
+        if mp4_p is None or not mp4_p.is_file():
+            bdir = cand_ws / "build"
+            if (bdir / "project.json").is_file() and res.get("exit_code") == 0:
+                from scripts.kh02.render_guard import run_render_checked
+                prev_out = cand_ws / "exports" / f"preview_{cid}.mp4"
+                try:
+                    rr = run_render_checked(
+                        bdir, cand_ws, run_id=f"{run_id}_{cid}",
+                        mode="full", render_scale=render_scale,
+                        out_mp4=prev_out, seecut_root=seecut_root, tools_root=tools_root,
+                    )
+                    if rr.get("mp4_path") and Path(rr["mp4_path"]).is_file():
+                        mp4_p = Path(rr["mp4_path"])
+                except Exception as ex:
+                    return {
+                        "candidate_id": cid,
+                        "preview_mp4_path": None,
+                        "preview_mp4_sha256": None,
+                        "preview_qa_pass": False,
+                        "render_scale": render_scale,
+                        "error": f"Native preview render failed: {ex}",
+                    }
+        exists = bool(mp4_p and mp4_p.is_file())
+        sha = hash_artifact(mp4_p) if exists else None
+        h1_ok = bool((res.get("h1_geom") or {}).get("pass", False))
+        html_p = cand_ws / "build" / "master.html"
+        receipt = {
+            "schema_version": "kh03.candidate_preview_receipt.v1",
+            "candidate_id": cid,
+            "workspace_dir": str(cand_ws),
+            "render_scale": render_scale,
+            "preview_mp4_path": str(mp4_p) if exists else None,
+            "preview_mp4_sha256": sha,
+            "html_path": str(html_p) if html_p.is_file() else None,
+            "h1_geom_pass": h1_ok,
+            "kh02_exit_code": int(res.get("exit_code", 1)),
+            "preview_qa_pass": bool(exists and sha and h1_ok and int(res.get("exit_code", 1)) == 0),
+        }
+        write_json_atomic(cand_ws / "PREVIEW_RECEIPT.json", receipt)
+        return receipt
+
+    return _run_preview
+
+
+def build_live_pairwise_judge(
+    *,
+    online_opt_in: bool = False,
+    seecut_root: Path | None = None,
+    out_dir: Path | None = None,
+    timeout_sec: int = 180,
+) -> Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]:
+    """Production live pairwise judge adapter wrapping scripts/agy_judge_safe.py (R4.2-04).
+
+    Never substitutes a synthetic scorer as a live judge: if online_opt_in is False, agy CLI is absent,
+    or candidate preview MP4s are missing, returns honest BLOCKED status so rank_candidates halts cleanly!
+    """
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    judge_py = repo_root / "scripts" / "agy_judge_safe.py"
+    standalone = Path(os.environ.get("SEECUT_STANDALONE_ROOT", os.path.expanduser("~/Projects/SeeCut-Olivia-Standalone")))
+    up_root = seecut_root or Path(os.environ.get("SEECUT_UPSTREAM_ROOT", str(standalone / "third_party/SeeCut")))
+    skill_dir = up_root / "skill" / "seecut"
+    agy_bin = (
+        os.environ.get("AGY_BIN")
+        or shutil.which("agy")
+        or (str(Path.home() / ".gemini/bin/agy") if (Path.home() / ".gemini/bin/agy").is_file() else None)
+    )
+
+    def _pair_judge(cand_x: dict[str, Any], cand_y: dict[str, Any]) -> dict[str, Any]:
+        if not online_opt_in:
+            return {"winner": None, "status": "BLOCKED_OFFLINE_NO_ONLINE_OPT_IN", "reason": "Live pairwise judge requires explicit --online-opt-in."}
+        if not agy_bin:
+            return {"winner": None, "status": "BLOCKED_JUDGE_UNAVAILABLE", "reason": "agy CLI binary not installed on host."}
+        if not judge_py.is_file() or not skill_dir.is_dir():
+            return {"winner": None, "status": "BLOCKED_JUDGE_UNAVAILABLE", "reason": f"agy_judge_safe.py or upstream skill_dir missing ({skill_dir})."}
+        mp4_x = cand_x.get("preview_mp4_path")
+        mp4_y = cand_y.get("preview_mp4_path")
+        if not (mp4_x and Path(mp4_x).is_file() and mp4_y and Path(mp4_y).is_file()):
+            return {"winner": None, "status": "BLOCKED_MISSING_PREVIEW_MP4", "reason": "Both candidates require real rendered preview MP4s for live judge."}
+
+        pair_out = (Path(out_dir) / f"pair_{cand_x.get('candidate_id', 'x')}_vs_{cand_y.get('candidate_id', 'y')}.json") if out_dir is not None else None
+        cmd = [sys.executable, str(judge_py), "pair", "--a", str(mp4_x), "--b", str(mp4_y), "--timeout", str(timeout_sec)]
+        if cand_x.get("html_path") and Path(str(cand_x["html_path"])).is_file():
+            cmd += ["--html-a", str(cand_x["html_path"])]
+        if cand_y.get("html_path") and Path(str(cand_y["html_path"])).is_file():
+            cmd += ["--html-b", str(cand_y["html_path"])]
+        if pair_out is not None:
+            pair_out.parent.mkdir(parents=True, exist_ok=True)
+            cmd += ["--out", str(pair_out)]
+        env = dict(os.environ)
+        env["SEECUT_SKILL_DIR"] = str(skill_dir)
+        try:
+            pr = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_sec + 30, env=env)
+        except subprocess.TimeoutExpired:
+            return {"winner": None, "status": "BLOCKED_JUDGE_TIMEOUT", "reason": f"agy_judge_safe pair timed out after {timeout_sec}s."}
+        if pr.returncode != 0:
+            return {"winner": None, "status": "BLOCKED_JUDGE_ERROR", "returncode": pr.returncode, "stderr": pr.stderr[-300:]}
+        try:
+            if pair_out is not None and pair_out.is_file():
+                doc = json.loads(pair_out.read_text(encoding="utf-8"))
+            else:
+                doc = json.loads(pr.stdout[pr.stdout.index("{"):])
+        except Exception as ex:
+            return {"winner": None, "status": "BLOCKED_JUDGE_MALFORMED", "reason": f"Invalid JSON from agy_judge_safe: {ex}"}
+        w = doc.get("consensus") or doc.get("adopted") or doc.get("winner")
+        if w in ("A", "X"):
+            return {"winner": "X", "raw": doc, "status": "LIVE_JUDGE_OK"}
+        if w in ("B", "Y"):
+            return {"winner": "Y", "raw": doc, "status": "LIVE_JUDGE_OK"}
+        if str(w or "").upper() == "TIE":
+            return {"winner": "TIE", "raw": doc, "status": "LIVE_JUDGE_TIE"}
+        return {"winner": None, "raw": doc, "status": "BLOCKED_JUDGE_INVALID_WINNER"}
+
+    return _pair_judge

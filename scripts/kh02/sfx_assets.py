@@ -507,7 +507,7 @@ def discover_local_library(
                 if scanned_entries > max_entries:
                     truncated = True
                     break
-                if entry.is_symlink():
+                if entry.is_symlink() or (hasattr(os.path, "isjunction") and os.path.isjunction(str(entry))):
                     rejected.append({"path": str(entry), "reason": "Symlink rejected during bounded local SFX scan"})
                     continue
                 try:

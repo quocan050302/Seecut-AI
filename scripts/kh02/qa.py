@@ -990,13 +990,18 @@ def run_h1_geom_check(
         return {"pass": False, "status": "BLOCKED_ENV", "exit_code": 2, "error": f"Missing pinned geom-check.mjs: {geom_mjs}"}
 
     troot = tools_root or (Path(os.environ.get("SEECUT_STANDALONE_ROOT", os.path.expanduser("~/Projects/SeeCut-Olivia-Standalone"))) / "tools")
-    nm = bdir / "node_modules"
-    if not nm.exists() and (troot / "node_modules").is_dir():
-        nm.symlink_to(troot / "node_modules")
+    from .render_guard import _ensure_node_link, resolve_local_chromium
+    _ensure_node_link(bdir, troot)
+
+    env = dict(os.environ)
+    if not env.get("JIANJI_CHROME"):
+        cp = resolve_local_chromium()
+        if cp is not None:
+            env["JIANJI_CHROME"] = str(cp)
 
     proc = subprocess.run(
         ["node", str(geom_mjs), str(bdir)],
-        capture_output=True, text=True, timeout=timeout_sec,
+        env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_sec,
     )
     combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
     if out_log is not None:
@@ -1045,22 +1050,28 @@ def export_and_verify_jianying_layers(
         return {"pass": False, "status": "BLOCKED_ENV", "error": "Pinned upstream JianYing scripts missing"}
 
     troot = tools_root or (Path(os.environ.get("SEECUT_STANDALONE_ROOT", os.path.expanduser("~/Projects/SeeCut-Olivia-Standalone"))) / "tools")
-    nm = bdir / "node_modules"
-    if not nm.exists() and (troot / "node_modules").is_dir():
-        nm.symlink_to(troot / "node_modules")
+    from .render_guard import _ensure_node_link, resolve_local_chromium
+    _ensure_node_link(bdir, troot)
+
+    env = dict(os.environ)
+    if not env.get("JIANJI_CHROME"):
+        cp = resolve_local_chromium()
+        if cp is not None:
+            env["JIANJI_CHROME"] = str(cp)
 
     p1 = subprocess.run(
         ["node", str(layers_mjs), str(bdir), str(layers_dir)],
-        capture_output=True, text=True, timeout=180,
+        env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
     )
     manifest_p = layers_dir / "manifest.json"
     if p1.returncode != 0 or not manifest_p.is_file():
         return {"pass": False, "status": "FAIL_LAYERS", "exit_code": p1.returncode, "stderr": (p1.stderr or p1.stdout)[-400:]}
 
     plan_out = jdir / "jianying_plan.json"
+    import sys as _sys
     p2 = subprocess.run(
-        ["python3", str(plan_py), str(manifest_p), "--name", project_name, "--out", str(plan_out)],
-        capture_output=True, text=True, timeout=60,
+        [_sys.executable, str(plan_py), str(manifest_p), "--name", project_name, "--out", str(plan_out)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
     )
     if p2.returncode != 0 or not plan_out.is_file():
         return {"pass": False, "status": "FAIL_PLAN", "exit_code": p2.returncode, "stderr": (p2.stderr or p2.stdout)[-400:]}

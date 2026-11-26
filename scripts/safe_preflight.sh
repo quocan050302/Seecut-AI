@@ -51,7 +51,7 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     -h|--help)
-      print "Usage: safe_preflight.sh [--offline|--live] [--skip-agy-ping] [--json-out <path>] [--build-dir <dir>] [--timeout <sec>]"
+      printf '%s\n' "Usage: safe_preflight.sh [--offline|--live] [--skip-agy-ping] [--json-out <path>] [--build-dir <dir>] [--timeout <sec>]"
       exit 0
       ;;
     *)
@@ -59,7 +59,7 @@ while [ $# -gt 0 ]; do
         BUILD_DIR="$1"
         shift
       else
-        print -u2 "Unknown argument: $1"
+        printf '%s\n' "Unknown argument: $1" >&2
         exit 1
       fi
       ;;
@@ -68,30 +68,15 @@ done
 
 export PATH="$TOOLS_ROOT/node_modules/.bin:$HOME/.gemini/bin:$HOME/.local/bin:$PATH"
 
-redact_text() {
-  python3 -c '
-import re, sys
-txt = sys.stdin.read()
-txt = re.sub(r"(https?://)([^:@/\s]+):([^@/\s]+)@", r"\1***:***@", txt)
-txt = re.sub(r"(?i)(api[_-]?key|token|secret|password|authorization)\s*[:=]\s*[^\s\"'\'']+", r"\1=[REDACTED]", txt)
-txt = re.sub(r"\b(AIza[0-9A-Za-z_-]{20,}|sk-[0-9A-Za-z_-]{16,}|ghp_[0-9A-Za-z]{20,}|Bearer\s+[0-9A-Za-z._-]{12,})\b", "[REDACTED]", txt)
-sys.stdout.write(txt)
-'
-}
-
-PREFLIGHT_TMP=""
-MARKER_NAME=".seecut_preflight_owned_$$"
-cleanup_tmp() {
-  if [ -n "$PREFLIGHT_TMP" ] && [ -d "$PREFLIGHT_TMP" ] && [ -f "$PREFLIGHT_TMP/$MARKER_NAME" ]; then
-    rm -rf "$PREFLIGHT_TMP"
+# Collect check results into JSON via python3 / python (guaranteed deterministic JSON output across macOS/Linux/Windows)
+PYTHON_SYS="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+if [ -n "$PYTHON_SYS" ]; then
+  if ! "$PYTHON_SYS" -c "import sys" >/dev/null 2>&1; then
+    PYTHON_SYS="$(command -v python 2>/dev/null || true)"
   fi
-}
-trap cleanup_tmp EXIT INT TERM
-
-# Collect check results into JSON via python3 (guaranteed deterministic JSON output)
-PYTHON_SYS="$(command -v python3 2>/dev/null || true)"
-if [ -z "$PYTHON_SYS" ] || [ ! -x "$PYTHON_SYS" ]; then
-  print -u2 '{"status":"FAIL","exit_code":1,"error":"python3 not found on PATH"}'
+fi
+if [ -z "$PYTHON_SYS" ]; then
+  printf '%s\n' '{"status":"FAIL","exit_code":1,"error":"python3/python not found on PATH"}' >&2
   exit 1
 fi
 
@@ -134,7 +119,17 @@ def redact(text: str) -> str:
 
 def run_cmd(cmd, timeout=15, cwd=None):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+        eff_cmd = list(cmd)
+        if os.name == "nt" and eff_cmd and os.path.isfile(eff_cmd[0]):
+            try:
+                head = Path(eff_cmd[0]).read_bytes()[:2]
+                if head == b"#!":
+                    bash_exe = shutil.which("bash") or r"C:\Program Files\Git\bin\bash.exe"
+                    if bash_exe and os.path.isfile(bash_exe):
+                        eff_cmd = [bash_exe, *eff_cmd]
+            except Exception:
+                pass
+        p = subprocess.run(eff_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=cwd)
         return p.returncode, redact(p.stdout), redact(p.stderr)
     except subprocess.TimeoutExpired:
         return 124, "", f"timeout after {timeout}s"
@@ -238,14 +233,17 @@ else:
 pw_pkg = tools_root / "node_modules" / "playwright-core" / "package.json"
 chrome_bin = os.environ.get("JIANJI_CHROME", "")
 if not chrome_bin:
-    for root in (Path.home() / "Library/Caches/ms-playwright", Path.home() / ".cache/ms-playwright"):
+    roots = [Path.home() / "Library/Caches/ms-playwright", Path.home() / ".cache/ms-playwright"]
+    if os.environ.get("LOCALAPPDATA"):
+        roots.append(Path(os.environ["LOCALAPPDATA"]) / "ms-playwright")
+    for root in roots:
         if root.is_dir():
             for d in sorted(root.iterdir(), reverse=True):
-                if d.name.startswith("chromium_headless_shell") and d.is_dir():
+                if (d.name.startswith("chromium_headless_shell") or d.name.startswith("chromium-")) and d.is_dir():
                     for sub in d.iterdir():
-                        for exe in ("chrome-headless-shell", "headless_shell"):
+                        for exe in ("chrome-headless-shell", "headless_shell", "chrome-headless-shell.exe", "chrome.exe"):
                             cand = sub / exe
-                            if cand.is_file() and os.access(cand, os.X_OK):
+                            if cand.is_file():
                                 chrome_bin = str(cand)
                                 break
                         if chrome_bin:

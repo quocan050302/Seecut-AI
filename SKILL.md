@@ -1,15 +1,17 @@
 ---
 name: seecut-ai
 description: >-
-  Run KH-03.R4.1Intelligence Production Integration & Truthfulness Hardening atop KH-03.R4/R3/R2, KH-02.R2, and YeJe-cpu/SeeCut v3.4 Core.
-  Analyzes any raw video + script across niches (including generic secondary evidence videos with MUTE_DEFAULT audio policy), recommends one of FIVE universal editing
+  Run KH-03.R4.2Intelligence Render Readiness & Production Integration atop KH-03.R4.1/R4/R3/R2, KH-02.R2, and YeJe-cpu/SeeCut v3.4 Core.
+  Supports mode-aware preflight (PLAN_READY / NATIVE_PREVIEW_READY / NATIVE_FULL_RENDER_READY / RELEASE_READY), cross-platform Windows/macOS native bootstrap,
+  multi-source CLI (--secondary-video / --sources-manifest with MUTE_DEFAULT audio & mixed-fps PTS clamping), generic speech-first alignment & duplicate-span removal (speech_edl.py),
+  real isolated native candidate preview competition (--compete-candidates) & live pairwise judge adapter (agy_judge_safe.py), recommends one of FIVE universal editing
   skills (SK-01..SK-05), and MANDATORILY STOPS for explicit user skill selection before
   running real entity action protection (PED-02), all-topology adaptive layout rhythm (PED-03),
   spatial interaction, 4-phase motion choreography, rights-verified evidence ledgers, bound multi-candidate
-  competition (PED-09 / R4.1-01), hardened ctx-aware CoordinatorPublisher async execution (PED-10 / R4.1-03),
+  competition (PED-09 / R4.1-01 / R4.2-03), hardened ctx-aware CoordinatorPublisher async execution (PED-10 / R4.1-03),
   guarded native HyperFrames/GSAP rendering, full 100% streaming component/frame/pixel/audio QA (PED-08 / R4.1-02 / R4.1-05),
   H1/H2/pairwise QA, strict raw-gate verify recomputation, and honest human sign-off.
-  Enforces PolyForm Noncommercial 1.0.0 fail-closed licensing with structured permission receipt verification (PROBLEM-01) and
+  Enforces PolyForm Noncommercial 1.0.0 fail-closed licensing with hardened structured permission receipt verification (PROBLEM-01 / R4.2-01) and
   preserves full backward compatibility with legacy KH-02.R2 invocations.
 ---
 
@@ -43,19 +45,19 @@ For every new editing request, `seecut-ai` **MUST** route through the KH-03 two-
    - Routes single-pass EDL-remapped plans straight into `scripts/kh02/run.py::execute_pipeline()`, verified with true `O(1)`-RAM streaming decoded frame QA (`StreamingRGBFrameDecoder` -> `STREAMING_QA_REPORT.json`, `PROCESS_CLEANUP_REPORT.json`), keeping `OWNER_VISUAL=PENDING`, `OWNER_AUDIO=PENDING`, and `COMMERCIAL_RELEASE=BLOCKED`.
 
 ```bash
-# 0. Offline preflight (environment, disk floor, license notice):
-python -m scripts.kh03 preflight
+# 0. Mode-aware preflight (PLAN_READY / NATIVE_PREVIEW_READY / NATIVE_FULL_RENDER_READY / RELEASE_READY):
+python -m scripts.kh03 preflight --mode preview --purpose NONCOMMERCIAL_ENGINEERING [--export-layers]
 
-# 1. Analyze raw video + script and issue 5-skill menu (STOPS in AWAITING_USER_SELECTION):
-python -m scripts.kh03 recommend --video <raw_source.mp4> --script <script.txt> --run-root <isolated_run_dir> [--layout-policy ADAPTIVE_DYNAMIC | --layout-lock FULLSCREEN_9_16] [--cut-policy PRESERVE_SCRIPT_TRIM] [--caption-policy ON_REQUESTED] [--purpose NONCOMMERCIAL_ENGINEERING|COMMERCIAL_MARKETING] [--run-asr]
+# 1. Analyze primary + optional secondary evidence video(s) + script and issue 5-skill menu (STOPS in AWAITING_USER_SELECTION):
+python -m scripts.kh03 recommend --video <raw_source.mp4> [--secondary-video <evidence_b.mp4> | --sources-manifest <sources.json>] --script <script.txt> --run-root <isolated_run_dir> [--layout-policy ADAPTIVE_DYNAMIC | --layout-lock FULLSCREEN_9_16] [--cut-policy PRESERVE_SCRIPT_TRIM] [--caption-policy OFF|ON_REQUESTED|KEYWORDS_ONLY] [--purpose NONCOMMERCIAL_ENGINEERING|COMMERCIAL_MARKETING] [--run-asr]
 
-# 2. Explicit owner choice (binding receipt for this exact run & input hashes):
-python -m scripts.kh03 select --run-root <isolated_run_dir> --skill SK-04
+# 2. Explicit owner choice (binding receipt for primary + secondary source hashes & constraints):
+python -m scripts.kh03 select --run-root <isolated_run_dir> --skill SK-05
 
-# 3. Execute full KH-03.R3 -> KH-02.R2 pipeline after validated selection:
-python -m scripts.kh03 execute --run-root <isolated_run_dir> --mode plan|preview|full [--sfx-library <licensed_dir>] [--footage-library <licensed_dir>] --workers 2 [--max-disk 4.0] [--max-memory-mib 4096] [--queue-frames 8] [--enable-tracking] [--reduced-motion]
+# 3. Execute full KH-03.R4.2 -> KH-02.R2 pipeline after validated selection (with optional native candidate competition):
+python -m scripts.kh03 execute --run-root <isolated_run_dir> --mode plan|preview|full [--compete-candidates --max-candidates 3] [--online-opt-in] [--export-layers] [--sfx-library <licensed_dir>] [--footage-library <licensed_dir>] --workers 2 [--max-disk 4.0] [--max-memory-mib 4096] [--queue-frames 8]
 
-# 4. Inspect state machine & verify end-to-end SHA propagation:
+# 4. Inspect state machine & verify end-to-end SHA propagation & raw gate recomputation:
 python -m scripts.kh03 status --run-root <isolated_run_dir>
 python -m scripts.kh03 verify --run-root <isolated_run_dir> [--require-render]
 ```

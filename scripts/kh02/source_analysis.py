@@ -37,10 +37,14 @@ def _parse_fraction(val: str | None) -> tuple[int | None, int | None]:
         return None, None
 
 
+def _is_link_or_junction(p: Path) -> bool:
+    return p.is_symlink() or (hasattr(os.path, "isjunction") and os.path.isjunction(str(p)))
+
+
 def probe_source(path: str | Path, *, allow_symlinks: bool = False) -> dict[str, Any]:
     """Probe a media or still file read-only via ffprobe. Raises RuntimeError on malformed media or ffprobe failure."""
     p = Path(path)
-    if not allow_symlinks and p.is_symlink():
+    if not allow_symlinks and (_is_link_or_junction(p) or any(_is_link_or_junction(par) for par in p.parents)):
         raise ValueError(f"Symlink source rejected: {p}")
     if not p.is_file():
         raise FileNotFoundError(f"Source file not found: {p}")

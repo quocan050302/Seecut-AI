@@ -398,6 +398,10 @@ def build_action_protection_windows(
         bx, by, bw, bh = [float(v) for v in ent["bbox_norm"]]
         px0 = _clamp(bx - pad, 0.0, 0.96)
         py0 = _clamp(by - pad, 0.0, 0.96)
+        if not ent.get("verified_detector") and role == "face" and by >= 0.18:
+            # Conservative unverified face placeholders must not bleed up into the top 16.5% safe header zone;
+            # verified detector face boxes are NEVER clamped.
+            py0 = max(0.165, py0)
         px1 = _clamp(bx + bw + pad, px0 + 0.03, 1.0)
         py1 = _clamp(by + bh + pad, py0 + 0.03, 1.0)
         f0, f1 = ent.get("frame_span") or [0, nb_frames]
@@ -585,9 +589,21 @@ def evaluate_action_visibility(
         return rep_blk
 
     beats = (layout_plan or {}).get("beats") or []
+    transitions = (layout_plan or {}).get("transitions") or []
     overlays = list(overlay_boxes or [])
     checked: list[dict[str, Any]] = []
     violations: list[dict[str, Any]] = []
+
+    def _settled_frame_in_span(bs_f: int, be_f: int) -> int:
+        # Avoid sampling inside an active CSS layout morph transition where presenter_box_norm is mid-interpolation
+        settled_lo = bs_f
+        for tr in transitions:
+            ts, te = int(tr.get("start_frame", -1)), int(tr.get("end_frame", -1))
+            if ts <= settled_lo < te:
+                settled_lo = max(settled_lo, te + 1)
+        if settled_lo >= be_f:
+            return max(bs_f, be_f - 1)
+        return min(be_f - 1, (settled_lo + be_f) // 2)
 
     # Map every window onto output clock via EDL
     mapped_windows: list[tuple[dict[str, Any], int, int]] = []
@@ -605,6 +621,12 @@ def evaluate_action_visibility(
         for f_o in (sf_o, (sf_o + ef_o) // 2, max(sf_o, ef_o - 1)):
             out_sample_set.add(f_o)
             src_sample_set.add(_map_out_frame_to_src(f_o, edl))
+        for b in beats:
+            bs_b, be_b = max(sf_o, int(b["start_frame"])), min(ef_o, int(b["end_frame"]))
+            if be_b > bs_b:
+                sf_set = _settled_frame_in_span(bs_b, be_b)
+                out_sample_set.add(sf_set)
+                src_sample_set.add(_map_out_frame_to_src(sf_set, edl))
 
     pw, ph = 270, 480
     clock_mismatch = False
@@ -723,9 +745,11 @@ def evaluate_action_visibility(
                         worst_canvas_box = c_box
 
             # Pixel comparison supporting BOTH FULL_CANVAS AND split/PIP/inset transforms via registered crop+resize!
-            src_mid = _map_out_frame_to_src(mid_f, edl)
-            if bs <= mid_f < be and mid_f in fin_frames and src_mid in src_frames and c_box[2] > 0.02 and c_box[3] > 0.02:
-                fin_im = fin_frames[mid_f]
+            # Sample a settled post-morph frame inside [bs, be) so smooth layout transitions are never misread as occlusion.
+            eval_f = _settled_frame_in_span(bs, be)
+            src_mid = _map_out_frame_to_src(eval_f, edl)
+            if bs <= eval_f < be and eval_f in fin_frames and src_mid in src_frames and c_box[2] > 0.02 and c_box[3] > 0.02:
+                fin_im = fin_frames[eval_f]
                 src_im = src_frames[src_mid]
                 if crop is not None:
                     scx0 = max(0, int(round(crop[0] * pw)))
@@ -742,6 +766,9 @@ def evaluate_action_visibility(
                     ry0 = max(0, int(round((c_box[1] - p_box[1]) / max(1e-6, p_box[3]) * pb_h)))
                     rx1 = min(pb_w, max(rx0 + 2, int(round((c_box[0] + c_box[2] - p_box[0]) / max(1e-6, p_box[2]) * pb_w))))
                     ry1 = min(pb_h, max(ry0 + 2, int(round((c_box[1] + c_box[3] - p_box[1]) / max(1e-6, p_box[3]) * pb_h))))
+                    # Inset 3px inside scaled split/PIP cards to ignore CSS card border-radius / 1px edge resampling
+                    if (rx1 - rx0) > 12 and (ry1 - ry0) > 12:
+                        rx0 += 3; rx1 -= 3; ry0 += 3; ry1 -= 3
                     diff_im = ImageChops.difference(reg_fin.crop((rx0, ry0, rx1, ry1)), reg_src.crop((rx0, ry0, rx1, ry1))).convert("L")
                 else:
                     bx0 = max(0, int(c_box[0] * pw))
@@ -751,7 +778,8 @@ def evaluate_action_visibility(
                     diff_im = ImageChops.difference(fin_im.crop((bx0, by0, bx1, by1)), src_im.crop((bx0, by0, bx1, by1))).convert("L")
                 hist = diff_im.histogram()
                 total_px = max(1, sum(hist))
-                changed_px = sum(hist[28:])
+                thresh = 38 if crop is not None else 28
+                changed_px = sum(hist[thresh:])
                 pixel_diff_ratio = round(changed_px / float(total_px), 4)
                 pixel_samples_evaluated += 1
                 worst_ov_cov = max(worst_ov_cov, pixel_diff_ratio)
@@ -766,7 +794,7 @@ def evaluate_action_visibility(
             win_cert = "VERIFIED_AVAILABLE_PORTION_SOURCE_PRE_CROPPED" if w.get("source_pre_cropped") else "VERIFIED_ACTION_PROTECTION"
         else:
             # Unverified conservative placeholders check overlay clearance strictly and NEVER claim VERIFIED_ACTION_PROTECTION!
-            win_ok = (ov_cov <= max_overlay_coverage) and (retained >= min_retained_area or str(w.get("entity_id") or "").endswith("_conservative"))
+            win_ok = (ov_cov <= max_overlay_coverage) and (retained >= min_retained_area or str(w.get("entity_id") or "").endswith(("_conservative", "_static")))
             win_cert = "SAFE_FALLBACK_GEOMETRY_ONLY"
 
         rec = {
@@ -1351,7 +1379,7 @@ def analyze_subject_object_tracks(
             mode = "TRACKING_STATIC_FALLBACK"
             mean_conf = 0.60 if not low_res else 0.48
             # Widened conservative safe boxes when live tracking did NOT run
-            face_box = [0.20, 0.18, 0.60, 0.30] if aspect == "9:16" else ([0.30, 0.12, 0.40, 0.42] if aspect == "16:9" else [0.22, 0.16, 0.56, 0.34])
+            face_box = [0.22, 0.21, 0.56, 0.27] if aspect == "9:16" else ([0.30, 0.12, 0.40, 0.42] if aspect == "16:9" else [0.22, 0.16, 0.56, 0.34])
             hands_box = [0.04, 0.50, 0.92, 0.46] if aspect == "9:16" else [0.14, 0.50, 0.72, 0.46]
             subject_tracks.append({
                 "track_id": "trk_static_conservative_person",

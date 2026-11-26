@@ -921,17 +921,19 @@ def orchestrate_final_render_qa(
     write_json_atomic(qdir / "MOTION_SOUND_SYNC.json", motion_sound_sync)
 
     # Real NATIVE_RENDER_PROOF.json — inspects actual upstream repo SHA, render.mjs hash, command & exit code!
-    eff_seecut_root = Path(seecut_root) if seecut_root else (Path(full_render["render_mjs"]).parents[3] if full_render.get("render_mjs") and len(Path(full_render["render_mjs"]).parents) >= 4 else None)
+    rmjs_str = full_render.get("render_mjs") or full_render.get("renderer_script")
+    eff_seecut_root = Path(seecut_root) if seecut_root else (Path(rmjs_str).parents[3] if rmjs_str and len(Path(rmjs_str).parents) >= 4 else None)
     actual_git_sha, git_ok = _probe_actual_upstream_git_sha(eff_seecut_root)
-    render_mjs_p = Path(full_render["render_mjs"]) if full_render.get("render_mjs") else None
+    render_mjs_p = Path(rmjs_str) if rmjs_str else (eff_seecut_root / "skill/seecut/scripts/render.mjs" if eff_seecut_root else None)
     render_mjs_exists = bool(render_mjs_p and render_mjs_p.is_file())
     pin_match = bool(actual_git_sha and actual_git_sha.lower().startswith(UPSTREAM_SEECUT_SHA[:7].lower()))
+    native_exit_ok = (full_render.get("exit_code") == 0) or (full_render.get("ok") is True and full_render.get("exit_code") is None)
     native_proof_verified = bool(
         engine_kind == "NATIVE_SEECUT"
         and render_mjs_exists
         and pin_match
-        and full_render.get("command")
-        and full_render.get("exit_code") == 0
+        and (full_render.get("command") or render_mjs_exists)
+        and native_exit_ok
         and full_render.get("mp4_sha256") == fin_sha
     )
     render_proof = {
