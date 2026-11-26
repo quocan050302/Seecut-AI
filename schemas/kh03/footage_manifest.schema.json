@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/footage_manifest.schema.json",
+  "title": "KH-03 Footage Acquisition Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "selected_skill_id", "intended_purpose",
+    "status", "assets", "beat_bindings", "gaps", "rejected_candidates"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.footage_manifest.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "selected_skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+    "intended_purpose": { "type": "string", "enum": ["NONCOMMERCIAL_ONLY", "COMMERCIAL_AND_NONCOMMERCIAL", "TEST_ONLY"] },
+    "status": { "type": "string", "enum": ["ASSET_READY", "FOOTAGE_PARTIAL", "FOOTAGE_BLOCKED", "A_ROLL_AND_GRAPHICS_ONLY"] },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["asset_id", "local_path", "sha256", "media_type", "evidence_kind", "license_status", "source_label", "attribution_required", "usable_in_render"],
+        "properties": {
+          "asset_id": { "type": "string", "minLength": 1 },
+          "local_path": { "type": "string", "minLength": 1 },
+          "sha256": { "type": "string", "minLength": 16 },
+          "media_type": { "type": "string", "enum": ["video", "image", "screen_capture", "diagram_asset"] },
+          "evidence_kind": { "type": "string", "enum": ["real_evidence", "illustration", "reenactment", "metaphor", "b_roll"] },
+          "license_status": { "type": "string" },
+          "license_name": { "type": "string" },
+          "provider_terms": { "type": "string" },
+          "source_label": { "type": "string" },
+          "attribution_required": { "type": "boolean" },
+          "attribution_text": { "type": "string" },
+          "usable_in_render": { "type": "boolean" },
+          "width": { "type": "integer", "minimum": 16 },
+          "height": { "type": "integer", "minimum": 16 }
+        }
+      }
+    },
+    "beat_bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["beat_id", "asset_id", "in_frame", "out_frame", "layout_mode", "evidence_label", "why_selected"],
+        "properties": {
+          "beat_id": { "type": "string" },
+          "asset_id": { "type": ["string", "null"] },
+          "in_frame": { "type": "integer", "minimum": 0 },
+          "out_frame": { "type": "integer", "minimum": 1 },
+          "layout_mode": { "type": "string" },
+          "evidence_label": { "type": "string" },
+          "why_selected": { "type": "string" },
+          "rejected_alternatives": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "gaps": { "type": "array", "items": { "type": "object" } },
+    "rejected_candidates": { "type": "array", "items": { "type": "object" } }
+  }
+}

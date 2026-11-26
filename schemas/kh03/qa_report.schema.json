@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/qa_report.schema.json",
+  "title": "KH-03 Independent QA & Separated Gate Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "selected_skill_id", "reviewer_type",
+    "hard_defects", "editorial_rubric", "total_score", "editorial_candidate_pass",
+    "gates", "evidence_paths"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.qa_report.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "selected_skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+    "reviewer_type": { "type": "string", "enum": ["DETERMINISTIC_OBJECTIVE", "MODEL_REVIEW", "HUMAN_REVIEW"] },
+    "hard_defects": { "type": "array", "items": { "type": "object" } },
+    "editorial_rubric": {
+      "type": "object",
+      "required": [
+        "clarity_explanation", "semantic_alignment", "visual_art_direction",
+        "hook_payoff_retention", "motion_footage_integration",
+        "audio_comfort_sync", "selected_skill_identity"
+      ],
+      "properties": {
+        "clarity_explanation": { "type": "object" },
+        "semantic_alignment": { "type": "object" },
+        "visual_art_direction": { "type": "object" },
+        "hook_payoff_retention": { "type": "object" },
+        "motion_footage_integration": { "type": "object" },
+        "audio_comfort_sync": { "type": "object" },
+        "selected_skill_identity": { "type": "object" }
+      }
+    },
+    "total_score": { "type": "number", "minimum": 0, "maximum": 100 },
+    "editorial_candidate_pass": { "type": "boolean" },
+    "gates": { "type": "object" },
+    "evidence_paths": { "type": "array", "items": { "type": "string" } }
+  }
+}

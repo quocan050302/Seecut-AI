@@ -119,10 +119,14 @@
         "allow_fullscreen": { "type": "boolean" },
         "allow_anchor_switch": { "type": "boolean" },
         "allow_hide": { "type": "boolean" },
+        "fullscreen_lock": { "type": "boolean" },
+        "layout_policy": { "type": "string", "enum": ["ADAPTIVE_DYNAMIC", "FULLSCREEN_LOCK", "LEGACY_DYNAMIC"] },
         "border_radius_px": { "type": "integer", "minimum": 0, "maximum": 999 },
         "guard_margin_ratio": { "type": "number", "minimum": 0.0, "maximum": 0.12 }
       }
     },
+    "intended_purpose": { "type": "string", "enum": ["NONCOMMERCIAL_ENGINEERING", "NONCOMMERCIAL_PERSONAL", "COMMERCIAL_MARKETING"] },
+    "commercial_permission_evidence": { "type": ["string", "null"] },
     "approved_scope": { "type": "string" },
     "caption_policy": { "type": "string", "enum": ["OFF", "ON_REQUESTED", "KEYWORDS_ONLY"] },
     "music_policy": { "type": "string", "enum": ["OFF", "OPTIONAL_LICENSED", "REQUIRED_LICENSED"] },

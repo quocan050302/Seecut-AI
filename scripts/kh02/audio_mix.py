@@ -16,7 +16,9 @@ from typing import Any
 
 from .contracts import hash_artifact, is_strict_number, sanitize_identifier, validate_schema
 from .sfx_assets import assert_not_test_only_in_production, measure_onset, probe_sfx
-from .sound import measure_final_audio
+def measure_final_audio(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .sound import measure_final_audio as _measure_final_audio
+    return _measure_final_audio(*args, **kwargs)
 
 # Illustrative editorial density profiles (NOT mandatory minima or acceptance quotas!)
 DENSITY_PROFILES: dict[str, dict[str, Any]] = {

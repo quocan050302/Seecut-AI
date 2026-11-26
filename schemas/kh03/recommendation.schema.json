@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/recommendation.schema.json",
+  "title": "KH-03 Skill Recommendation Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "registry_version", "video_sha256", "script_sha256",
+    "recommended_skill_id", "recommendation_rationale", "editorial_fit_disclaimer",
+    "user_selection_required", "auto_selected", "tie_break_rule", "rubric_weights",
+    "candidates", "technical_blockers"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.recommendation.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "registry_version": { "type": "string", "minLength": 1 },
+    "video_sha256": { "type": "string", "minLength": 16 },
+    "script_sha256": { "type": "string", "minLength": 16 },
+    "recommended_skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+    "recommendation_rationale": { "type": "string", "minLength": 10 },
+    "editorial_fit_disclaimer": { "type": "string", "minLength": 10 },
+    "user_selection_required": { "type": "boolean", "const": true },
+    "auto_selected": { "type": "boolean", "const": false },
+    "tie_break_rule": { "type": "string", "minLength": 5 },
+    "rubric_weights": { "type": "object" },
+    "candidates": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "skill_id", "name", "fit_score", "score_breakdown", "feasible",
+          "why_fit", "trade_offs", "expected_edit_preview", "prerequisites", "blockers"
+        ],
+        "properties": {
+          "skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+          "name": { "type": "string", "minLength": 3 },
+          "fit_score": { "type": "number", "minimum": 0, "maximum": 100 },
+          "score_breakdown": { "type": "object" },
+          "feasible": { "type": "boolean" },
+          "why_fit": { "type": "string", "minLength": 5 },
+          "trade_offs": { "type": "array", "items": { "type": "string" } },
+          "expected_edit_preview": { "type": "string", "minLength": 5 },
+          "prerequisites": { "type": "array", "items": { "type": "string" } },
+          "blockers": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "technical_blockers": { "type": "array", "items": { "type": "string" } }
+  }
+}

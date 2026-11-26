@@ -66,9 +66,17 @@ class TestR1SfxProvider(unittest.TestCase):
             (lib / "fake_error.wav").write_text("<!DOCTYPE html><html>404</html>", encoding="utf-8")
             # Empty 0-byte file
             (lib / "empty.wav").write_bytes(b"")
-            # Symlink pointing outside
-            outside = _make_test_wav(root / "outside.wav", freq=400)
-            (lib / "sym_escape.wav").symlink_to(outside)
+            # Symlink / junction pointing outside
+            out_dir = root / "outside_dir"
+            out_dir.mkdir()
+            outside = _make_test_wav(out_dir / "outside.wav", freq=400)
+            try:
+                (lib / "sym_escape.wav").symlink_to(outside)
+            except OSError:
+                if os.name == "nt":
+                    subprocess.run(["cmd", "/c", "mklink", "/J", str(lib / "sym_escape_dir"), str(out_dir)], check=True, capture_output=True)
+                else:
+                    raise
 
             # Explicit license manifest for approved files
             manifest = {

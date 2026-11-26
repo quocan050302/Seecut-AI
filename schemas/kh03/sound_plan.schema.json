@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/sound_plan.schema.json",
+  "title": "KH-03 Multi-Layer Sound Director Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "selected_skill_id", "energy_mode",
+    "voice_policy", "sfx_policy", "bgm_policy", "production_mode",
+    "events", "provider_status", "target_loudness_lufs", "target_true_peak_dbtp",
+    "summary_counts"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.sound_plan.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "selected_skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+    "energy_mode": { "type": "string" },
+    "voice_policy": { "type": "string" },
+    "sfx_policy": { "type": "string" },
+    "bgm_policy": { "type": "string" },
+    "production_mode": { "type": "boolean" },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["event_id", "beat_id", "semantic_reason", "requested_family", "onset_frame", "status", "priority"],
+        "properties": {
+          "event_id": { "type": "string" },
+          "beat_id": { "type": "string" },
+          "semantic_reason": { "type": "string" },
+          "requested_family": { "type": "string" },
+          "asset_id": { "type": ["string", "null"] },
+          "rights_proof": { "type": ["string", "null"] },
+          "onset_frame": { "type": "integer", "minimum": 0 },
+          "onset_sec": { "type": "number", "minimum": 0 },
+          "target_gain_db": { "type": "number", "minimum": -60, "maximum": 12 },
+          "status": { "type": "string", "enum": ["ADD", "KEEP_NATURAL", "SILENCE", "MERGE", "UNAVAILABLE"] },
+          "priority": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "layout_transition_id": { "type": ["string", "null"] },
+          "motion_anchor": { "type": ["string", "null"] },
+          "motion_event_id": { "type": ["string", "null"] },
+          "anchor_id": { "type": ["string", "null"] },
+          "sample_onset": { "type": ["integer", "null"], "minimum": 0 },
+          "clock_domain": { "type": ["string", "null"] },
+          "src_onset_frame": { "type": ["integer", "null"] },
+          "variation": { "type": "object" }
+        }
+      }
+    },
+    "clock_domain": { "type": ["string", "null"] },
+    "time_map_sha256": { "type": ["string", "null"] },
+    "motion_graph_sha256": { "type": ["string", "null"] },
+    "provider_status": { "type": "string" },
+    "target_loudness_lufs": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+    "target_true_peak_dbtp": { "type": "number", "maximum": -0.5 },
+    "summary_counts": { "type": "object" }
+  }
+}

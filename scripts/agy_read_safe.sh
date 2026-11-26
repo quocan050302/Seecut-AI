@@ -8,8 +8,16 @@
 
 set -uo pipefail
 
+_err() { printf '%s\n' "$*" >&2; }
+PYTHON_SYS="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+if [ -n "$PYTHON_SYS" ]; then
+  if ! "$PYTHON_SYS" -c "import sys" >/dev/null 2>&1; then
+    PYTHON_SYS="$(command -v python 2>/dev/null || true)"
+  fi
+fi
+
 if [ $# -lt 2 ] || [ $# -gt 3 ]; then
-  print -u2 "Usage: agy_read_safe.sh <file> \"<question>\" [timeout_sec]"
+  _err "Usage: agy_read_safe.sh <file> \"<question>\" [timeout_sec]"
   exit 2
 fi
 
@@ -18,36 +26,41 @@ Q="$2"
 T="${3:-540}"
 
 if [ "${SEECUT_DENY_EXTERNAL_MEDIA:-0}" = "1" ]; then
-  print -u2 "BLOCKED_MEDIA_TRANSMISSION: External media transmission is disabled by policy (SEECUT_DENY_EXTERNAL_MEDIA=1)."
+  _err "BLOCKED_MEDIA_TRANSMISSION: External media transmission is disabled by policy (SEECUT_DENY_EXTERNAL_MEDIA=1)."
   exit 4
 fi
 
 if [ -z "$Q" ]; then
-  print -u2 "Error: question must be non-empty"
+  _err "Error: question must be non-empty"
   exit 2
 fi
 
-if ! [[ "$T" =~ '^[0-9]+$' ]] || [ "$T" -lt 1 ] || [ "$T" -gt 1800 ]; then
-  print -u2 "Error: timeout_sec must be an integer between 1 and 1800 (got: $T)"
+if ! [[ "$T" =~ ^[0-9]+$ ]] || [ "$T" -lt 1 ] || [ "$T" -gt 1800 ]; then
+  _err "Error: timeout_sec must be an integer between 1 and 1800 (got: $T)"
   exit 2
 fi
 
 if [ -L "$F" ]; then
-  print -u2 "Error: symlink input rejected for safety: $F"
+  _err "Error: symlink input rejected for safety: $F"
   exit 2
 fi
 
 if [ ! -f "$F" ] || [ ! -r "$F" ]; then
-  print -u2 "Error: readable regular file required: $F"
+  _err "Error: readable regular file required: $F"
   exit 2
 fi
 
-# Resolve canonical realpath and validate allowlist + sensitive-path denylist
-REAL_F="$(python3 -c '
+# Resolve canonical realpath and validate allowlist + sensitive-path denylist + ancestor symlink/junction rejection
+REAL_F="$("$PYTHON_SYS" -c '
 import os, sys
-p = os.path.realpath(sys.argv[1])
-if os.path.islink(sys.argv[1]):
+from pathlib import Path
+raw = sys.argv[1]
+p_obj = Path(raw)
+def is_rep(x):
+    return os.path.islink(str(x)) or (hasattr(os.path, "isjunction") and os.path.isjunction(str(x)))
+if is_rep(p_obj) or any(is_rep(par) for par in p_obj.parents):
     sys.exit(10)
+p = os.path.realpath(raw)
 home = os.path.realpath(os.path.expanduser("~"))
 deny_prefixes = [
     "/etc", "/private/etc", "/var/db",
@@ -64,14 +77,15 @@ if base in (".env", "id_rsa", "id_ed25519", "credentials", "credentials.json"):
     sys.exit(11)
 allow_raw = os.environ.get("SEECUT_ALLOWED_MEDIA_ROOTS", "").strip()
 if allow_raw:
-    roots = [os.path.realpath(os.path.expanduser(r)) for r in allow_raw.split(":") if r.strip()]
+    sep = os.pathsep if (os.name == "nt" and os.pathsep in allow_raw) else (os.pathsep if os.name == "nt" else ":")
+    roots = [os.path.realpath(os.path.expanduser(r)) for r in allow_raw.split(sep) if r.strip()]
     if not any(p == r or p.startswith(r + os.sep) for r in roots):
         sys.exit(12)
 print(p)
 ' "$F")"
 VAL_RC=$?
 if [ "$VAL_RC" -ne 0 ] || [ -z "$REAL_F" ]; then
-  print -u2 "Error: input path rejected by path/allowlist policy (code=$VAL_RC): $F"
+  _err "Error: input path rejected by path/allowlist policy (code=$VAL_RC): $F"
   exit 2
 fi
 
@@ -83,15 +97,15 @@ if [ -z "$AGY" ] || [ ! -x "$AGY" ]; then
   [ -x "$HOME/.local/bin/agy" ] && AGY="$HOME/.local/bin/agy"
 fi
 if [ -z "$AGY" ] || [ ! -x "$AGY" ]; then
-  print -u2 "Error: agy CLI not found"
+  _err "Error: agy CLI not found"
   exit 3
 fi
 
 # Verify bounded temp disk availability (>= 200 MiB or file_size * 2 + 50 MiB)
-python3 -c '
-import os, shutil, sys
+"$PYTHON_SYS" -c '
+import os, shutil, sys, tempfile
 src = sys.argv[1]
-tmp_root = os.environ.get("TMPDIR") or "/tmp"
+tmp_root = os.environ.get("TMPDIR") or tempfile.gettempdir()
 sz = os.path.getsize(src)
 free = shutil.disk_usage(tmp_root).free
 need = max(200 * 1024 * 1024, sz * 2 + 50 * 1024 * 1024)
@@ -100,9 +114,9 @@ if free < need:
     sys.exit(5)
 ' "$REAL_F" || exit $?
 
-D="$(mktemp -d -t seecut_read)" || { print -u2 "Error: mktemp failed"; exit 3; }
+D="$(mktemp -d -t seecut_read_XXXXXX)" || { _err "Error: mktemp failed"; exit 3; }
 MARKER="$D/.seecut_agy_read_owned_$$"
-print -r -- "$$" > "$MARKER" || { print -u2 "Error: failed writing ownership marker"; rmdir "$D" 2>/dev/null || true; exit 3; }
+printf '%s\n' "$$" > "$MARKER" || { _err "Error: failed writing ownership marker"; rmdir "$D" 2>/dev/null || true; exit 3; }
 
 cleanup() {
   if [ -n "${D:-}" ] && [ -d "$D" ] && [ -f "$D/.seecut_agy_read_owned_$$" ]; then
@@ -111,7 +125,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-SAFE_NAME="$(python3 -c '
+SAFE_NAME="$("$PYTHON_SYS" -c '
 import os, re, sys
 b = os.path.basename(sys.argv[1])
 stem, ext = os.path.splitext(b)
@@ -121,7 +135,7 @@ print(f"{stem}{ext}")
 ' "$REAL_F")"
 
 if ! cp -- "$REAL_F" "$D/$SAFE_NAME"; then
-  print -u2 "Error: failed to copy input media into isolated temp dir"
+  _err "Error: failed to copy input media into isolated temp dir"
   exit 3
 fi
 

@@ -246,6 +246,19 @@ def export_project_config(
         "kh02_presenter_mode": pres_pol.get("mode", "LEGACY_DYNAMIC"),
         "kh02_run_id": shotbook["run_id"],
     }
+    prov = shotbook.get("provenance") or {}
+    if prov.get("kh03_selected_skill_id"):
+        proj["kh03_selected_skill_id"] = prov["kh03_selected_skill_id"]
+    if prov.get("kh03_layout_policy"):
+        proj["kh03_layout_policy"] = prov["kh03_layout_policy"]
+    if prov.get("kh03_layout_plan_sha256"):
+        proj["kh03_layout_plan_sha256"] = prov["kh03_layout_plan_sha256"]
+    if prov.get("kh03_plan_sha256"):
+        proj["kh03_plan_sha256"] = prov["kh03_plan_sha256"]
+    if prov.get("kh03_motion_graph_sha256"):
+        proj["kh03_motion_graph_sha256"] = prov["kh03_motion_graph_sha256"]
+    if prov.get("kh03_motion_graph_sha256"):
+        proj["kh03_motion_graph_sha256"] = prov["kh03_motion_graph_sha256"]
     if pres_lay:
         proj["kh02_presenter_layout"] = pres_lay
     if primary_source_path:
@@ -624,6 +637,176 @@ def _render_event_html(
             f'{f"<div class=kh-tags>{tags_html}</div>" if tags_html else ""}</div>'
         )
 
+    # KH-03 Adaptive Visual Component Families (real compiled HTML/CSS/SVG/GSAP)
+    if kind == "kh03_contradiction_lockup":
+        kicker = _esc(params.get("kicker", "PARADOX"))
+        left_v = _esc(params.get("left_value", ""))
+        op = _esc(params.get("operator", "≠"))
+        right_v = _esc(params.get("right_value", "?"))
+        sub = _esc(params.get("headline") or params.get("subtitle") or "")
+        for t in (params.get("kicker"), params.get("left_value"), params.get("right_value"), params.get("headline")):
+            if t:
+                fp_texts.append(str(t))
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-dark kh3-contradiction" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-accent">{kicker}</div>'
+            f'<div class="kh3-eq-row"><span class="kh3-num">{left_v}</span>'
+            f'<span id="{dom_id}_op" class="kh3-op">{op}</span>'
+            f'<span class="kh3-num kh3-pos">{right_v}</span></div>'
+            f'{f"<div class=kh-sub-light>{sub}</div>" if sub else ""}</div>'
+        )
+
+    if kind == "kh03_proportional_reservoir":
+        kicker = _esc(params.get("kicker", "ALLOCATION"))
+        headline = _esc(params.get("headline", ""))
+        segs = params.get("segments") or [{"label": "Allocated", "pct": 75.0, "delta": ""}, {"label": "Left", "pct": 25.0, "delta": ""}]
+        for t in (params.get("kicker"), params.get("headline")):
+            if t:
+                fp_texts.append(str(t))
+        seg_divs = []
+        leg_divs = []
+        colors = ("#DF8A3E", "#E8B154", "#DC6B50", "#4CC393", "#60A5FA")
+        for s_i, sg in enumerate(segs[:5]):
+            pct = max(2.0, min(100.0, float(sg.get("pct", 20.0))))
+            lbl = _esc(sg.get("label", f"S{s_i + 1}"))
+            dlt = _esc(sg.get("delta", ""))
+            fp_texts.append(f"{sg.get('label', '')} {sg.get('delta', '')}".strip())
+            bg = colors[s_i % len(colors)]
+            bar_txt = f"{lbl} {dlt}".strip() if pct >= 30.0 else ""
+            seg_divs.append(
+                f'<div id="{dom_id}_seg_{s_i + 1}" class="kh3-res-seg" style="width:{pct:.3f}%;background:{bg};">'
+                f'<span>{bar_txt}</span></div>'
+            )
+            leg_divs.append(
+                f'<span class="kh3-res-chip"><i class="kh3-res-dot" style="background:{bg};"></i>{lbl} {dlt}</span>'
+            )
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-dark kh3-reservoir" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-accent">{kicker}</div>'
+            f'<div class="kh3-res-track">{"".join(seg_divs)}</div>'
+            f'<div class="kh3-res-legend">{"".join(leg_divs)}</div>'
+            f'{f"<div class=kh-sub-light>{headline}</div>" if headline else ""}</div>'
+        )
+
+    if kind == "kh03_rolling_counter":
+        kicker = _esc(params.get("kicker", "VALUE"))
+        headline = _esc(params.get("headline", ""))
+        end_v = _esc(params.get("end_value", "0"))
+        start_v = _esc(params.get("start_value", ""))
+        for t in (params.get("kicker"), params.get("headline"), params.get("end_value")):
+            if t:
+                fp_texts.append(str(t))
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-dark kh3-counter" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-card-top"><span class="kh-kicker-accent">{kicker}</span>'
+            f'{f"<span class=kh-sub-light>from {start_v}</span>" if start_v else ""}</div>'
+            f'<div id="{dom_id}_val" class="kh3-big-counter">{end_v}</div>'
+            f'{f"<div class=kh-sub-light>{headline}</div>" if headline else ""}</div>'
+        )
+
+    if kind == "kh03_causal_flow_graph":
+        kicker = _esc(params.get("kicker", "MECHANISM"))
+        headline = _esc(params.get("headline", ""))
+        nodes = params.get("nodes") or [{"label": "Cause", "text": "Input"}, {"label": "Effect", "text": "Output"}]
+        for t in (params.get("kicker"), params.get("headline")):
+            if t:
+                fp_texts.append(str(t))
+        n_html = []
+        for ni, nd in enumerate(nodes[:3]):
+            nl = _esc(nd.get("label", f"N{ni + 1}"))
+            nt = _esc(nd.get("text", ""))
+            fp_texts.extend([str(nd.get("label", "")), str(nd.get("text", ""))])
+            if ni > 0:
+                n_html.append('<div class="kh3-arrow">→</div>')
+            n_html.append(f'<div id="{dom_id}_node_{ni + 1}" class="kh3-flow-node"><div class="kh3-fn-lbl">{nl}</div><div class="kh3-fn-txt">{nt}</div></div>')
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-dark kh3-flow" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-accent">{kicker}</div>'
+            f'<div class="kh3-flow-row">{"".join(n_html)}</div>'
+            f'{f"<div class=kh-sub-light>{headline}</div>" if headline else ""}</div>'
+        )
+
+    if kind == "kh03_annotated_timeline":
+        kicker = _esc(params.get("kicker", "TIMELINE"))
+        headline = _esc(params.get("headline", ""))
+        steps = params.get("steps") or [{"label": "01", "text": headline}]
+        for t in (params.get("kicker"), params.get("headline")):
+            if t:
+                fp_texts.append(str(t))
+        st_html = []
+        for si, st in enumerate(steps[:3]):
+            sl = _esc(st.get("label", f"0{si + 1}"))
+            stx = _esc(st.get("text", ""))
+            fp_texts.extend([str(st.get("label", "")), str(st.get("text", ""))])
+            st_html.append(f'<div id="{dom_id}_tl_{si + 1}" class="kh3-tl-step"><span class="kh3-tl-badge">{sl}</span><span class="kh3-tl-text">{stx}</span></div>')
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-light kh3-timeline" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-dark">{kicker}</div>'
+            f'<div class="kh-title-dark">{headline}</div>'
+            f'<div class="kh3-tl-list">{"".join(st_html)}</div></div>'
+        )
+
+    if kind == "kh03_comparison_matrix":
+        kicker = _esc(params.get("kicker", "COMPARISON"))
+        headline = _esc(params.get("headline", ""))
+        lc = params.get("left_col") or {"title": "A", "detail": ""}
+        rc = params.get("right_col") or {"title": "B", "detail": ""}
+        for t in (params.get("kicker"), params.get("headline"), lc.get("title"), rc.get("title")):
+            if t:
+                fp_texts.append(str(t))
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-light kh3-compare" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-dark">{kicker} · {headline}</div>'
+            f'<div class="kh3-cmp-grid">'
+            f'<div class="kh3-cmp-col"><div class="kh3-cmp-t">{_esc(lc.get("title",""))}</div><div class="kh3-cmp-d">{_esc(lc.get("detail",""))}</div></div>'
+            f'<div class="kh3-cmp-col kh3-cmp-alt"><div class="kh3-cmp-t">{_esc(rc.get("title",""))}</div><div class="kh3-cmp-d">{_esc(rc.get("detail",""))}</div></div>'
+            f'</div></div>'
+        )
+
+    if kind == "kh03_proof_frame_reveal":
+        kicker = _esc(params.get("kicker", "VERIFIED PROOF"))
+        headline = _esc(params.get("headline", ""))
+        sub = _esc(params.get("subtitle", ""))
+        badge = _esc(params.get("evidence_label", "CONCEPT_ILLUSTRATION"))
+        for t in (params.get("kicker"), params.get("headline"), params.get("subtitle"), params.get("evidence_label")):
+            if t:
+                fp_texts.append(str(t))
+        media_html = (
+            f'<div class="kh3-proof-img"><img src="{_esc(asset_rel_map[aref])}" alt="{headline}" class="kh-evid-img-contain" /></div>'
+            if has_media else ""
+        )
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-light kh3-proof-frame kh-clip-wipe" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-card-top"><span class="kh-kicker-dark">{kicker}</span><span class="kh-pill">{badge}</span></div>'
+            f'{media_html}'
+            f'<div class="kh-title-dark">{headline}</div>'
+            f'{f"<div class=kh-sub-dark>{sub}</div>" if sub else ""}</div>'
+        )
+
+    if kind == "kh03_cta_magnetic_underline":
+        kicker = _esc(params.get("kicker", "NEXT STEP"))
+        headline = _esc(params.get("headline", ""))
+        tag = _esc(params.get("cta_tag", ""))
+        for t in (params.get("kicker"), params.get("headline"), params.get("cta_tag")):
+            if t:
+                fp_texts.append(str(t))
+        return (
+            f'  <div id="{dom_id}" class="kh-el kh-card-light kh3-cta" style="{base_style}"{check_attr}{word_attr} '
+            f'data-layer="{layer_name}" data-layer-cat="{_esc(layer_cat)}">'
+            f'<div class="kh-kicker-dark">{kicker}</div>'
+            f'<div class="kh-title-dark">{headline}</div>'
+            f'<svg class="kh3-cta-ul" viewBox="0 0 360 12" width="100%" height="12">'
+            f'<path id="{dom_id}_ul" d="M 2 7 Q 180 1 356 7" fill="none" stroke="#C9822B" stroke-width="4" stroke-linecap="round" /></svg>'
+            f'{f"<div class=kh-sub-dark>{tag}</div>" if tag else ""}</div>'
+        )
+
     # Default high-contrast editorial headline / callout panel
     kicker = _esc(params.get("kicker", ""))
     headline = _esc(params.get("headline", ""))
@@ -739,6 +922,17 @@ def compile_shotbook(
             "y_from": float(tr.get("y_offset_px", 16)),
             "easing": str(ev.get("easing", "power2.out")),
             "step_delays": params.get("step_delays_sec", [0.15, 1.55, 2.95]),
+            "internal_nodes": [
+                {
+                    "node_id": sanitize_identifier(nd.get("node_id", "")),
+                    "role": str(nd.get("role", "")),
+                    "primitive": str(nd.get("primitive", "")),
+                    "start": round(int(nd.get("start_frame", ev["start_frame"])) / fps, 4),
+                    "end": round(int(nd.get("end_frame", ev["end_frame"])) / fps, 4),
+                }
+                for nd in (params.get("internal_nodes") or [])
+                if isinstance(nd, dict) and nd.get("node_id")
+            ],
         })
 
     # Optional captions (only emitted if caption_policy == ON_REQUESTED and role == caption)
@@ -802,6 +996,10 @@ def compile_shotbook(
             "main_scale_from": float(c.get("main_canvas_scale_from", 1.0)),
             "main_scale_to": float(c.get("main_canvas_scale_to", 1.0)),
             "easing": str(c.get("easing", "power2.inOut")),
+            "reframe_dur": float(c.get("reframe_duration_sec", 0.0)),
+            "transition_id": str(c.get("transition_id", "")),
+            "camera_id": str(c.get("camera_id", "")),
+            "beat_id": str(c.get("beat_id", "")),
             "fixed_pip": is_fixed_pip,
         })
 
@@ -856,7 +1054,7 @@ def compile_shotbook(
     width: 100%; height: 100%; object-fit: cover; display: block;
     transform-origin: 50% 38%;
   }}
-  .kh-el {{ position: absolute; opacity: 0; will-change: transform, opacity; }}
+  .kh-el {{ position: absolute; opacity: 0; will-change: transform, opacity; overflow: hidden; }}
   .kh-spine-track {{
     width: 100%; height: 100%; background: rgba(255,255,255,0.22);
     border-radius: 99px; overflow: hidden; border: 1px solid rgba(28,24,22,0.18);
@@ -1066,6 +1264,33 @@ def compile_shotbook(
     font-size: 13px; font-weight: 900; padding: 4px 10px; border-radius: 6px;
     background: {th['accent']}; color: #FFFFFF; letter-spacing: 0.08em;
   }}
+  .kh3-eq-row {{ display: flex; align-items: center; justify-content: space-between; gap: 10px; font-variant-numeric: tabular-nums; }}
+  .kh3-num {{ font-size: 38px; font-weight: 900; color: {th['card_fg']}; }}
+  .kh3-op {{ font-size: 36px; font-weight: 900; color: #E56B55; }}
+  .kh3-pos {{ color: #4CC393; }}
+  .kh3-res-track {{ display: flex; width: 100%; height: 24px; border-radius: 8px; overflow: hidden; border: 1.5px solid rgba(255,255,255,0.22); }}
+  .kh3-res-seg {{ display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 800; color: #132520; overflow: hidden; white-space: nowrap; }}
+  .kh3-res-legend {{ display: flex; flex-wrap: wrap; gap: 5px 10px; margin-top: 2px; }}
+  .kh3-res-chip {{ display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700; color: {th['card_fg']}; white-space: nowrap; }}
+  .kh3-res-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }}
+  .kh3-big-counter {{ font-size: 46px; font-weight: 900; color: #4CC393; font-variant-numeric: tabular-nums; line-height: 1.05; }}
+  .kh3-flow-row {{ display: flex; align-items: stretch; gap: 4px; width: 100%; }}
+  .kh3-flow-node {{ flex: 1 1 0; min-width: 0; background: rgba(255,255,255,0.10); border: 1.5px solid rgba(255,255,255,0.24); border-radius: 9px; padding: 6px 7px; overflow: hidden; }}
+  .kh3-fn-lbl {{ font-size: 10px; font-weight: 900; color: {th['accent_soft']}; text-transform: uppercase; letter-spacing: 0.04em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .kh3-fn-txt {{ font-size: 13px; font-weight: 700; color: {th['card_fg']}; line-height: 1.22; word-break: break-word; margin-top: 2px; }}
+  .kh3-arrow {{ display: flex; align-items: center; font-size: 16px; font-weight: 900; color: {th['accent_soft']}; flex-shrink: 0; }}
+  .kh3-tl-list {{ display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }}
+  .kh3-tl-step {{ display: flex; align-items: flex-start; gap: 12px; background: rgba(22,46,41,0.06); border-radius: 12px; padding: 12px 14px; border-left: 5px solid {th['accent']}; }}
+  .kh3-tl-badge {{ font-size: 16px; font-weight: 900; padding: 4px 10px; border-radius: 7px; background: {th['accent']}; color: #FFF; flex-shrink: 0; }}
+  .kh3-tl-text {{ font-size: 20px; font-weight: 800; line-height: 1.25; color: {th['light_card_fg']}; }}
+  .kh3-compare {{ justify-content: space-between; padding: 24px 20px; gap: 18px; }}
+  .kh3-cmp-grid {{ display: grid; grid-template-columns: 1fr; gap: 16px; flex: 1; align-content: center; }}
+  .kh3-cmp-col {{ background: rgba(22,46,41,0.07); border-radius: 14px; padding: 18px 16px; border-left: 6px solid {th['accent']}; display: flex; flex-direction: column; gap: 8px; }}
+  .kh3-cmp-alt {{ border-left-color: #1E7A56; background: rgba(30,122,86,0.08); }}
+  .kh3-cmp-t {{ font-size: 22px; font-weight: 900; color: {th['light_card_fg']}; letter-spacing: 0.01em; }}
+  .kh3-cmp-d {{ font-size: 19px; font-weight: 600; line-height: 1.32; color: #2F2A26; }}
+  .kh3-proof-img {{ flex: 1; max-height: 110px; overflow: hidden; border-radius: 8px; border: 1px solid rgba(0,0,0,0.14); }}
+  .kh3-cta-ul {{ display: block; margin: 4px 0; overflow: visible; }}
 </style>
 </head>
 <body>
@@ -1099,17 +1324,21 @@ def compile_shotbook(
     for (let i = 0; i < CAMS.length; i++) {{
       const c = CAMS[i];
       const dur = Math.max(0.15, c.end - c.start);
-      const reframeDur = Math.min(0.24, dur * 0.35);
+      const reframeDur = (c.reframe_dur && c.reframe_dur > 0) ? Math.min(c.reframe_dur, dur * 0.65) : Math.min(0.24, dur * 0.35);
       if (i > 0 && !FIXED_PIP) {{
         const prevOp = CAMS[i - 1].opacity;
         const opDur = (prevOp !== c.opacity) ? 0.08 : reframeDur;
         tl.to(pw, {{
           left: c.left, top: c.top, width: c.width, height: c.height,
+          zIndex: c.z_order,
           borderRadius: c.radius,
           border: c.border ? c.border + 'px solid {th["card_bg"]}' : '0px solid transparent',
           duration: reframeDur, ease: c.easing
         }}, c.start);
         tl.to(pw, {{ opacity: c.opacity, duration: opDur, ease: 'power1.inOut' }}, c.start);
+        if (c.object_position) {{
+          tl.set(pi, {{ objectPosition: c.object_position }}, c.start);
+        }}
       }}
       if (!FIXED_PIP) {{
         tl.to(pi, {{
@@ -1124,6 +1353,20 @@ def compile_shotbook(
     }}
   }}
 
+  // Precompute camera reframe windows so incoming/outgoing graphics never collide with a mid-morph #personWrap face
+  const REFRAME_WINS = [];
+  if (CAMS.length > 1 && !FIXED_PIP) {{
+    for (let i = 1; i < CAMS.length; i++) {{
+      const prev = CAMS[i - 1], cur = CAMS[i];
+      const moved = (Math.abs(prev.left - cur.left) > 4 || Math.abs(prev.top - cur.top) > 4 || Math.abs(prev.width - cur.width) > 4 || Math.abs(prev.height - cur.height) > 4);
+      if (moved) {{
+        const dur = Math.max(0.15, cur.end - cur.start);
+        const rDur = (cur.reframe_dur && cur.reframe_dur > 0) ? Math.min(cur.reframe_dur, dur * 0.65) : Math.min(0.24, dur * 0.35);
+        REFRAME_WINS.push({{ start: cur.start, dur: rDur }});
+      }}
+    }}
+  }}
+
   // Compiled SHOTBOOK V2 visual & typography events (strict CSS opacity:0 + gsap.set/to; frame-0 hooks visible immediately)
   for (const tw of TWEENS) {{
     const sel = '#' + tw.id;
@@ -1134,14 +1377,22 @@ def compile_shotbook(
       tl.to('#' + tw.id + '_fill', {{ width: '100%', duration: DURATION, ease: 'none' }}, 0);
       continue;
     }}
+    let effStart = tw.start;
+    if (!isFrameZero) {{
+      for (const rw of REFRAME_WINS) {{
+        if (Math.abs(tw.start - rw.start) < 0.08 && (tw.end - (rw.start + rw.dur)) > 0.25) {{
+          effStart = Math.max(effStart, rw.start + rw.dur + 0.01);
+        }}
+      }}
+    }}
     const startOp = isFrameZero ? tw.opacity : 0;
     const startScale = isFrameZero ? tw.scale_from : tw.scale_from;
     const startY = isFrameZero ? Math.min(8, tw.y_from) : tw.y_from;
     tl.set(sel, {{ opacity: startOp, scale: startScale, y: startY }}, 0);
     if (!isFrameZero) {{
-      tl.set(sel, {{ opacity: 0, scale: tw.scale_from, y: tw.y_from }}, tw.start);
+      tl.set(sel, {{ opacity: 0, scale: tw.scale_from, y: tw.y_from }}, effStart);
     }}
-    tl.to(sel, {{ opacity: tw.opacity, scale: tw.scale_to, y: 0, duration: Math.min(tw.entry, Math.max(0.12, tw.end - tw.start)), ease: tw.easing }}, tw.start);
+    tl.to(sel, {{ opacity: tw.opacity, scale: tw.scale_to, y: 0, duration: Math.min(tw.entry, Math.max(0.12, tw.end - effStart)), ease: tw.easing }}, effStart);
     if (tw.kind === 'step_rail_3') {{
       const delays = tw.step_delays || [0.15, 1.5, 2.9];
       for (let s = 1; s <= 3; s++) {{
@@ -1178,13 +1429,87 @@ def compile_shotbook(
       tl.set(bsel, {{ width: '0%' }}, 0);
       tl.to(bsel, {{ width: '100%', duration: 0.42, ease: 'power2.out' }}, tw.start + 0.16);
     }}
-    if (tw.kind === 'clip_mask_wipe') {{
+    if (tw.kind === 'clip_mask_wipe' || tw.kind === 'kh03_proof_frame_reveal') {{
       const initClip = isFrameZero ? 'inset(0% 0% 0% 0%)' : 'inset(0% 36% 0% 0%)';
       tl.set(sel, {{ clipPath: initClip, opacity: startOp }}, 0);
       if (!isFrameZero) {{
-        tl.set(sel, {{ clipPath: 'inset(0% 36% 0% 0%)', opacity: tw.opacity }}, tw.start);
+        tl.set(sel, {{ clipPath: 'inset(0% 36% 0% 0%)', opacity: tw.opacity }}, effStart);
       }}
-      tl.to(sel, {{ clipPath: 'inset(0% 0% 0% 0%)', duration: Math.min(0.24, Math.max(0.14, tw.entry)), ease: 'power3.out' }}, tw.start);
+      tl.to(sel, {{ clipPath: 'inset(0% 0% 0% 0%)', duration: Math.min(0.24, Math.max(0.14, tw.entry)), ease: 'power3.out' }}, effStart);
+    }}
+    const _inodes = (tw.internal_nodes || []);
+    const _nodeStart = (idx, fallbackDelay) => {{
+      const n = _inodes[idx];
+      if (n && typeof n.start === 'number' && n.start >= effStart && n.start < tw.end - 0.14) {{
+        return Math.max(effStart + 0.04, n.start);
+      }}
+      return effStart + fallbackDelay;
+    }};
+    if (tw.kind === 'kh03_cta_magnetic_underline') {{
+      const uEl = document.getElementById(tw.id + '_ul');
+      if (uEl && uEl.getTotalLength) {{
+        const Lu = uEl.getTotalLength();
+        const stUl = _nodeStart(0, 0.12);
+        tl.set(uEl, {{ strokeDasharray: Lu, strokeDashoffset: Lu }}, 0);
+        tl.to(uEl, {{ strokeDashoffset: 0, duration: 0.42, ease: 'power2.out' }}, stUl);
+      }}
+    }}
+    if (tw.kind === 'kh03_proportional_reservoir') {{
+      for (let s = 1; s <= 5; s++) {{
+        const segEl = document.getElementById(tw.id + '_seg_' + s);
+        if (!segEl) continue;
+        const st = _nodeStart(s - 1, 0.04 + (s - 1) * 0.08);
+        const initOp = (isFrameZero && s === 1) ? 0.85 : 0.0;
+        tl.set(segEl, {{ opacity: initOp, y: 8 }}, 0);
+        tl.to(segEl, {{ opacity: 1.0, y: 0, duration: 0.18, ease: 'power2.out' }}, st);
+      }}
+    }}
+    if (tw.kind === 'kh03_causal_flow_graph') {{
+      for (let s = 1; s <= 3; s++) {{
+        const nEl = document.getElementById(tw.id + '_node_' + s);
+        if (!nEl) continue;
+        const st = _nodeStart(s - 1, 0.06 + (s - 1) * 0.14);
+        const initOp = (isFrameZero && s === 1) ? 0.85 : 0.0;
+        tl.set(nEl, {{ opacity: initOp, y: 12, scale: 0.92 }}, 0);
+        tl.to(nEl, {{ opacity: 1.0, y: 0, scale: 1.0, duration: 0.22, ease: 'power2.out' }}, st);
+      }}
+    }}
+    if (tw.kind === 'kh03_annotated_timeline') {{
+      for (let s = 1; s <= 3; s++) {{
+        const tEl = document.getElementById(tw.id + '_tl_' + s);
+        if (!tEl) continue;
+        const st = _nodeStart(s - 1, 0.08 + (s - 1) * 0.18);
+        tl.set(tEl, {{ opacity: isFrameZero && s === 1 ? 0.85 : 0.0, x: -16 }}, 0);
+        tl.to(tEl, {{ opacity: 1.0, x: 0, duration: 0.26, ease: 'power2.out' }}, st);
+      }}
+    }}
+    if (tw.kind === 'kh03_contradiction_lockup') {{
+      const opEl = document.getElementById(tw.id + '_op');
+      if (opEl) {{
+        const stOp = _nodeStart(0, 0.12);
+        tl.set(opEl, {{ scale: 0.65, opacity: isFrameZero ? 0.8 : 0.0 }}, 0);
+        tl.to(opEl, {{ scale: 1.15, opacity: 1.0, duration: 0.22, ease: 'back.out(1.9)' }}, stOp);
+        tl.to(opEl, {{ scale: 1.0, duration: 0.18, ease: 'power2.out' }}, stOp + 0.24);
+      }}
+    }}
+    if (tw.kind === 'kh03_rolling_counter') {{
+      const vEl = document.getElementById(tw.id + '_val');
+      if (vEl) {{
+        const stVal = _nodeStart(0, 0.10);
+        tl.set(vEl, {{ scale: 0.78, y: 10, opacity: isFrameZero ? 0.85 : 0.0 }}, 0);
+        tl.to(vEl, {{ scale: 1.0, y: 0, opacity: 1.0, duration: 0.34, ease: 'power3.out' }}, stVal);
+      }}
+    }}
+    if (tw.kind === 'kh03_comparison_matrix') {{
+      const cmpEl = document.getElementById(tw.id);
+      if (cmpEl) {{
+        const cols = cmpEl.querySelectorAll('.kh3-cmp-col');
+        cols.forEach((col, ci) => {{
+          const st = _nodeStart(ci, 0.08 + ci * 0.22);
+          tl.set(col, {{ opacity: isFrameZero && ci === 0 ? 0.85 : 0.0, y: 12 }}, 0);
+          tl.to(col, {{ opacity: 1.0, y: 0, duration: 0.28, ease: 'power2.out' }}, st);
+        }});
+      }}
     }}
     if (tw.kind === 'spotlight_focus') {{
       const scSel = sel + '_scrim';
@@ -1231,9 +1556,14 @@ def compile_shotbook(
       }}
     }}
     if (tw.end < DURATION - 0.06) {{
-      // Overlap outgoing fade across beat seam by ~1-2 frames so main canvas NEVER flashes empty!
-      const exDur = Math.min(0.14, Math.max(0.08, tw.exit));
-      const exStart = Math.max(tw.start + tw.entry, tw.end - 0.02);
+      const exDur = Math.min(0.12, Math.max(0.06, tw.exit));
+      let hasReframeAtEnd = false;
+      for (const rw of REFRAME_WINS) {{
+        if (Math.abs(tw.end - rw.start) < 0.08) hasReframeAtEnd = true;
+      }}
+      const exStart = hasReframeAtEnd
+        ? Math.max(effStart + 0.08, tw.end - exDur - 0.01)
+        : Math.max(effStart + tw.entry, tw.end - 0.02);
       tl.to(sel, {{ opacity: 0, y: -6, duration: exDur, ease: 'power2.in' }}, exStart);
     }}
   }}
@@ -1268,6 +1598,33 @@ def compile_shotbook(
     )
     compile_map_path = bdir.parent / "COMPILE_MAP.json"
     compile_map_path.write_text(json.dumps(compile_map, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    layout_compile_map = {
+        "schema_version": "kh03.layout_compile_map.v1",
+        "plan_sha256": compile_map["plan_sha256"],
+        "presenter_mode": pres_mode,
+        "layout_policy": (shotbook.get("provenance") or {}).get("kh03_layout_policy") or pres_mode,
+        "layout_plan_sha256": (shotbook.get("provenance") or {}).get("kh03_layout_plan_sha256"),
+        "person_wrap_selector": "#personWrap",
+        "person_img_selector": "#person",
+        "master_timeline": "window.__timelines.master",
+        "camera_states": [
+            {
+                "camera_id": c["camera_id"],
+                "beat_id": c["beat_id"],
+                "transition_id": c["transition_id"] or None,
+                "start_sec": c["start"],
+                "end_sec": c["end"],
+                "reframe_dur_sec": c["reframe_dur"],
+                "pixel_box": [c["left"], c["top"], c["width"], c["height"]],
+                "border_radius_px": c["radius"],
+                "z_order": c["z_order"],
+                "object_position": c["object_position"],
+            }
+            for c in cam_specs
+        ],
+    }
+    layout_compile_path = bdir.parent / "LAYOUT_COMPILE_MAP.json"
+    layout_compile_path.write_text(json.dumps(layout_compile_map, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     return {
         "build_dir": str(bdir),
@@ -1275,6 +1632,8 @@ def compile_shotbook(
         "project_json_path": str(bdir / "project.json"),
         "fp_manifest_path": str(bdir / "fp-manifest.txt"),
         "compile_map_path": str(compile_map_path),
+        "layout_compile_map_path": str(layout_compile_path),
         "compile_map": compile_map,
+        "layout_compile_map": layout_compile_map,
         "project_config": proj,
     }

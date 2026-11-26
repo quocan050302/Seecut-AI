@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/execution_budget.schema.json",
+  "title": "KH-03.R3 Bounded Async Execution Resource Budget",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "workers",
+    "network_workers",
+    "heavy_render_concurrency",
+    "gpu_model_concurrency",
+    "decoder_pool",
+    "queue_frames",
+    "ffmpeg_threads",
+    "disk_reserve_gib",
+    "free_disk_gib",
+    "host_ram_mib",
+    "memory_budget_mib",
+    "budget_ok"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "kh03.execution_budget.v1"
+    },
+    "workers": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4
+    },
+    "network_workers": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2
+    },
+    "heavy_render_concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2
+    },
+    "gpu_model_concurrency": {
+      "type": "integer",
+      "const": 1
+    },
+    "decoder_pool": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2
+    },
+    "queue_frames": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 32
+    },
+    "ffmpeg_threads": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "disk_reserve_gib": {
+      "type": "number",
+      "minimum": 1.0
+    },
+    "max_disk_gib": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "free_disk_gib": {
+      "type": "number",
+      "minimum": 0
+    },
+    "host_ram_mib": {
+      "type": "number",
+      "minimum": 256
+    },
+    "available_ram_mib": {
+      "type": "number",
+      "minimum": 0
+    },
+    "memory_budget_mib": {
+      "type": "number",
+      "minimum": 0
+    },
+    "current_rss_mib": {
+      "type": "number",
+      "minimum": 0
+    },
+    "budget_ok": {
+      "type": "boolean"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "OK",
+        "BLOCKED_LOW_DISK",
+        "BLOCKED_MEMORY",
+        "RESOURCE_BUDGET_EXCEEDED"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    }
+  }
+}

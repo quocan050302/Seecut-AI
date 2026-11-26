@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -27,10 +28,15 @@ def _make_synth_mp4(dst: Path, duration: float = 2.0, fps: int = 24, size: str =
     ]
     subprocess.run(cmd, check=True, capture_output=True)
     if rotate:
-        subprocess.run(
-            ["ffmpeg", "-v", "error", "-y", "-i", str(tmp), "-c", "copy", "-metadata:s:v:0", f"rotate={rotate}", str(dst)],
-            check=True, capture_output=True,
+        r_dm = subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-display_rotation:v:0", str(rotate), "-i", str(tmp), "-c", "copy", str(dst)],
+            capture_output=True,
         )
+        if r_dm.returncode != 0:
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-y", "-i", str(tmp), "-c", "copy", "-metadata:s:v:0", f"rotate={rotate}", str(dst)],
+                check=True, capture_output=True,
+            )
         tmp.unlink(missing_ok=True)
     return dst
 
@@ -108,7 +114,15 @@ class TestContractsSourceTranscriptEDL(unittest.TestCase):
             bad = r1 / "corrupt.mp4"
             bad.write_bytes(b"not a valid mp4")
             sym = r1 / "sym.mp4"
-            sym.symlink_to(c1)
+            try:
+                sym.symlink_to(c1)
+            except OSError:
+                if os.name == "nt":
+                    junc = r1 / "junc_escape"
+                    subprocess.run(["cmd", "/c", "mklink", "/J", str(junc), str(r2)], check=True, capture_output=True)
+                    sym = junc / "clip.mp4"
+                else:
+                    raise
 
             inv = source_analysis.build_inventory(
                 [

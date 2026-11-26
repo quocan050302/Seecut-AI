@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/tracking_observation.schema.json",
+  "title": "KH-03.R3 Subject, Object & Action Tracking Provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "tracking_mode", "provider", "provider_version",
+    "deterministic_seed", "confidence", "is_faceless", "effective_dims", "scene_cuts",
+    "subject_tracks_summary", "object_tracks_summary", "action_timeline", "honest_disclosure"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.tracking_provenance.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "tracking_mode": {
+      "type": "string",
+      "enum": [
+        "LOCAL_DETECTOR_VERIFIED",
+        "LOCAL_MOTION_SALIENT_TRACKED",
+        "STATIC_FALLBACK_VERIFIED",
+        "FACELESS_OBJECT_TRACKING",
+        "TRACKING_STATIC_FALLBACK"
+      ]
+    },
+    "provider": { "type": "string", "minLength": 1 },
+    "provider_version": { "type": "string", "minLength": 1 },
+    "deterministic_seed": { "type": "integer" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "is_faceless": { "type": "boolean" },
+    "effective_dims": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 16 } },
+    "rotation_deg": { "type": "integer" },
+    "scene_cuts": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+    "subject_tracks_summary": { "type": "array", "items": { "type": "object" } },
+    "object_tracks_summary": { "type": "array", "items": { "type": "object" } },
+    "action_timeline": { "type": "array", "items": { "type": "object" } },
+    "interpolated_frame_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+    "conservative_fallback_applied": { "type": "boolean" },
+    "honest_disclosure": { "type": "string", "minLength": 1 }
+  }
+}

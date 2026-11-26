@@ -93,6 +93,10 @@ def compute_cache_identity(
         "time_map_sha": time_map_sha or "identity",
         "renderer_sha256": sha256_file(render_mjs_path) if render_mjs_path.is_file() else None,
         "project_cfg_sha256": hash_artifact(project_cfg),
+        "kh02_edl_sha256": project_cfg.get("kh02_edl_sha256"),
+        "kh03_selected_skill_id": project_cfg.get("kh03_selected_skill_id"),
+        "kh03_layout_policy": project_cfg.get("kh03_layout_policy"),
+        "kh03_layout_plan_sha256": project_cfg.get("kh03_layout_plan_sha256"),
         "html_sha256": sha256_file(html_p) if html_p.is_file() else None,
         "assets_sha256": assets_shas,
     }
@@ -259,12 +263,66 @@ def verify_render_frames(
     }
 
 
+def resolve_local_chromium() -> Path | None:
+    """Locate local Chromium / Chrome for Testing deterministically across macOS, Linux, and Windows."""
+    for env_k in ("JIANJI_CHROME", "KH03_CHROMIUM_PATH", "CHROME_PATH"):
+        v = os.environ.get(env_k)
+        if v and Path(v).is_file():
+            return Path(v)
+    mac_pw = Path.home() / "Library" / "Caches" / "ms-playwright"
+    if mac_pw.is_dir():
+        for pat in (
+            "chromium_headless_shell-*/chrome-headless-shell-mac-arm64/chrome-headless-shell",
+            "chromium_headless_shell-*/chrome-headless-shell-mac/chrome-headless-shell",
+            "chromium-*/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+            "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+        ):
+            m = sorted(mac_pw.glob(pat), reverse=True)
+            if m:
+                return m[0]
+    lin_pw = Path.home() / ".cache" / "ms-playwright"
+    if lin_pw.is_dir():
+        for pat in ("chromium_headless_shell-*/chrome-linux/headless_shell", "chromium-*/chrome-linux/chrome"):
+            m = sorted(lin_pw.glob(pat), reverse=True)
+            if m:
+                return m[0]
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        pw_root = Path(local_app) / "ms-playwright"
+        if pw_root.is_dir():
+            for pat in (
+                "chromium_headless_shell-*/chrome-headless-shell-win64/chrome-headless-shell.exe",
+                "chromium-*/chrome-win64/chrome.exe",
+                "chromium-*/chrome-win/chrome.exe",
+            ):
+                m = sorted(pw_root.glob(pat), reverse=True)
+                if m:
+                    return m[0]
+    for name in ("chromium", "chromium-browser", "google-chrome", "chrome"):
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
+
+
 def _ensure_node_link(build_dir: Path, tools_root: Path) -> None:
-    """Ensure build/node_modules points to pinned tools/node_modules so upstream _common.mjs resolves playwright-core."""
+    """Ensure build/node_modules points to pinned tools/node_modules across POSIX (symlink) & Windows (NTFS junction)."""
     nm = build_dir / "node_modules"
-    target = tools_root / "node_modules"
-    if not nm.exists() and target.is_dir():
-        nm.symlink_to(target)
+    target = (tools_root / "node_modules").resolve()
+    if nm.exists() or nm.is_symlink() or (hasattr(os.path, "isjunction") and os.path.isjunction(str(nm))):
+        return
+    if not target.is_dir():
+        return
+    try:
+        nm.symlink_to(target, target_is_directory=True)
+    except OSError:
+        if os.name == "nt":
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(nm), str(target)],
+                check=True, capture_output=True, text=True,
+            )
+        else:
+            raise
 
 
 def run_render_checked(
@@ -300,10 +358,23 @@ def run_render_checked(
     troot = tools_root or (Path(os.environ.get("SEECUT_STANDALONE_ROOT", os.path.expanduser("~/Projects/SeeCut-Olivia-Standalone"))) / "tools")
     _ensure_node_link(bdir, troot)
 
-    # Pre-create person_dir with ownership marker if source exists & cache invalid (so upstream render.mjs never touches unowned dir)
+    # Pre-create person_dir with ownership marker & extract person frames using FFmpeg 9+ compatible `-fps_mode cfr`
+    # (pinned upstream render.mjs@b05d7ed calls legacy `-vsync cfr` removed in FFmpeg 9; pre-extracting with exact
+    # `.extracted.json` stamp keeps upstream render.mjs 100% unmodified while staying FFmpeg 9 & Windows compatible!)
     if cfg.get("source") and not pf["person_cache_valid"]:
         pdir.mkdir(parents=True, exist_ok=True)
         (pdir / OWNERSHIP_MARKER).write_text(run_id, encoding="utf-8")
+        src_abs = os.path.abspath(os.path.join(str(bdir), str(cfg["source"])))
+        ext_cmd = [
+            "ffmpeg", "-v", "error", "-y", "-i", src_abs,
+            "-vf", f"fps={cfg['fps']}", "-fps_mode", "cfr",
+            "-q:v", "3", "-start_number", "1", str(pdir / "p%04d.jpg"),
+        ]
+        eproc = subprocess.run(ext_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        if eproc.returncode != 0:
+            raise RuntimeError(f"Person frame pre-extraction failed (rc={eproc.returncode}): {eproc.stderr[-300:]}")
+        want_stamp = json.dumps({"src": src_abs, "fps": cfg["fps"]}, separators=(",", ":"))
+        (pdir / ".extracted.json").write_text(want_stamp, encoding="utf-8")
 
     # Clean/mark output frame buffer directory safely
     out_frames_dir = bdir / ("frames" if mode == "full" else "probe_frames")
@@ -319,17 +390,39 @@ def run_render_checked(
 
     env = dict(os.environ)
     env["RENDER_SCALE"] = str(eff_scale)
+    if not env.get("JIANJI_CHROME"):
+        chrome_p = resolve_local_chromium()
+        if chrome_p is not None:
+            env["JIANJI_CHROME"] = str(chrome_p)
     t0 = time.monotonic()
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    popen_kw: dict[str, Any] = {
+        "env": env, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
+        "text": True, "encoding": "utf-8", "errors": "replace",
+    }
+    if os.name != "nt":
+        popen_kw["start_new_session"] = True
+    elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    proc = subprocess.Popen(cmd, **popen_kw)
     try:
         stdout, stderr = proc.communicate(timeout=timeout_sec)
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            if os.name != "nt" and hasattr(os, "killpg"):
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            else:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True, text=True, timeout=10,
+                )
         except OSError:
             proc.kill()
-        stdout, stderr = proc.communicate(timeout=10)
+        try:
+            stdout, stderr = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate(timeout=5)
         raise TimeoutError(f"render.mjs timed out after {timeout_sec}s; reaped child process group")
     elapsed = round(time.monotonic() - t0, 3)
 
@@ -365,7 +458,10 @@ def run_render_checked(
         "ok": True,
         "engine": "SeeCut-v3.4-HyperFrames-HTML-GSAP",
         "renderer_script": pf["render_mjs"],
+        "render_mjs": pf["render_mjs"],
         "renderer_sha256": pf["cache_identity"]["renderer_sha256"],
+        "command": " ".join(cmd),
+        "exit_code": rc,
         "mode": mode,
         "render_scale": eff_scale,
         "elapsed_sec": elapsed,

@@ -1,0 +1,11 @@
+# KH-03 Shared Universal Editing Doctrine
+
+All five KH-03 universal editing skills (`SK-01` through `SK-05`) share one authoritative intelligence layer (`scripts/kh03/`) and compile directly into the existing KH-02.R2 pipeline (`scripts/kh02/`) atop the unmodified **YeJe-cpu/SeeCut v3.4 Core** rendering engine.
+
+## Non-Negotiable Shared Laws
+1. **Mandatory User Selection Gate**: After `analyze_inputs()` -> `build_semantic_graph()` -> `recommend_skills()` -> `issue_recommendation()`, execution MUST STOP in state `AWAITING_USER_SELECTION`. No default selection, no countdown, no AI self-approval, no `AUTO` or `HYBRID` sixth skill. The user may pick ANY of `SK-01..SK-05`, including one not recommended; the binding receipt (`SELECTION_RECEIPT.json`) ties the choice to `run_id`, `video_sha256`, `script_sha256`, `recommendation_sha256`, and `registry_version`.
+2. **Cross-Niche Editorial Grammars (Never Niche Presets)**: Every skill works on any topic (finance, history, science/tech, fashion, food, product/tutorial, personal story) and on any supported aspect ratio (`9:16`, `16:9`, `1:1`, `4:5`). Zero hardcoded `niche -> skill` rules.
+3. **Shared Capabilities Across All Five**: Footage planning & rights-verified acquisition (`footage.py`), deep explanation graphs & exact arithmetic (`explanation.py`), adaptive compiled components (`components.py`), and multi-layer licensed sound design (`sound_director.py`) are active in ALL FIVE skills — only priorities, rhythm, art direction, and trade-offs differ.
+4. **Source & Layout Honesty**: Original A-roll footage and voice remain primary. Respect explicit full-frame `9:16` or `FIXED_PIP` user policies; no skill may silently override layout locks, fabricate product UI/screenshots, tamper with real banknotes/props, or invent statistics.
+5. **PROBLEM-01 Fail-Closed Compliance**: `YeJe-cpu/SeeCut` is **PolyForm Noncommercial License 1.0.0** (`aiesecxuanli@gmail.com`). Commercial release remains `BLOCKED` without verified written permission. `TEST_ONLY` audio/fixtures are strictly blocked in production.
+6. **Separated Honest Reporting**: Never collapse `CODE_QA_PASS`, `AUTO_EDITORIAL_QA`, `OWNER_VISUAL=PENDING`, `OWNER_AUDIO=PENDING`, `COMMERCIAL_RELEASE=BLOCKED`, and `KH03_REAL_CROSS_NICHE` into a single fake PASS.

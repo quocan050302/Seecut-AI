@@ -1,0 +1,97 @@
+{
+  "schema_version": "kh03.research_snapshot.v1",
+  "source_reference": "SeeCut_AI_VidIQ_Research_Upgrade_Flow_V1.txt",
+  "observation_date": "2026-11-24",
+  "evidence_class": "METADATA_ONLY",
+  "live_vidiq_calls_executed": false,
+  "competitor_media_downloaded": false,
+  "disclaimer": "Archived automatic content descriptors only. Detailed full-video watch calls failed previously due to exhausted credits. Views do NOT prove causal editing uplift, retention curves, or conversion rates; zero sequences or footage may be copied.",
+  "known_unknowns": [
+    "No verified frame-by-frame shot list or watch-time retention curve.",
+    "No matched lower-view control clips from the same accounts.",
+    "No verified conversion, CTR, or SFX loudness breakdown."
+  ],
+  "records": [
+    {
+      "record_id": "vidiq_snap_01",
+      "creator": "@emmyxtech",
+      "reported_views_text": "8.1M",
+      "source_url": "https://www.instagram.com/reel/Df4_LYIBH78",
+      "observed_descriptor": "talking-head -> hologram/product closeup, dynamic captions",
+      "evidence_class": "METADATA_ONLY",
+      "inferred_reusable_grammar": "Transition quickly from human anchor into concrete product focal visual with clear captions."
+    },
+    {
+      "record_id": "vidiq_snap_02",
+      "creator": "@risexventuress",
+      "reported_views_text": "5.2M",
+      "source_url": "https://www.instagram.com/reel/DfUkxKvId_U",
+      "observed_descriptor": "interface overlay/split-screen/guiding captions",
+      "evidence_class": "METADATA_ONLY",
+      "inferred_reusable_grammar": "Pair speaker with structured UI focal area and concise guiding labels."
+    },
+    {
+      "record_id": "vidiq_snap_03",
+      "creator": "@davito_creatorgrowth",
+      "reported_views_text": "4.5M",
+      "source_url": "https://www.tiktok.com/@davito_creatorgrowth/video/7701106802519330062",
+      "observed_descriptor": "direct face + procedural demo",
+      "evidence_class": "METADATA_ONLY",
+      "inferred_reusable_grammar": "Combine direct-to-camera explanation with step-by-step procedural demonstration."
+    },
+    {
+      "record_id": "vidiq_snap_04",
+      "creator": "@talnavarro1",
+      "reported_views_text": "3.2M",
+      "source_url": "https://www.instagram.com/reel/Dfm6aRwsR38",
+      "observed_descriptor": "direct hook + real software demo",
+      "evidence_class": "METADATA_ONLY",
+      "inferred_reusable_grammar": "Open with concise direct hook then prove claim using genuine software walkthrough."
+    },
+    {
+      "record_id": "vidiq_snap_05",
+      "creator": "@hippypotter",
+      "reported_views_text": "3.1M",
+      "source_url": "https://www.tiktok.com/@hippypotter/video/7707023960906534166",
+      "observed_descriptor": "creator/screen alternation and demonstration",
+      "evidence_class": "METADATA_ONLY",
+      "inferred_reusable_grammar": "Alternate creator expression with purposeful screen proof rather than static slides."
+    },
+    {
+      "record_id": "vidiq_snap_06",
+      "creator": "@lucaswebq",
+      "reported_views_text": "2M",
+      "source_url": "https://www.instagram.com/reel/De7O5P0u9jF",
+      "observed_descriptor": "keyboard B-roll + website walkthrough",
+      "evidence_class": "METADATA_ONLY",
+      "inferred_reusable_grammar": "Ground abstract tech claims with tactile physical B-roll and real site walkthrough."
+    },
+    {
+      "record_id": "vidiq_snap_07",
+      "creator": "@theroguecoder",
+      "reported_views_text": "1.7M",
+      "source_url": "https://www.instagram.com/reel/DfXd090iGQq",
+      "observed_descriptor": "split-screen and 3D globe/product demonstration",
+      "evidence_class": "METADATA_ONLY",
+      "inferred_reusable_grammar": "Use spatial/geographic visualizations to clarify scale and relationships."
+    },
+    {
+      "record_id": "vidiq_snap_08",
+      "creator": "@garyvee",
+      "reported_views_text": "1.6M",
+      "source_url": "https://www.tiktok.com/@garyvee/video/7701045485259312398",
+      "observed_descriptor": "simple talking head and moderate captions",
+      "evidence_class": "METADATA_ONLY",
+      "inferred_reusable_grammar": "Authenticity and clear speech cadence can anchor retention without heavy graphic clutter."
+    },
+    {
+      "record_id": "vidiq_snap_09",
+      "creator": "@dailydebriefclips",
+      "reported_views_text": "1.3M",
+      "source_url": "https://www.tiktok.com/@dailydebriefclips/video/7705972371622022420",
+      "observed_descriptor": "mostly static talking head/captions",
+      "evidence_class": "METADATA_ONLY",
+      "inferred_reusable_grammar": "Baseline control pattern: clarity relies primarily on spoken script structure."
+    }
+  ]
+}

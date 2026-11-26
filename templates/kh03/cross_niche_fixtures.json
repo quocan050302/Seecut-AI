@@ -1,0 +1,60 @@
+{
+  "schema_version": "kh03.cross_niche_fixtures.v1",
+  "note": "Minimal unseen cross-niche input fixtures for testing all 5 universal skills across 6 distinct domains (30 combinations). NOT fixed shot templates.",
+  "fixtures": [
+    {
+      "fixture_id": "holdout_finance_paycheck_paradox",
+      "niche": "finance",
+      "aspect_ratio": "9:16",
+      "language": "en",
+      "duration_sec": 26.0,
+      "layout_lock": "FULLSCREEN_9_16",
+      "script": "Just because you have $1,200 in your bank account doesn't mean you have $1,200 to spend. Let's say $800 is for bills, $200 for groceries, and $100 for gas. You actually have just $100 left. That's why mapping obligations before payday changes how every dollar behaves. Plan your next payday with clarity."
+    },
+    {
+      "fixture_id": "holdout_history_printing_press",
+      "niche": "history",
+      "aspect_ratio": "16:9",
+      "language": "en",
+      "duration_sec": 30.0,
+      "layout_lock": "ADAPTIVE",
+      "script": "In 1440, copying a single book by hand could take months, which meant knowledge stayed locked inside small elites. When Gutenberg combined movable metal type with an oil-based ink press, output multiplied dramatically. First, pamphlets spread across trade routes in weeks rather than years. Second, literacy rose because printed texts became affordable. That shift reshaped science and public debate forever."
+    },
+    {
+      "fixture_id": "holdout_science_heat_pump",
+      "niche": "science_tech",
+      "aspect_ratio": "16:9",
+      "language": "en",
+      "duration_sec": 28.0,
+      "layout_lock": "ADAPTIVE",
+      "script": "How can a heat pump deliver 3 units of heat using only 1 unit of electricity? It does not create heat from scratch; instead, it moves existing thermal energy from outside air indoors. Step 1: cold refrigerant absorbs outdoor heat and evaporates. Step 2: the compressor raises its pressure and temperature. Step 3: indoor coils release that heat into your room. Because moving energy costs less than generating it, efficiency reaches 300% under mild conditions."
+    },
+    {
+      "fixture_id": "holdout_fashion_linen_vs_cotton",
+      "niche": "fashion_lifestyle",
+      "aspect_ratio": "9:16",
+      "language": "en",
+      "duration_sec": 24.0,
+      "layout_lock": "FULLSCREEN_9_16",
+      "script": "Why does linen feel cooler than heavyweight cotton on humid days? Look closely at the fiber structure. Cotton fibers pack tightly and trap moisture against skin, while hollow flax fibers allow faster airflow and release moisture quickly. Linen wrinkles more easily, so you trade crispness for breathability. Choosing the weave to match your climate beats buying thicker fabrics."
+    },
+    {
+      "fixture_id": "holdout_food_maillard_searing",
+      "niche": "food_cooking",
+      "aspect_ratio": "9:16",
+      "language": "en",
+      "duration_sec": 24.0,
+      "layout_lock": "FULLSCREEN_9_16",
+      "script": "If your mushrooms turn gray instead of golden brown, your pan is overcrowded. Water boils at 100 degrees Celsius, but browning through the Maillard reaction needs roughly 140 degrees Celsius or higher. When too many pieces touch, trapped steam stalls the pan near boiling. Spread them in one thin layer, wait for moisture to evaporate, and crisp flavor develops naturally."
+    },
+    {
+      "fixture_id": "holdout_product_cli_workflow",
+      "niche": "product_tutorial",
+      "aspect_ratio": "16:9",
+      "language": "en",
+      "duration_sec": 26.0,
+      "layout_lock": "FIXED_PIP",
+      "script": "Stop deploying broken configs by hand. Here is a three-step local verification workflow. First, validate your JSON schema strictly so typos fail before runtime. Second, run deterministic tests twice to prove identical outputs. Third, check your diff and artifact hashes before pushing. Three minutes of automated checks saves hours of rollback debugging."
+    }
+  ]
+}

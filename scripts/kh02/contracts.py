@@ -88,6 +88,10 @@ def hash_artifact(obj_or_path: Any) -> str:
     return h.hexdigest()
 
 
+def _is_link_or_junction(p: Path) -> bool:
+    return p.is_symlink() or (hasattr(os.path, "isjunction") and os.path.isjunction(str(p)))
+
+
 def safe_path(
     candidate: str | Path,
     allowed_root: str | Path,
@@ -95,7 +99,7 @@ def safe_path(
     allow_symlinks: bool = False,
     must_exist: bool = False,
 ) -> Path:
-    """Validate that candidate resolves strictly inside allowed_root without traversal or forbidden symlinks."""
+    """Validate that candidate resolves strictly inside allowed_root without traversal or forbidden symlinks/junctions."""
     raw_str = str(candidate)
     if "\x00" in raw_str:
         raise ValueError(f"Null byte in path: {raw_str!r}")
@@ -125,9 +129,9 @@ def safe_path(
                     cur = cur.parent
                 else:
                     cur = cur / part
-                if cur.is_symlink():
+                if _is_link_or_junction(cur):
                     raise ValueError(f"Symlink rejected in safe path: {cur}")
-        elif joined.is_symlink():
+        elif _is_link_or_junction(joined):
             raise ValueError(f"Symlink rejected in safe path: {joined}")
 
     resolved = Path(os.path.realpath(str(joined)))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -19,10 +20,26 @@ import agy_judge_safe as judge_mod  # noqa: E402
 from scripts.kh02 import render_guard  # noqa: E402
 
 
+def _posix_shell() -> str:
+    for cand in ("zsh", "bash", r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"):
+        found = shutil.which(cand) or (cand if Path(cand).is_file() else None)
+        if found:
+            return found
+    return "zsh"
+
+
 def _make_executable(path: Path, body: str) -> Path:
-    path.write_text(body, encoding="utf-8")
+    path.write_text(body, encoding="utf-8", newline="\n")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return path
+
+
+def _make_agy_stub(path: Path, body_sh: str, body_cmd: str | None = None) -> Path:
+    if os.name == "nt" and body_cmd is not None:
+        cmd_p = path.with_suffix(".cmd")
+        cmd_p.write_text(body_cmd, encoding="utf-8", newline="\r\n")
+        return cmd_p
+    return _make_executable(path, body_sh)
 
 
 def _make_synth_mp4(dst: Path, duration: float = 2.0, fps: int = 24, size: str = "320x180", with_audio: bool = True) -> Path:
@@ -78,8 +95,8 @@ class TestP0SecurityAndWrappers(unittest.TestCase):
                     "AGY_BIN": str(agy_bin),
                     "HYPERFRAMES_BIN": str(fake_tools / "node_modules/.bin/hyperframes"),
                 })
-                cmd = ["zsh", str(REPO_ROOT / "scripts/safe_preflight.sh")] + (extra_args or [])
-                return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=20)
+                cmd = [_posix_shell(), str(REPO_ROOT / "scripts/safe_preflight.sh")] + (extra_args or [])
+                return subprocess.run(cmd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
 
             # Negative 1: "NOT OK" MUST FAIL (not substring-match "OK")
             p_notok = run_pf("#!/bin/sh\necho 'NOT OK'\nexit 0\n")
@@ -118,9 +135,10 @@ class TestP0SecurityAndWrappers(unittest.TestCase):
             (fake_skill / "scripts/schemas").mkdir(parents=True)
             (fake_skill / "references/prompt/硬伤清单.txt").write_text("check prompt", encoding="utf-8")
             (fake_skill / "scripts/schemas/check.json").write_text("{}", encoding="utf-8")
-            stub_agy = _make_executable(
+            stub_agy = _make_agy_stub(
                 td_p / "agy_fail",
                 '#!/bin/sh\necho \'{"structured_output":{"fingerprint":{"texts":["a","b"],"duration_sec":10},"checks":[],"evidence_gaps":[]}}\'\nexit 1\n',
+                '@echo off\r\necho {"structured_output":{"fingerprint":{"texts":["a","b"],"duration_sec":10},"checks":[],"evidence_gaps":[]}}\r\nexit /b 1\r\n',
             )
             with self.assertRaises(judge_mod.SubprocessFailed):
                 judge_mod.run_agy("check", str(td_p), 10, skill_dir=str(fake_skill), agy_bin=str(stub_agy))
@@ -254,44 +272,55 @@ class TestP0SecurityAndWrappers(unittest.TestCase):
             self.assertGreaterEqual(len(missing2), 1)
 
     def test_t07_agy_read_safe_symlink_policy_and_cleanup(self):
-        """T07: agy_read_safe rejects symlinks, policy-denied media transmission, cleans own temp dir."""
+        """T07: agy_read_safe rejects symlinks/junctions, policy-denied media transmission, cleans own temp dir."""
         with tempfile.TemporaryDirectory(prefix="kh02_t07_") as td:
             td_p = Path(td)
-            real_f = td_p / "sample.mp4"
+            real_dir = td_p / "real_dir"
+            real_dir.mkdir()
+            real_f = real_dir / "sample.mp4"
             real_f.write_bytes(b"fake")
             sym_f = td_p / "link.mp4"
-            sym_f.symlink_to(real_f)
+            try:
+                sym_f.symlink_to(real_f)
+            except OSError:
+                if os.name == "nt":
+                    junc = td_p / "junc_dir"
+                    subprocess.run(["cmd", "/c", "mklink", "/J", str(junc), str(real_dir)], check=True, capture_output=True)
+                    sym_f = junc / "sample.mp4"
+                else:
+                    raise
             stub = _make_executable(td_p / "agy_ok", "#!/bin/sh\necho READ_OK\nexit 0\n")
+            sh_bin = _posix_shell()
 
-            # Symlink rejected
+            # Symlink / junction rejected
             p_sym = subprocess.run(
-                ["zsh", str(REPO_ROOT / "scripts/agy_read_safe.sh"), str(sym_f), "describe", "10"],
+                [sh_bin, str(REPO_ROOT / "scripts/agy_read_safe.sh"), str(sym_f), "describe", "10"],
                 env={**os.environ, "AGY_BIN": str(stub)},
-                capture_output=True, text=True,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
-            self.assertEqual(p_sym.returncode, 2)
+            self.assertEqual(p_sym.returncode, 2, p_sym.stderr)
 
             # Transmission policy denied -> exit 4
             p_deny = subprocess.run(
-                ["zsh", str(REPO_ROOT / "scripts/agy_read_safe.sh"), str(real_f), "describe", "10"],
+                [sh_bin, str(REPO_ROOT / "scripts/agy_read_safe.sh"), str(real_f), "describe", "10"],
                 env={**os.environ, "AGY_BIN": str(stub), "SEECUT_DENY_EXTERNAL_MEDIA": "1"},
-                capture_output=True, text=True,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
-            self.assertEqual(p_deny.returncode, 4)
+            self.assertEqual(p_deny.returncode, 4, p_deny.stderr)
 
             # Allowlist outside -> rejected
             p_out = subprocess.run(
-                ["zsh", str(REPO_ROOT / "scripts/agy_read_safe.sh"), str(real_f), "describe", "10"],
+                [sh_bin, str(REPO_ROOT / "scripts/agy_read_safe.sh"), str(real_f), "describe", "10"],
                 env={**os.environ, "AGY_BIN": str(stub), "SEECUT_ALLOWED_MEDIA_ROOTS": str(td_p / "other")},
-                capture_output=True, text=True,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
-            self.assertEqual(p_out.returncode, 2)
+            self.assertEqual(p_out.returncode, 2, p_out.stderr)
 
             # Valid allowlisted execution succeeds & propagates rc
             p_ok = subprocess.run(
-                ["zsh", str(REPO_ROOT / "scripts/agy_read_safe.sh"), str(real_f), "describe", "10"],
+                [sh_bin, str(REPO_ROOT / "scripts/agy_read_safe.sh"), str(real_f), "describe", "10"],
                 env={**os.environ, "AGY_BIN": str(stub), "SEECUT_ALLOWED_MEDIA_ROOTS": str(td_p)},
-                capture_output=True, text=True,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             self.assertEqual(p_ok.returncode, 0, p_ok.stderr)
             self.assertIn("READ_OK", p_ok.stdout)

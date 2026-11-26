@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/creative_plan.schema.json",
+  "title": "KH-03 Adaptive Creative Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "selected_skill_id", "selection_receipt_sha256",
+    "selected_direction_id", "directions_considered", "art_direction",
+    "hook_plan", "attention_curve", "beats", "components", "sound_plan_ref",
+    "layout_constraints", "plan_sha256"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.creative_plan.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "selected_skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+    "selection_receipt_sha256": { "type": "string", "minLength": 16 },
+    "selected_direction_id": { "type": "string", "minLength": 1 },
+    "directions_considered": { "type": "array", "minItems": 2, "maxItems": 3, "items": { "type": "object" } },
+    "art_direction": {
+      "type": "object",
+      "required": ["theme", "palette", "font_stack", "motion_grammar", "density_intent"],
+      "properties": {
+        "theme": { "type": "string" },
+        "palette": { "type": "object" },
+        "font_stack": { "type": "string" },
+        "motion_grammar": { "type": "string" },
+        "density_intent": { "type": "string" }
+      }
+    },
+    "hook_plan": { "type": "object" },
+    "attention_curve": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+    "beats": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+    "components": { "type": "array", "items": { "type": "object" } },
+    "sound_plan_ref": { "type": "string" },
+    "layout_constraints": { "type": "object" },
+    "layout_plan_ref": { "type": ["string", "null"] },
+    "layout_plan_sha256": { "type": ["string", "null"] },
+    "caption_layout_ref": { "type": ["string", "null"] },
+    "motion_graph_ref": { "type": ["string", "null"] },
+    "motion_graph_sha256": { "type": ["string", "null"] },
+    "shared_element_graph_ref": { "type": ["string", "null"] },
+    "evidence_ledger_ref": { "type": ["string", "null"] },
+    "type_system_ref": { "type": ["string", "null"] },
+    "visual_density_ref": { "type": ["string", "null"] },
+    "hook_microbeats_ref": { "type": ["string", "null"] },
+    "candidate_id": { "type": ["string", "null"] },
+    "candidate_strategy": { "type": ["string", "null"] },
+    "winning_candidate_id": { "type": ["string", "null"] },
+    "winner_bundle_sha256": { "type": ["string", "null"] },
+    "competition_status": { "type": ["string", "null"] },
+    "plan_sha256": { "type": "string", "minLength": 16 }
+  }
+}

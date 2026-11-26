@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/quocan050302/Seecut-AI/schemas/kh03/selection.schema.json",
+  "title": "KH-03 Mandatory User Selection Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "video_sha256", "script_sha256",
+    "recommendation_sha256", "registry_version", "recommended_skill_id",
+    "selected_skill_id", "overrode_recommendation", "approval_source",
+    "approval_evidence", "test_only", "selected_at_utc", "binding"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "kh03.selection.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "video_sha256": { "type": "string", "minLength": 16 },
+    "secondary_sources_sha256": { "type": ["string", "null"] },
+    "script_sha256": { "type": "string", "minLength": 16 },
+    "recommendation_sha256": { "type": "string", "minLength": 16 },
+    "registry_version": { "type": "string", "minLength": 1 },
+    "recommended_skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+    "selected_skill_id": { "type": "string", "enum": ["SK-01", "SK-02", "SK-03", "SK-04", "SK-05"] },
+    "overrode_recommendation": { "type": "boolean" },
+    "approval_source": { "type": "string", "enum": ["EXPLICIT_OWNER_CLI", "EXPLICIT_HOST_MESSAGE", "TEST_ONLY_FIXTURE"] },
+    "approval_evidence": { "type": "string", "minLength": 5 },
+    "test_only": { "type": "boolean" },
+    "selected_at_utc": { "type": "string", "minLength": 10 },
+    "binding": { "type": "boolean", "const": true },
+    "raw_script_sha256": { "type": ["string", "null"] },
+    "script_source_path": { "type": ["string", "null"] },
+    "asr_sha256": { "type": ["string", "null"] },
+    "constraints_sha256": { "type": ["string", "null"] },
+    "trust_model": { "type": "string" }
+  }
+}

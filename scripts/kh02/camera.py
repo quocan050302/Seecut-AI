@@ -561,6 +561,20 @@ def choose_framing(
             "reason": f"DYNAMIC_HYBRID PIP at {reg['anchor']} yielding main stage to {fn}.",
         }
 
+    # Explicit FULLSCREEN_9_16 / fullscreen_lock: uniform full canvas from frame 0 through EOF (zero PIP/zoom/crop/fade)
+    if presenter_policy is not None and bool(presenter_policy.get("fullscreen_lock")):
+        return {
+            "framing": "full_medium",
+            "target_region": [0.0, 0.0, 1.0, 1.0],
+            "anchor": [0.5, 0.5],
+            "scale_from": 1.0,
+            "scale_to": 1.0,
+            "presenter_opacity": 1.0,
+            "presenter_shape": "ROUNDED_RECT",
+            "presenter_z_order": 10,
+            "reason": f"FULLSCREEN_LOCK active: uniform 1.0x full-canvas framing across {fn} (zero PIP, zoom, pan, or fade).",
+        }
+
     # LEGACY_DYNAMIC (preserves exact v1/R1 framing defaults)
     if "pip_bottom_left" in vm:
         return {
@@ -630,10 +644,62 @@ def plan_camera_path(
     rotation_deg: int = 0,
     platform: str = "reels",
     aspect_ratio: str = "9:16",
+    adaptive_layout_plan: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build continuous, resolution-capped 2D virtual camera keyframes across beats."""
     max_zoom = compute_max_safe_zoom(source_width, source_height, output_width, output_height)
     pol_mode = (presenter_policy or {}).get("mode", "LEGACY_DYNAMIC")
+    fs_locked = bool(presenter_policy and presenter_policy.get("fullscreen_lock"))
+
+    # KH-03.R2 ADL-01/03: Authoritative ADAPTIVE_DYNAMIC layout sequence (never overrides explicit fullscreen_lock or FIXED_PIP!)
+    if (
+        adaptive_layout_plan is not None
+        and not fs_locked
+        and pol_mode not in ("FIXED_PIP", "ADAPTIVE_PIP", "FACELESS")
+        and adaptive_layout_plan.get("layout_policy") == "ADAPTIVE_DYNAMIC"
+        and adaptive_layout_plan.get("beats")
+    ):
+        lay_by_beat = {lb["beat_id"]: lb for lb in adaptive_layout_plan["beats"]}
+        tr_by_to = {tr["to_beat_id"]: tr for tr in adaptive_layout_plan.get("transitions", [])}
+        events_ad: list[dict[str, Any]] = []
+        prev_fr = "full_canvas"
+        for idx, b in enumerate(beats):
+            lb = lay_by_beat.get(b["beat_id"]) or adaptive_layout_plan["beats"][min(idx, len(adaptive_layout_plan["beats"]) - 1)]
+            tr = tr_by_to.get(b["beat_id"])
+            lmode = str(lb["layout_mode"]).lower()
+            crop = dict(lb.get("source_crop") or {})
+            crop["border_radius_px"] = int(lb.get("border_radius_px", 0))
+            cam_ev_ad: dict[str, Any] = {
+                "camera_id": f"cam_{idx + 1:02d}",
+                "beat_id": b["beat_id"],
+                "start_frame": int(b["start_frame"]),
+                "end_frame": int(b["end_frame"]),
+                "target_region": list(lb["presenter_box_norm"]),
+                "framing_from": prev_fr if idx > 0 else lmode,
+                "framing_to": lmode,
+                "scale_from": 1.0,
+                "scale_to": 1.0,
+                "pos_from": [0.0, 0.0],
+                "pos_to": [0.0, 0.0],
+                "anchor": list(lb.get("anchor") or [0.5, 0.36]),
+                "easing": str((tr or {}).get("easing") or "power3.inOut"),
+                "velocity_limit": 0.45,
+                "acceleration_limit": 0.95,
+                "continuity_group": "cg_adaptive_choreography",
+                "reason": str(lb.get("reason") or f"ADAPTIVE_DYNAMIC {lmode}"),
+                "source_resolution_limit": max_zoom,
+                "presenter_opacity": float(lb.get("presenter_opacity", 1.0)),
+                "presenter_shape": "ROUNDED_RECT",
+                "presenter_z_order": int(lb.get("presenter_z_order", 20)),
+                "presenter_crop": crop,
+            }
+            if tr is not None:
+                cam_ev_ad["reframe_duration_sec"] = float(tr.get("duration_sec", 0.52))
+                cam_ev_ad["transition_id"] = str(tr.get("transition_id", ""))
+            events_ad.append(cam_ev_ad)
+            prev_fr = lmode
+        return events_ad
+
     events: list[dict[str, Any]] = []
     prev_scale = 1.0
     prev_framing = "full_medium"
@@ -655,7 +721,13 @@ def plan_camera_path(
             platform=platform,
             aspect_ratio=aspect_ratio,
         )
-        if pol_mode in ("FIXED_PIP", "ADAPTIVE_PIP") and fr.get("presenter_crop"):
+        if presenter_policy and bool(presenter_policy.get("fullscreen_lock")):
+            sc_from = 1.0
+            sc_to = 1.0
+            pos_from = [0.0, 0.0]
+            pos_to = [0.0, 0.0]
+            res_lim = max_zoom
+        elif pol_mode in ("FIXED_PIP", "ADAPTIVE_PIP") and fr.get("presenter_crop"):
             crop = fr["presenter_crop"]
             sc_from = float(crop["scale"])
             sc_to = float(crop["scale"])
