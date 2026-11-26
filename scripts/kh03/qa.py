@@ -287,6 +287,33 @@ GATE_PROFILES: dict[str, dict[str, Any]] = {
         "requires_native_proof": True,
         "requires_layers": True,
     },
+    "INDEPENDENT_PREVIEW": {
+        "mode": "INDEPENDENT_PREVIEW",
+        "mandatory_gates": (
+            "G_LICENSE", "G_SPEC_INTEGRITY", "G_FRAME_AUDIT", "G_FRAME_COVERAGE",
+            "G_COMPONENT_COVERAGE", "G_SPATIAL_ALIGNMENT", "G_AUDIO_SYNC", "G_EXPORT_QA",
+        ),
+        "allow_na_gates": frozenset({"G_H1_GEOM", "G_H2_JUDGE", "G_NATIVE_PROOF"}),
+        "requires_pixel_evidence": True,
+        "requires_h1": False,
+        "requires_h2": False,
+        "requires_native_proof": False,
+        "requires_layers": False,
+    },
+    "INDEPENDENT_FULL": {
+        "mode": "INDEPENDENT_FULL",
+        "mandatory_gates": (
+            "G_LICENSE", "G_SPEC_INTEGRITY", "G_FRAME_AUDIT", "G_FRAME_COVERAGE",
+            "G_COMPONENT_COVERAGE", "G_SPATIAL_ALIGNMENT", "G_CONTINUITY",
+            "G_AUDIO_SYNC", "G_EXPORT_QA",
+        ),
+        "allow_na_gates": frozenset({"G_H1_GEOM", "G_H2_JUDGE", "G_NATIVE_PROOF"}),
+        "requires_pixel_evidence": True,
+        "requires_h1": False,
+        "requires_h2": False,
+        "requires_native_proof": False,
+        "requires_layers": False,
+    },
 }
 
 

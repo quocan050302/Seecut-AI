@@ -63,15 +63,23 @@ def normalize_spoken_tokens(text: str) -> list[str]:
             out.append(_NUM_WORD_MAP[stripped])
         elif stripped in ("dollar", "dollars"):
             continue
+        elif stripped == "towards":
+            out.append("toward")
         else:
             out.append(stripped)
-    # Collapse simple spoken compound numbers (e.g., ["9", "80"] -> ["980"], ["20", "5"] -> ["25"], ["1", "100", "20"] -> ["120"])
+    # Collapse simple spoken compound numbers:
+    #   ["3", "100"] -> ["300"], ["a", "100"] -> ["100"], ["1", "100", "20"] -> ["120"],
+    #   ["9", "80"] -> ["980"], ["20", "5"] -> ["25"]
     merged: list[str] = []
     i = 0
     while i < len(out):
         if i + 2 < len(out) and out[i].isdigit() and out[i + 1] == "100" and out[i + 2].isdigit() and int(out[i]) < 10 and int(out[i + 2]) < 100:
             merged.append(str(int(out[i]) * 100 + int(out[i + 2])))
             i += 3
+        elif i + 1 < len(out) and out[i] in ("a", "1", "2", "3", "4", "5", "6", "7", "8", "9") and out[i + 1] == "100":
+            mult = 1 if out[i] == "a" else int(out[i])
+            merged.append(str(mult * 100))
+            i += 2
         elif i + 1 < len(out) and out[i].isdigit() and out[i + 1].isdigit():
             a, b = int(out[i]), int(out[i + 1])
             if 1 <= a <= 9 and 10 <= b <= 99:

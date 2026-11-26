@@ -1,0 +1,19 @@
+KH-03.R4.3Intelligence — Semantic Editing, Cinematic Composition & Async Acceleration (Sanitized Summary)
+Run ID: 20261126T043500Z_KH03R43_a869c4c_r43a
+Branch: feat/kh03-universal-editing-intelligence (baseline a869c4c61a4d889fc1dce47baadaf8064dfe7899)
+
+DELIVERABLE_MP4: Olivia_V7_Luxury_Ramen_KH03R43_9x16_FINAL_CANDIDATE.mp4 (stored outside git repo)
+DELIVERABLE_SHA256: 53721db5465e3b80e2aaf9b12624ba921eae1dd32bdc006810dab8c2b35874ca
+SOURCE_SHA256: 339ddd429b9fd306fba7f2bf7276eeae97e84048097cacac28b908f19da772e3
+SPECS: 1080x1920 @ 24/1 CFR, 913 frames, 38.0417s, H.264 yuv420p, AAC 48kHz stereo faststart
+TECHNICAL_QA: PASS (VERIFY_PASS, 8/8 components verified, 0 collisions, 0 black, 0 unintended freezes)
+AUDIO_QA: PASS (-15.1 LUFS, -2.8 dBTP, av_diff=0.0s, luxury_lounge clean-room BGM + 12 SFX)
+POST_RENDER_ASR: PASS (100.0% coverage, 97/97 words, 0 missing numbers, 0 unintended duplicates)
+ACTIVE_RENDERER: INDEPENDENT_FFMPEG_PIL (AUTHORIZED_INDEPENDENT_CLEAN_ROOM, clean_room_verified=true)
+NATIVE_SEECUT_COMMERCIAL: BLOCKED_COMMERCIAL_LICENSE (PolyForm Noncommercial 1.0.0, fake_receipt=false)
+EDITORIAL_LIFECYCLE: CANDIDATE_RENDERED | EDITORIAL_PENDING | OWNER_VISUAL=PENDING | OWNER_AUDIO=PENDING | FINAL_APPROVED=false
+PERF_COLD_STANDARD_SEC: 160.844 (target 300-600s MET, 2.10x faster than HOTFIX 338.03s, 1 final 1080p encode=74.125s)
+PERF_WARM_QUICK_SEC: 24.515 (warm ingest=0.032s, target 60-180s MET)
+PEAK_TREE_RSS_MIB: 173.9 (synthetic 180s long-form scan: 4.734s, 94.76->96.09 MiB)
+REGRESSION_SERIAL: 235/235 PASS (88 KH02 + 147 KH03) in 296.719s
+REGRESSION_PARALLEL_3W: 235/235 PASS in 132.359s (2.242x speedup, exact_id_parity=true, exact_status_parity=true)

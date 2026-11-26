@@ -22,12 +22,22 @@ import subprocess
 import threading
 import time
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+from .ingest_cache import SharedIngestCache, extract_pcm_48k_cached
+from .motion_components import (
+    PALETTE_PRESETS,
+    ease_in_out_cubic as _mc_ease_in_out,
+    render_component_onto_rgb,
+    render_luxury_backdrop,
+    resolve_palette,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -289,20 +299,29 @@ def _soft_limit_stereo(x: np.ndarray, ceiling: float = 0.88) -> np.ndarray:
 
 
 def _synth_warm_editorial_bgm(duration_sec: float, sample_rate: int = 48000, style: str = "warm_calm") -> np.ndarray:
-    """100% original procedural editorial underscore (warm soft electric-piano/pad chords, zero samples)."""
+    """100% original procedural editorial underscore (warm electric-piano/jazz lounge pads, zero samples)."""
     n = max(1, int(round(duration_sec * sample_rate)))
-    t = np.arange(n, dtype=np.float64) / float(sample_rate)
     left = np.zeros(n, dtype=np.float64)
     right = np.zeros(n, dtype=np.float64)
 
-    # Gentle uplifting 4-chord progression (Dmaj7 -> Bm7 -> Gmaj7 -> Asus4, ~4.0s per chord)
-    chords = [
-        [146.83, 220.00, 277.18, 369.99],  # Dmaj7
-        [123.47, 185.00, 246.94, 293.66],  # Bm7
-        [98.00, 196.00, 246.94, 369.99],   # Gmaj7
-        [110.00, 220.00, 293.66, 329.63],  # Asus4 -> A
-    ]
-    bar_sec = 4.0
+    if str(style).lower() == "luxury_lounge":
+        # Understated chic luxury lounge / playful warm jazz7 voicings (Cmaj9 -> Am9 -> Dm9 -> G13, 3.8s/bar)
+        chords = [
+            [130.81, 196.00, 246.94, 293.66, 329.63],  # Cmaj9
+            [110.00, 196.00, 246.94, 261.63, 329.63],  # Am9
+            [146.83, 220.00, 261.63, 329.63, 349.23],  # Dm9
+            [98.00, 174.61, 220.00, 246.94, 329.63],   # G13
+        ]
+        bar_sec = 3.8
+    else:
+        # Gentle uplifting 4-chord progression (Dmaj7 -> Bm7 -> Gmaj7 -> Asus4, ~4.0s per chord)
+        chords = [
+            [146.83, 220.00, 277.18, 369.99],  # Dmaj7
+            [123.47, 185.00, 246.94, 293.66],  # Bm7
+            [98.00, 196.00, 246.94, 369.99],   # Gmaj7
+            [110.00, 220.00, 293.66, 329.63],  # Asus4 -> A
+        ]
+        bar_sec = 4.0
     n_bars = int(math.ceil(duration_sec / bar_sec))
     for b_idx in range(n_bars):
         c_freqs = chords[b_idx % len(chords)]
@@ -312,22 +331,21 @@ def _synth_warm_editorial_bgm(duration_sec: float, sample_rate: int = 48000, sty
             continue
         seg_t = (np.arange(s1 - s0, dtype=np.float64)) / float(sample_rate)
         dur_b = (s1 - s0) / float(sample_rate)
-        # Smooth organic swell envelope per bar
-        att = np.clip(seg_t / 0.35, 0.0, 1.0)
+        att = np.clip(seg_t / (0.28 if style == "luxury_lounge" else 0.35), 0.0, 1.0)
         rel = np.clip((dur_b - seg_t) / 0.45, 0.0, 1.0)
         env = np.sin(att * math.pi * 0.5) * np.sin(rel * math.pi * 0.5)
         chord_l = np.zeros(s1 - s0, dtype=np.float64)
         chord_r = np.zeros(s1 - s0, dtype=np.float64)
         for fi, f0 in enumerate(c_freqs):
-            # Subtle stereo detune & warm fundamental + gentle 2nd harmonic
-            amp = 0.24 if fi == 0 else (0.16 if fi == 1 else 0.11)
-            det = 0.25 * (fi - 1.5)
-            tone_l = np.sin(2.0 * math.pi * (f0 - det) * seg_t) + 0.18 * np.sin(2.0 * math.pi * 2.0 * f0 * seg_t)
-            tone_r = np.sin(2.0 * math.pi * (f0 + det) * seg_t) + 0.18 * np.sin(2.0 * math.pi * 2.0 * f0 * seg_t)
+            amp = 0.22 if fi == 0 else (0.14 if fi == 1 else 0.095)
+            det = 0.22 * (fi - 1.5)
+            tone_l = np.sin(2.0 * math.pi * (f0 - det) * seg_t) + 0.14 * np.sin(2.0 * math.pi * 2.0 * f0 * seg_t)
+            tone_r = np.sin(2.0 * math.pi * (f0 + det) * seg_t) + 0.14 * np.sin(2.0 * math.pi * 2.0 * f0 * seg_t)
             chord_l += amp * tone_l
             chord_r += amp * tone_r
-        # Soft muted pulse on quarter notes for subtle editorial forward motion
-        pulse = 0.85 + 0.15 * np.sin(2.0 * math.pi * 0.5 * seg_t)
+        # Soft muted pulse for subtle forward editorial cadence
+        pulse_hz = 0.78 if style == "luxury_lounge" else 0.50
+        pulse = 0.86 + 0.14 * np.sin(2.0 * math.pi * pulse_hz * seg_t)
         left[s0:s1] += chord_l * env * pulse
         right[s0:s1] += chord_r * env * pulse
 
@@ -381,6 +399,12 @@ def _synth_tactile_sfx(kind: str, sample_rate: int = 48000) -> np.ndarray:
             + 0.35 * np.sin(2.0 * math.pi * 880.00 * t)   # A5
             + 0.22 * np.sin(2.0 * math.pi * 1174.66 * t)  # D6
         ) * np.exp(-t * 5.2) * np.clip(t / 0.012, 0.0, 1.0)
+    elif kind == "sub_drop":
+        dur = 0.36
+        t = np.arange(int(dur * sample_rate), dtype=np.float64) / sample_rate
+        f = 96.0 * np.exp(-t * 9.5) + 42.0
+        phase = 2.0 * math.pi * np.cumsum(f) / sample_rate
+        sig = np.sin(phase) * np.exp(-t * 9.0) * np.clip(t / 0.012, 0.0, 1.0)
     else:  # subtle_pop
         dur = 0.11
         t = np.arange(int(dur * sample_rate), dtype=np.float64) / sample_rate
@@ -403,9 +427,12 @@ def build_speech_master_and_mix(
     sample_rate: int = 48000,
     sfx_cues: list[dict[str, Any]] | None = None,
     bgm_enabled: bool = True,
+    bgm_style: str = "warm_calm",
     bgm_gain_db: float = -24.0,
+    sfx_enabled: bool = True,
     sfx_gain_db: float = -16.5,
     stems_dir: Path,
+    cache: SharedIngestCache | None = None,
 ) -> dict[str, Any]:
     """Assemble click-free speech master from EDL segments + ducked clean-room BGM + tactile SFX stems."""
     stems_dir.mkdir(parents=True, exist_ok=True)
@@ -413,7 +440,10 @@ def build_speech_master_and_mix(
     total_dur = total_output_frames / fps
     out_n = int(round(total_dur * sample_rate))
 
-    raw_mono = _read_pcm_f32_mono(primary_video, sample_rate=sample_rate)
+    if cache is not None:
+        raw_mono, _pcm_meta = extract_pcm_48k_cached(primary_video, sample_rate=sample_rate, cache=cache)
+    else:
+        raw_mono = _read_pcm_f32_mono(primary_video, sample_rate=sample_rate)
     # Build spliced voice master on exact output clock with equal-power Hann crossfades at segment joins
     voice_out = np.zeros(out_n, dtype=np.float64)
     for idx, seg in enumerate(voice_segments):
@@ -479,24 +509,25 @@ def build_speech_master_and_mix(
 
     bgm_stem = np.zeros((out_n, 2), dtype=np.float32)
     if bgm_enabled:
-        raw_bgm = _synth_warm_editorial_bgm(total_dur, sample_rate=sample_rate)
+        raw_bgm = _synth_warm_editorial_bgm(total_dur, sample_rate=sample_rate, style=bgm_style)
         bgm_lin = float(10.0 ** (bgm_gain_db / 20.0))
         bgm_stem = (raw_bgm[:out_n] * bgm_lin * duck_curve[:, None]).astype(np.float32)
 
     sfx_stem = np.zeros((out_n, 2), dtype=np.float32)
     sfx_base_lin = float(10.0 ** (sfx_gain_db / 20.0))
     applied_sfx: list[dict[str, Any]] = []
-    for cue in (sfx_cues or []):
-        t_sec = float(cue.get("time_sec", 0.0))
-        kind = str(cue.get("kind") or "tick")
-        rel_db = float(cue.get("gain_offset_db", 0.0))
-        s0 = int(round(t_sec * sample_rate))
-        if s0 < 0 or s0 >= out_n:
-            continue
-        clip = _synth_tactile_sfx(kind, sample_rate=sample_rate) * sfx_base_lin * float(10.0 ** (rel_db / 20.0))
-        s1 = min(out_n, s0 + len(clip))
-        sfx_stem[s0:s1] += clip[: s1 - s0]
-        applied_sfx.append({"time_sec": round(t_sec, 3), "kind": kind, "samples": [s0, s1]})
+    if sfx_enabled:
+        for cue in (sfx_cues or []):
+            t_sec = float(cue.get("time_sec", 0.0))
+            kind = str(cue.get("kind") or "tick")
+            rel_db = float(cue.get("gain_offset_db", 0.0))
+            s0 = int(round(t_sec * sample_rate))
+            if s0 < 0 or s0 >= out_n:
+                continue
+            clip = _synth_tactile_sfx(kind, sample_rate=sample_rate) * sfx_base_lin * float(10.0 ** (rel_db / 20.0))
+            s1 = min(out_n, s0 + len(clip))
+            sfx_stem[s0:s1] += clip[: s1 - s0]
+            applied_sfx.append({"time_sec": round(t_sec, 3), "kind": kind, "samples": [s0, s1]})
 
     mix = _soft_limit_stereo(voice_norm + bgm_stem + sfx_stem, ceiling=0.88).astype(np.float32)
 
@@ -749,15 +780,43 @@ def _render_overlay_event(
 # Main Clean-Room Independent Streaming Render Entrypoint
 # ---------------------------------------------------------------------------
 
+def _resolve_camera_transform(
+    camera_events: list[dict[str, Any]],
+    t_sec: float,
+    default_scale: float,
+    default_cx: float,
+    default_cy: float,
+) -> tuple[float, float, float]:
+    """Evaluate active declarative camera event with smooth cubic easing."""
+    for ce in camera_events:
+        t0 = float(ce.get("start_sec", 0.0))
+        t1 = float(ce.get("end_sec", 0.0))
+        if t0 <= t_sec < t1:
+            u = _mc_ease_in_out((t_sec - t0) / max(0.04, t1 - t0))
+            s0 = float(ce.get("scale_start", default_scale))
+            s1 = float(ce.get("scale_end", s0))
+            cx0 = float(ce.get("cx_start", ce.get("cx_norm", default_cx)))
+            cx1 = float(ce.get("cx_end", cx0))
+            cy0 = float(ce.get("cy_start", ce.get("cy_norm", default_cy)))
+            cy1 = float(ce.get("cy_end", cy0))
+            return (s0 + (s1 - s0) * u, cx0 + (cx1 - cx0) * u, cy0 + (cy1 - cy0) * u)
+    return (default_scale, default_cx, default_cy)
+
+
 def render_independent_video(
     spec: dict[str, Any],
     *,
     out_mp4: Path,
     stems_dir: Path,
     cancel_event: threading.Event | None = None,
+    cache: SharedIngestCache | None = None,
+    ffmpeg_threads: int = 4,
 ) -> dict[str, Any]:
     """Render a multi-source vertical/horizontal edit strictly via clean-room FFmpeg+Pillow+NumPy.
 
+    Supports both legacy v1 and canonical `INDEPENDENT_RENDER_SPEC_V2` (arbitrary N sources,
+    declarative camera events, full-frame illustrative backdrops, all 11 ROI-accelerated motion
+    components, parallel audio mix + silent video encode, and stream-copy faststart mux).
     Uses isolated staging file -> full FFmpeg decode check -> exact frame count check -> atomic os.replace().
     Never leaves partial MP4 on failure or cancellation!
     """
@@ -770,162 +829,220 @@ def render_independent_video(
     total_frames = int(spec["total_output_frames"])
     src_a_path = Path(spec["primary_source_path"]).resolve()
     src_b_path = Path(spec["secondary_source_path"]).resolve() if spec.get("secondary_source_path") else None
+    use_proxy = bool(spec.get("use_proxy_sources", False))
 
-    probe_a = _probe_video_basic(src_a_path)
-    probe_b = _probe_video_basic(src_b_path) if (src_b_path and src_b_path.is_file()) else None
+    # Build arbitrary-N source probes & streaming readers from source_registry (or v1 A/B fallback)
+    src_entries: dict[str, dict[str, Any]] = {}
+    reg = spec.get("source_registry") or {}
+    if isinstance(reg.get("sources"), list) and reg["sources"]:
+        for ent in reg["sources"]:
+            sid = str(ent["source_id"])
+            # Only use low-res proxy when explicitly requested for low-res preview (NEVER upscale as final!)
+            eff_p = Path(ent["proxy_path"]).resolve() if (use_proxy and ent.get("proxy_path") and Path(ent["proxy_path"]).is_file()) else Path(ent["path"]).resolve()
+            src_entries[sid] = {"path": eff_p, "probe": _probe_video_basic(eff_p)}
+        prim_id = str(reg.get("primary_source_id") or reg["sources"][0]["source_id"])
+        src_entries.setdefault("A", src_entries[prim_id])
+        if len(reg["sources"]) > 1:
+            sec_id = str(reg["sources"][1]["source_id"])
+            src_entries.setdefault("B", src_entries[sec_id])
+    else:
+        src_entries["A"] = {"path": src_a_path, "probe": _probe_video_basic(src_a_path)}
+        prim_id = "A"
+        if src_b_path and src_b_path.is_file():
+            src_entries["B"] = {"path": src_b_path, "probe": _probe_video_basic(src_b_path)}
 
-    # 1. Assemble speech-first audio master + clean-room procedural BGM + tactile SFX
-    aud_res = build_speech_master_and_mix(
-        primary_video=src_a_path,
-        voice_segments=list(spec["voice_segments"]),
-        total_output_frames=total_frames,
-        fps_num=fps_num,
-        fps_den=fps_den,
-        sample_rate=int(spec.get("sample_rate", 48000)),
-        sfx_cues=list(spec.get("sfx_cues") or []),
-        bgm_enabled=bool(spec.get("bgm_enabled", True)),
-        bgm_gain_db=float(spec.get("bgm_gain_db", -24.5)),
-        sfx_gain_db=float(spec.get("sfx_gain_db", -17.0)),
-        stems_dir=stems_dir,
-    )
+    # Check cancellation early before launching work
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("RENDER_CANCELLED_BEFORE_START")
 
-    # 2. Setup bounded O(1)-RAM streaming readers & isolated staging encoder
+    # 1. Start audio stem assembly concurrently with silent video rendering (identical frame/sample clock!)
+    t_aud_start = time.monotonic()
+
+    def _run_audio_stage() -> dict[str, Any]:
+        return build_speech_master_and_mix(
+            primary_video=src_a_path,
+            voice_segments=list(spec["voice_segments"]),
+            total_output_frames=total_frames,
+            fps_num=fps_num,
+            fps_den=fps_den,
+            sample_rate=int(spec.get("sample_rate", 48000)),
+            sfx_cues=list(spec.get("sfx_cues") or []),
+            bgm_enabled=bool(spec.get("bgm_enabled", True)),
+            bgm_style=str(spec.get("bgm_style", "warm_calm")),
+            bgm_gain_db=float(spec.get("bgm_gain_db", -24.5)),
+            sfx_enabled=bool(spec.get("sfx_enabled", True)),
+            sfx_gain_db=float(spec.get("sfx_gain_db", -17.0)),
+            stems_dir=stems_dir,
+            cache=cache,
+        )
+
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    video_staging = out_mp4.with_suffix(".video.staging.mp4")
     staging_mp4 = out_mp4.with_suffix(".staging.mp4")
-    if staging_mp4.exists():
-        staging_mp4.unlink()
+    for p_tmp in (video_staging, staging_mp4):
+        if p_tmp.exists():
+            p_tmp.unlink()
 
-    reader_a = _SequentialFrameReader(src_a_path, out_w, out_h)
-    reader_b = _SequentialFrameReader(src_b_path, out_w, out_h) if probe_b else None
+    readers: dict[str, _SequentialFrameReader] = {}
+    unique_readers: list[_SequentialFrameReader] = []
+    path_to_reader: dict[str, _SequentialFrameReader] = {}
+    for sid, info in src_entries.items():
+        key_p = str(info["path"])
+        rdr = path_to_reader.get(key_p)
+        if rdr is None:
+            rdr = _SequentialFrameReader(info["path"], out_w, out_h)
+            path_to_reader[key_p] = rdr
+            unique_readers.append(rdr)
+        readers[sid] = rdr
+
     fps_str = f"{fps_num}/{fps_den}"
+    ff_t = str(max(1, int(ffmpeg_threads)))
     enc_cmd = [
-        "ffmpeg", "-v", "error", "-y", "-nostdin", "-threads", "4",
+        "ffmpeg", "-v", "error", "-y", "-nostdin", "-threads", ff_t,
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{out_w}x{out_h}", "-r", fps_str, "-i", "pipe:0",
-        "-i", aud_res["mix_wav"],
-        "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "libx264", "-preset", str(spec.get("x264_preset", "medium")), "-crf", str(spec.get("crf", 17)),
         "-pix_fmt", "yuv420p", "-r", fps_str,
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        "-movflags", "+faststart",
-        str(staging_mp4),
+        "-an",
+        str(video_staging),
     ]
     popen_kw: dict[str, Any] = {"stdin": subprocess.PIPE, "stderr": subprocess.PIPE}
     if os.name == "posix":
         popen_kw["start_new_session"] = True
     elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
         popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    enc_proc = subprocess.Popen(enc_cmd, **popen_kw)
 
     visual_tracks = list(spec["visual_tracks"])
+    camera_events = list(spec.get("camera_events") or [])
     overlays = list(spec.get("overlays") or [])
+    default_pal = resolve_palette({}, spec.get("art_tokens") or PALETTE_PRESETS["editorial_dark"])
     vis_dur_a = 0
     vis_dur_b = 0
     frames_written = 0
 
-    def _resolve_track_frame(tr: dict[str, Any], out_f: int) -> Image.Image:
-        src_kind = str(tr.get("source") or "A").upper()
+    def _lookup_source_frame(sid: str, t_sec_req: float) -> Image.Image | None:
+        info = src_entries.get(sid)
+        rdr = readers.get(sid)
+        if info is None or rdr is None:
+            return None
+        pr = info["probe"]
+        clamped = max(0.0, min(max(0.04, pr["video_duration_sec"] - 0.04), t_sec_req))
+        fi = max(0, min(pr["nb_frames"] - 1, int(round(clamped * pr["fps"]))))
+        return rdr.get_frame(fi)
+
+    def _resolve_track_frame(tr: dict[str, Any], out_f: int, t_sec: float) -> np.ndarray:
+        mode = str(tr.get("mode") or "source").lower()
+        if mode == "illustrative_backdrop":
+            return render_luxury_backdrop(out_w, out_h, default_pal)
+        sid = str(tr.get("source_id") or tr.get("source") or prim_id)
+        if sid not in src_entries:
+            sid = "B" if sid.upper() == "B" and "B" in src_entries else prim_id
+        info = src_entries[sid]
+        pr = info["probe"]
+        rdr = readers[sid]
         tr_start = int(tr["out_start_frame"])
         tr_end = max(tr_start + 1, int(tr["out_end_frame"]))
         u = (out_f - tr_start) / float(max(1, tr_end - tr_start - 1))
         src_in = float(tr["src_in_sec"])
         src_out = float(tr["src_out_sec"])
-        if src_kind == "B" and reader_b is not None and probe_b is not None:
-            # Strict video-stream overhang clamp!
-            max_sec = max(0.05, probe_b["video_duration_sec"] - 0.04)
-            clamped_out = min(src_out, max_sec)
-            clamped_in = min(src_in, max(0.0, clamped_out - 0.04))
-            t_src = clamped_in + u * (clamped_out - clamped_in)
-            f_idx = max(0, min(probe_b["nb_frames"] - 1, int(round(t_src * probe_b["fps"]))))
-            im = reader_b.get_frame(f_idx)
-        else:
-            max_sec = max(0.05, probe_a["video_duration_sec"] - 0.04)
-            clamped_out = min(src_out, max_sec)
-            clamped_in = min(src_in, max(0.0, clamped_out - 0.04))
-            t_src = clamped_in + u * (clamped_out - clamped_in)
-            f_idx = max(0, min(probe_a["nb_frames"] - 1, int(round(t_src * probe_a["fps"]))))
-            im = reader_a.get_frame(f_idx)
+        max_sec = max(0.05, pr["video_duration_sec"] - 0.04)
+        clamped_out = min(src_out, max_sec)
+        clamped_in = min(src_in, max(0.0, clamped_out - 0.04))
+        t_src = clamped_in + u * (clamped_out - clamped_in)
+        f_idx = max(0, min(pr["nb_frames"] - 1, int(round(t_src * pr["fps"]))))
+        im = rdr.get_frame(f_idx)
+
         sc0 = float(tr.get("scale_start", 1.0))
         sc1 = float(tr.get("scale_end", sc0))
-        cur_sc = sc0 + (sc1 - sc0) * _ease_in_out_cubic(u)
-        cx = float(tr.get("focus_x", 0.5))
-        cy = float(tr.get("focus_y", 0.5))
+        base_sc = sc0 + (sc1 - sc0) * _ease_in_out_cubic(u)
+        base_cx = float(tr.get("cx_norm", tr.get("focus_x", 0.5)))
+        base_cy = float(tr.get("cy_norm", tr.get("focus_y", 0.5)))
+        cur_sc, cx, cy = _resolve_camera_transform(camera_events, t_sec, base_sc, base_cx, base_cy)
         im_out = _zoom_pan_frame(im, out_w, out_h, cur_sc, cx_norm=cx, cy_norm=cy)
-        # Optional spatial inset preview card (e.g. pointing cue floating card from Source B over Source A!)
+
+        # Optional spatial inset preview card (backward-compatible v1/v2)
         inset = tr.get("inset_b")
-        if inset and reader_b is not None and probe_b is not None:
+        if inset and "B" in readers and "B" in src_entries:
             it0, it1 = int(inset["out_start_frame"]), int(inset["out_end_frame"])
             if it0 <= out_f < it1:
+                probe_b = src_entries["B"]["probe"]
                 iu = (out_f - it0) / float(max(1, it1 - it0 - 1))
                 in_p = _ease_out_cubic(min(1.0, (out_f - it0) / 8.0))
                 out_p = _ease_out_cubic(min(1.0, (it1 - out_f) / 6.0))
                 iv = min(in_p, out_p)
                 bt = min(probe_b["video_duration_sec"] - 0.05, float(inset["b_in_sec"]) + iu * (float(inset["b_out_sec"]) - float(inset["b_in_sec"])))
                 bf = max(0, min(probe_b["nb_frames"] - 1, int(round(bt * probe_b["fps"]))))
-                bim = reader_b.get_frame(bf)
-                # Crop center-upper evidence area of B cleanly into floating card on right/lower-right
+                bim = readers["B"].get_frame(bf)
                 bx0, by0, bw, bh = [float(v) for v in inset.get("box_norm", [0.54, 0.54, 0.42, 0.34])]
                 cw = max(32, int(round(bw * out_w)))
                 ch = max(32, int(round(bh * out_h)))
                 px = int(round(bx0 * out_w + (1.0 - in_p) * 90 * (out_w / 1080.0)))
                 py = int(round(by0 * out_h))
-                # Crop aspect-matched region from B
                 bcrop = _zoom_pan_frame(bim, cw, ch, float(inset.get("b_zoom", 1.12)), cx_norm=0.5, cy_norm=0.38).convert("RGBA")
-                # Rounded corners mask
                 mask = Image.new("L", (cw, ch), 0)
                 ImageDraw.Draw(mask).rounded_rectangle((0, 0, cw, ch), radius=max(10, int(22 * out_w / 1080.0)), fill=int(255 * iv))
                 comp = im_out.convert("RGBA")
                 _draw_rounded_card(comp, (px - 6, py - 6, px + cw + 6, py + ch + 6), radius=max(12, int(26 * out_w / 1080.0)), fill=(25, 48, 38, int(230 * iv)), outline=(217, 182, 107, int(235 * iv)), outline_w=max(2, int(3 * out_w / 1080.0)))
                 comp.paste(bcrop, (px, py), mask)
                 im_out = comp.convert("RGB")
-        return im_out
+        return np.asarray(im_out, dtype=np.uint8).copy()
 
-    prev_track_end_img: Image.Image | None = None
-    prev_track_idx = -1
+    t_vid_start = time.monotonic()
+    enc_proc = subprocess.Popen(enc_cmd, **popen_kw)
+    prev_track_end_arr: np.ndarray | None = None
+    aud_res: dict[str, Any] | None = None
+
     try:
-        assert enc_proc.stdin is not None
-        for f_out in range(total_frames):
-            if cancel_event is not None and cancel_event.is_set():
-                raise RuntimeError("RENDER_CANCELLED_MID_ENCODE")
-            t_sec = f_out / fps
-            tr_idx = 0
-            for idx_t, tr in enumerate(visual_tracks):
-                if int(tr["out_start_frame"]) <= f_out < int(tr["out_end_frame"]):
-                    tr_idx = idx_t
-                    break
-            else:
+        with ThreadPoolExecutor(max_workers=1) as aud_pool:
+            aud_fut = aud_pool.submit(_run_audio_stage)
+            assert enc_proc.stdin is not None
+            for f_out in range(total_frames):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("RENDER_CANCELLED_MID_ENCODE")
+                t_sec = f_out / fps
                 tr_idx = len(visual_tracks) - 1
-            tr = visual_tracks[tr_idx]
-            if str(tr.get("source") or "A").upper() == "B":
-                vis_dur_b += 1
-            else:
-                vis_dur_a += 1
+                for idx_t, tr in enumerate(visual_tracks):
+                    if int(tr["out_start_frame"]) <= f_out < int(tr["out_end_frame"]):
+                        tr_idx = idx_t
+                        break
+                tr = visual_tracks[tr_idx]
+                src_tag = str(tr.get("source_id") or tr.get("source") or prim_id)
+                if src_tag.upper() == "B" or (src_tag != prim_id and str(tr.get("mode") or "source") == "source"):
+                    vis_dur_b += 1
+                else:
+                    vis_dur_a += 1
 
-            frame_rgb = _resolve_track_frame(tr, f_out)
+                frame_arr = _resolve_track_frame(tr, f_out, t_sec)
 
-            # Optional smooth transition blend across track boundaries (6-8 frames crossfade)
-            xf_f = int(tr.get("transition_frames", 0))
-            local_f = f_out - int(tr["out_start_frame"])
-            if xf_f > 0 and local_f < xf_f and prev_track_end_img is not None and tr_idx > 0:
-                alpha = _ease_in_out_cubic((local_f + 1) / float(xf_f + 1))
-                frame_rgb = Image.blend(prev_track_end_img, frame_rgb, alpha)
+                # Smooth crossfade across track boundaries
+                xf_f = int(tr.get("transition_frames", 0))
+                local_f = f_out - int(tr["out_start_frame"])
+                if xf_f > 0 and local_f < xf_f and prev_track_end_arr is not None and tr_idx > 0:
+                    alpha = float(_ease_in_out_cubic((local_f + 1) / float(xf_f + 1)))
+                    frame_arr = np.clip(
+                        frame_arr.astype(np.float32) * alpha + prev_track_end_arr.astype(np.float32) * (1.0 - alpha),
+                        0.0, 255.0,
+                    ).astype(np.uint8)
 
-            if f_out == int(tr["out_end_frame"]) - 1:
-                prev_track_end_img = frame_rgb.copy()
-                prev_track_idx = tr_idx
+                if f_out == int(tr["out_end_frame"]) - 1:
+                    prev_track_end_arr = frame_arr.copy()
 
-            # Composite semantic motion graphics overlays
-            frame_rgba = frame_rgb.convert("RGBA")
-            for ev in overlays:
-                _render_overlay_event(frame_rgba, ev, t_sec, out_w, out_h)
+                # ROI-accelerated NumPy compositing of ALL 11 declarative motion components!
+                for ev in overlays:
+                    render_component_onto_rgb(
+                        frame_arr, ev, t_sec,
+                        default_palette=default_pal,
+                        source_frame_lookup=_lookup_source_frame,
+                    )
 
-            enc_proc.stdin.write(frame_rgba.convert("RGB").tobytes())
-            frames_written += 1
+                enc_proc.stdin.write(frame_arr.tobytes())
+                frames_written += 1
 
-        enc_proc.stdin.close()
-        stderr_out = enc_proc.stderr.read().decode("utf-8", errors="replace") if enc_proc.stderr else ""
-        rc = enc_proc.wait(timeout=180)
-        if rc != 0:
-            raise RuntimeError(f"INDEPENDENT_FFMPEG_ENCODE_FAILED(rc={rc}): {stderr_out[-400:]}")
+            enc_proc.stdin.close()
+            stderr_out = enc_proc.stderr.read().decode("utf-8", errors="replace") if enc_proc.stderr else ""
+            rc = enc_proc.wait(timeout=180)
+            if rc != 0:
+                raise RuntimeError(f"INDEPENDENT_FFMPEG_ENCODE_FAILED(rc={rc}): {stderr_out[-400:]}")
+            aud_res = aud_fut.result()
     except Exception:
         if enc_proc.stdin:
             try:
@@ -938,6 +1055,7 @@ def render_independent_video(
                 enc_proc.wait(timeout=3.0)
             except subprocess.TimeoutExpired:
                 enc_proc.kill()
+        video_staging.unlink(missing_ok=True)
         staging_mp4.unlink(missing_ok=True)
         raise
     finally:
@@ -946,9 +1064,31 @@ def render_independent_video(
                 enc_proc.stderr.close()
             except Exception:
                 pass
-        reader_a.close()
-        if reader_b is not None:
-            reader_b.close()
+        for rdr in unique_readers:
+            rdr.close()
+
+    t_vid_elapsed = round(time.monotonic() - t_vid_start, 3)
+
+    # 2. Fast stream-copy final mux (-c:v copy -c:a aac -movflags +faststart — ZERO second video encode!)
+    t_mux = time.monotonic()
+    assert aud_res is not None
+    mux_cmd = [
+        "ffmpeg", "-v", "error", "-y", "-nostdin",
+        "-i", str(video_staging),
+        "-i", aud_res["mix_wav"],
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+        "-shortest",
+        "-movflags", "+faststart",
+        str(staging_mp4),
+    ]
+    mux_p = subprocess.run(mux_cmd, capture_output=True, text=True, timeout=90)
+    video_staging.unlink(missing_ok=True)
+    if mux_p.returncode != 0:
+        staging_mp4.unlink(missing_ok=True)
+        raise RuntimeError(f"INDEPENDENT_MUX_FAILED(rc={mux_p.returncode}): {mux_p.stderr[-300:]}")
+    t_mux_elapsed = round(time.monotonic() - t_mux, 3)
 
     # 3. Full decode QA & exact frame count verification BEFORE atomic promotion!
     dec_chk = subprocess.run(["ffmpeg", "-v", "error", "-i", str(staging_mp4), "-f", "null", "-"], capture_output=True, text=True, timeout=120)
@@ -959,12 +1099,17 @@ def render_independent_video(
             f"INDEPENDENT_STAGING_QA_FAILED(decode_rc={dec_chk.returncode}, frames={probed_out['nb_frames']}!={total_frames})"
         )
 
+    if cancel_event is not None and cancel_event.is_set():
+        staging_mp4.unlink(missing_ok=True)
+        raise RuntimeError("RENDER_CANCELLED_BEFORE_PUBLISH")
+
     os.replace(staging_mp4, out_mp4)
     final_sha = _sha256_file(out_mp4)
     return {
-        "schema_version": "kh03.independent_render_receipt.v1",
+        "schema_version": "kh03.independent_render_receipt.v2",
         "engine_kind": "INDEPENDENT_FFMPEG_PIL",
         "uses_seecut_upstream": False,
+        "spec_sha256": spec.get("spec_sha256"),
         "final_mp4_path": str(out_mp4),
         "final_mp4_sha256": final_sha,
         "final_mp4_bytes": out_mp4.stat().st_size,
@@ -979,6 +1124,11 @@ def render_independent_video(
         "source_a_visible_sec": round(vis_dur_a / fps, 3),
         "source_b_visible_sec": round(vis_dur_b / fps, 3),
         "audio": aud_res,
+        "timings": {
+            "visual_encode_and_audio_parallel_sec": t_vid_elapsed,
+            "stream_copy_mux_sec": t_mux_elapsed,
+            "total_render_sec": round(time.monotonic() - t0, 3),
+        },
         "elapsed_sec": round(time.monotonic() - t0, 3),
         "decode_qa_pass": True,
     }
@@ -1046,7 +1196,7 @@ def build_independent_render_spec_from_plan(
                 "start_sec": 0.0,
                 "end_sec": min(2.6, total_dur * 0.5),
                 "title": hook_txt[:42],
-                "subtitle": str(creative_plan.get("selected_skill_id") or ""),
+                "subtitle": str(hp.get("hook_subline") or "").strip()[:52],
             })
 
     return {

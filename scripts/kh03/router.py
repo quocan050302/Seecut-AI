@@ -453,6 +453,9 @@ def run_execute(
     production_mode: bool = True,
     allow_test_only_sfx: bool = False,
     renderer: str = "native_seecut",
+    production_profile: str = "standard",
+    cache_dir: Path | None = None,
+    independent_spec_overrides: dict[str, Any] | None = None,
     seecut_root: Path | None = None,
     tools_root: Path | None = None,
 ) -> dict[str, Any]:
@@ -707,7 +710,7 @@ def run_execute(
     if inp.get("secondary_sources_sha256"):
         source_hashes["secondary_sources"] = str(inp["secondary_sources_sha256"])
 
-    if compete_candidates and not dry_run and layout_plan is not None:
+    if compete_candidates and not dry_run and layout_plan is not None and not use_independent_clean_room:
         sat_p = rdir / "layouts" / "SUBJECT_ACTION_TRACKS.json"
         sat_doc = parse_json_strict(sat_p) if sat_p.is_file() else {}
         tr_p_cand = rdir / "analysis" / "TRANSCRIPT_NORMALIZED.json"
@@ -998,65 +1001,345 @@ def run_execute(
     }
     brief_path = write_json_atomic(rdir / "manifests" / "KH02_DERIVED_BRIEF.json", kh02_brief)
 
-    # R4.2.HOTFIX Clean-Room Independent Renderer Branch (zero SeeCut/PolyForm execution, zero fake receipt!)
+    # R4.3 Clean-Room Independent Semantic Compiler, Bounded Candidate Competition, Render & Full Independent QA
     if use_independent_clean_room and not dry_run and mode in ("preview", "full"):
-        from .independent_renderer import build_independent_render_spec_from_plan, render_independent_video
-        sec_srcs = inp.get("secondary_sources") or []
-        sec_p = Path(sec_srcs[0]["path"]) if (sec_srcs and sec_srcs[0].get("path")) else None
-        out_w = 540 if mode == "preview" else (1080 if inp["media"]["aspect_ratio"] == "9:16" else 1920)
-        out_h = 960 if mode == "preview" else (1920 if inp["media"]["aspect_ratio"] == "9:16" else 1080)
-        ind_spec = build_independent_render_spec_from_plan(
-            primary_source_path=Path(inp["video_path"]),
-            secondary_source_path=sec_p,
+        import time as _time
+        from concurrent.futures import ThreadPoolExecutor
+        from .independent_qa import run_independent_render_qa
+        from .independent_renderer import render_independent_video
+        from .ingest_cache import SharedIngestCache, build_lowres_proxy_cached, get_process_tree_rss_mib
+        from .semantic_timeline import build_source_registry, compile_semantic_timeline
+
+        t0_ind = _time.monotonic()
+        eff_profile = str(production_profile or "standard").strip().lower()
+        if eff_profile not in ("quick", "standard", "high"):
+            eff_profile = "standard"
+
+        ind_cache = SharedIngestCache(cache_dir or (rdir / "cache" / "ingest"))
+        ov_cfg = dict(independent_spec_overrides or {})
+        sec_srcs = list(inp.get("secondary_sources") or [])
+        sec_entries = [
+            {
+                "source_id": str(s.get("source_id") or f"secondary_{idx_s + 1:02d}"),
+                "path": str(s["path"]),
+                "role": str(s.get("role") or "secondary_evidence"),
+                "audio_policy": str(s.get("audio_policy") or "MUTE_DEFAULT"),
+                "rights": str(s.get("rights") or "OWNER_SUPPLIED_NONCOMMERCIAL"),
+            }
+            for idx_s, s in enumerate(sec_srcs)
+            if isinstance(s, dict) and s.get("path")
+        ]
+
+        # Build arbitrary-N source registry (single probe/SHA per input!)
+        src_reg = build_source_registry(
+            {"source_id": "primary_aroll", "path": inp["video_path"], "role": "primary_aroll", "audio_policy": "MASTER_VOICE"},
+            sec_entries,
+            cache=ind_cache,
+        )
+        write_json_atomic(rdir / "manifests" / "SOURCE_REGISTRY.json", src_reg)
+
+        # Load authoritative VOICE_EDL.json if computed (NO silent fallback to uncut A-roll when EDL exists!)
+        ve_path = rdir / "analysis" / "VOICE_EDL.json"
+        voice_edl_doc = ov_cfg.get("voice_edl") or (parse_json_strict(ve_path) if ve_path.is_file() else None)
+        sat_p_ind = rdir / "layouts" / "SUBJECT_ACTION_TRACKS.json"
+        sat_ind = parse_json_strict(sat_p_ind) if sat_p_ind.is_file() else None
+
+        is_portrait = inp["media"]["aspect_ratio"] == "9:16"
+        full_w, full_h = (1080, 1920) if is_portrait else (1920, 1080)
+        prev_w, prev_h = (540, 960) if is_portrait else (960, 540)
+        out_w = prev_w if (mode == "preview" or eff_profile == "quick") else full_w
+        out_h = prev_h if (mode == "preview" or eff_profile == "quick") else full_h
+        fps_n = int(inp["media"]["fps_num"])
+        fps_d = int(inp["media"]["fps_den"])
+        ff_thr = max(1, min(4, int(budget.get("ffmpeg_threads") or 2)))
+        eff_bgm = (eff_music != "OFF") and bool(ov_cfg.get("bgm_enabled", True))
+        eff_sfx = (sfx_policy != "OFF") and bool(ov_cfg.get("sfx_enabled", True))
+
+        # Optional bounded-parallel low-res candidate competition (NO 3x full-res renders!)
+        cand_preview_receipts: list[dict[str, Any]] = []
+        provisional_binding: dict[str, Any] | None = None
+        selected_cand_id = str(owner_override_candidate_id or "cand_A")
+        cand_variants: list[dict[str, Any]] = list(ov_cfg.get("candidate_variants") or [])
+
+        if compete_candidates and eff_profile in ("standard", "high"):
+            # Build reusable low-res proxy ONLY for candidate previews (NEVER upscaled as final!)
+            proxy_reg = build_source_registry(
+                {
+                    "source_id": "primary_aroll",
+                    "path": inp["video_path"],
+                    "proxy_path": build_lowres_proxy_cached(
+                        Path(inp["video_path"]), width=prev_w, height=prev_h,
+                        fps_num=fps_n, fps_den=fps_d, cache=ind_cache, ffmpeg_threads=ff_thr,
+                    )["proxy_path"],
+                    "role": "primary_aroll",
+                    "audio_policy": "MASTER_VOICE",
+                },
+                [
+                    {
+                        **se,
+                        "proxy_path": build_lowres_proxy_cached(
+                            Path(se["path"]), width=prev_w, height=prev_h,
+                            fps_num=fps_n, fps_den=fps_d, cache=ind_cache, ffmpeg_threads=ff_thr,
+                        )["proxy_path"],
+                    }
+                    for se in sec_entries
+                ],
+                cache=ind_cache,
+            )
+            if not cand_variants:
+                cand_variants = [
+                    {"candidate_id": "cand_A", "label": "A", "strategy": "KOL_LED_EDITORIAL", "overlays": ov_cfg.get("semantic_overlays"), "camera_events": ov_cfg.get("camera_events"), "visual_tracks": ov_cfg.get("visual_tracks")},
+                    {"candidate_id": "cand_B", "label": "B", "strategy": "GRAPHIC_EVIDENCE_LED", "overlays": ov_cfg.get("semantic_overlays"), "camera_events": ov_cfg.get("camera_events"), "visual_tracks": ov_cfg.get("visual_tracks")},
+                    {"candidate_id": "cand_C", "label": "C", "strategy": "CONTRAST_INTERACTION_LED", "overlays": ov_cfg.get("semantic_overlays"), "camera_events": ov_cfg.get("camera_events"), "visual_tracks": ov_cfg.get("visual_tracks")},
+                ][: max(1, min(3, int(max_candidates)))]
+
+            def _render_one_cand(cv: dict[str, Any]) -> dict[str, Any]:
+                cid = str(cv["candidate_id"])
+                lbl = str(cv.get("label") or cid[-1])
+                cdir = rdir / "candidates" / lbl
+                cdir.mkdir(parents=True, exist_ok=True)
+                cspec = compile_semantic_timeline(
+                    job_id=f"{run_id}_{cid}",
+                    source_registry=proxy_reg,
+                    voice_edl=voice_edl_doc,
+                    creative_plan=creative_plan,
+                    layout_plan=layout_plan,
+                    motion_graph=motion_graph,
+                    sound_director_plan=snd_res["sound_plan"],
+                    evidence_ledger=evidence_ledger,
+                    subject_action_tracks=sat_ind,
+                    selection_receipt=sel_val["receipt"],
+                    candidate_binding={"provisional_candidate_id": cid, "strategy": cv.get("strategy")},
+                    visual_tracks=cv.get("visual_tracks"),
+                    camera_events=cv.get("camera_events"),
+                    semantic_overlays=cv.get("overlays"),
+                    sfx_cues=cv.get("sfx_cues", ov_cfg.get("sfx_cues")),
+                    continuity_seams=cv.get("continuity_seams", ov_cfg.get("continuity_seams")),
+                    occupancy_windows=cv.get("occupancy_windows", ov_cfg.get("occupancy_windows")),
+                    art_tokens=cv.get("art_tokens", ov_cfg.get("art_tokens")),
+                    width=prev_w,
+                    height=prev_h,
+                    fps_num=fps_n,
+                    fps_den=fps_d,
+                    bgm_enabled=eff_bgm,
+                    bgm_style=str(cv.get("bgm_style") or ov_cfg.get("bgm_style") or "warm_calm"),
+                    bgm_gain_db=float(ov_cfg.get("bgm_gain_db", -24.5)),
+                    sfx_enabled=eff_sfx,
+                    sfx_gain_db=float(ov_cfg.get("sfx_gain_db", -16.5)),
+                    x264_preset="veryfast",
+                    crf=22,
+                    use_proxy_sources=True,
+                    production_profile=eff_profile,
+                    pass_through_allowed=bool(ov_cfg.get("pass_through_allowed", False)),
+                )
+                write_json_atomic(cdir / "spec.json", cspec)
+                cmp4 = cdir / f"preview_{cid}_{prev_w}x{prev_h}.mp4"
+                cres = render_independent_video(
+                    cspec, out_mp4=cmp4, stems_dir=cdir / "stems",
+                    cache=ind_cache, ffmpeg_threads=max(1, ff_thr // 2),
+                )
+                rec_c = {
+                    "candidate_id": cid,
+                    "label": lbl,
+                    "strategy": str(cv.get("strategy") or cid),
+                    "spec_sha256": cspec["spec_sha256"],
+                    "preview_mp4_path": cres["final_mp4_path"],
+                    "preview_mp4_sha256": cres["final_mp4_sha256"],
+                    "duration_sec": cres["duration_sec"],
+                    "nb_frames": cres["nb_frames"],
+                    "preview_qa_pass": bool(cres["decode_qa_pass"]),
+                    "elapsed_sec": cres["elapsed_sec"],
+                }
+                write_json_atomic(cdir / "PREVIEW_RECEIPT.json", rec_c)
+                return rec_c
+
+            cand_pool_w = max(1, min(2, int(eff_workers)))
+            with ThreadPoolExecutor(max_workers=cand_pool_w) as cpool:
+                cand_preview_receipts = list(cpool.map(_render_one_cand, cand_variants))
+            cand_preview_receipts.sort(key=lambda r: r["candidate_id"])
+            passing_cands = [r for r in cand_preview_receipts if r["preview_qa_pass"]]
+            if not passing_cands:
+                transition_state(rdir, STATE_BLOCKED, reason="ALL_INDEPENDENT_CANDIDATES_FAILED_QA", run_id=run_id)
+                return {"exit_code": 1, "status": "CANDIDATE_TECHNICAL_QA_FAIL", "run_id": run_id, "preview_receipts": cand_preview_receipts}
+            if owner_override_candidate_id and any(r["candidate_id"] == owner_override_candidate_id for r in passing_cands):
+                selected_cand_id = str(owner_override_candidate_id)
+                bind_mode = "OWNER_OVERRIDE_SELECTED"
+            else:
+                selected_cand_id = str(passing_cands[0]["candidate_id"])
+                bind_mode = "PROVISIONAL_TECHNICAL_DEFAULT_NOT_EDITORIALLY_APPROVED"
+            sel_preview = next(r for r in passing_cands if r["candidate_id"] == selected_cand_id)
+            provisional_binding = {
+                "schema_version": "kh03.provisional_binding.v1",
+                "run_id": run_id,
+                "provisional_candidate_id": selected_cand_id,
+                "winning_candidate_id": selected_cand_id,
+                "binding_mode": bind_mode,
+                "editorially_approved": False,
+                "preview_spec_sha256": sel_preview["spec_sha256"],
+                "preview_mp4_sha256": sel_preview["preview_mp4_sha256"],
+                "selection_receipt_sha256": sel_sha,
+                "candidates_evaluated": cand_preview_receipts,
+            }
+            provisional_binding["winner_binding_sha256"] = hash_artifact(provisional_binding)
+            write_json_atomic(rdir / "manifests" / "PROVISIONAL_BINDING.json", provisional_binding)
+
+        chosen_cv = next((c for c in cand_variants if c.get("candidate_id") == selected_cand_id), {}) if cand_variants else {}
+        # Compile canonical FULL-RES `INDEPENDENT_RENDER_SPEC_V2` from ORIGINAL source (NEVER proxy!)
+        ind_spec = compile_semantic_timeline(
+            job_id=f"{run_id}_{selected_cand_id}",
+            source_registry=src_reg,
+            voice_edl=voice_edl_doc,
             creative_plan=creative_plan,
+            layout_plan=layout_plan,
+            motion_graph=motion_graph,
+            sound_director_plan=snd_res["sound_plan"],
+            evidence_ledger=evidence_ledger,
+            subject_action_tracks=sat_ind,
+            selection_receipt=sel_val["receipt"],
+            candidate_binding=provisional_binding or {"provisional_candidate_id": selected_cand_id},
+            visual_tracks=chosen_cv.get("visual_tracks", ov_cfg.get("visual_tracks")),
+            camera_events=chosen_cv.get("camera_events", ov_cfg.get("camera_events")),
+            semantic_overlays=chosen_cv.get("overlays", ov_cfg.get("semantic_overlays")),
+            sfx_cues=chosen_cv.get("sfx_cues", ov_cfg.get("sfx_cues")),
+            continuity_seams=chosen_cv.get("continuity_seams", ov_cfg.get("continuity_seams")),
+            occupancy_windows=chosen_cv.get("occupancy_windows", ov_cfg.get("occupancy_windows")),
+            art_tokens=chosen_cv.get("art_tokens", ov_cfg.get("art_tokens")),
             width=out_w,
             height=out_h,
-            fps_num=int(inp["media"]["fps_num"]),
-            fps_den=int(inp["media"]["fps_den"]),
-            bgm_enabled=(eff_music != "OFF"),
+            fps_num=fps_n,
+            fps_den=fps_d,
+            bgm_enabled=eff_bgm,
+            bgm_style=str(chosen_cv.get("bgm_style") or ov_cfg.get("bgm_style") or "warm_calm"),
+            bgm_gain_db=float(ov_cfg.get("bgm_gain_db", -24.5)),
+            sfx_enabled=eff_sfx,
+            sfx_gain_db=float(ov_cfg.get("sfx_gain_db", -16.5)),
+            x264_preset="veryfast" if eff_profile == "quick" else ("slow" if eff_profile == "high" else "medium"),
+            crf=21 if eff_profile == "quick" else (16 if eff_profile == "high" else 18),
+            use_proxy_sources=False,
+            production_profile=eff_profile,
+            pass_through_allowed=bool(ov_cfg.get("pass_through_allowed", False)),
         )
+        write_json_atomic(rdir / "manifests" / "INDEPENDENT_RENDER_SPEC_V2.json", ind_spec)
         write_json_atomic(rdir / "manifests" / "INDEPENDENT_RENDER_SPEC.json", ind_spec)
-        out_mp4_ind = rdir / "exports" / f"{run_id}_{skill_id.lower()}_independent_{mode}.mp4"
-        ind_res = render_independent_video(ind_spec, out_mp4=out_mp4_ind, stems_dir=rdir / "stems")
+
+        out_name = str(ov_cfg.get("output_filename") or f"{run_id}_{skill_id.lower()}_independent_{mode}.mp4")
+        out_mp4_ind = rdir / "exports" / out_name
+        ind_res = render_independent_video(
+            ind_spec, out_mp4=out_mp4_ind, stems_dir=rdir / "stems",
+            cache=ind_cache, ffmpeg_threads=ff_thr,
+        )
+        write_json_atomic(rdir / "manifests" / "RENDER_PROOF.json", ind_res)
+        write_json_atomic(rdir / "manifests" / "CACHE_MANIFEST.json", ind_cache.manifest())
+
+        # Mandatory fail-closed independent production QA (NOT decode-only!)
+        qa_mode = "INDEPENDENT_PREVIEW" if (mode == "preview" or eff_profile == "quick") else "INDEPENDENT_FULL"
+        ind_qa = run_independent_render_qa(
+            run_id=run_id,
+            run_dir=rdir,
+            final_mp4=out_mp4_ind,
+            render_spec=ind_spec,
+            reference_script=ov_cfg.get("reference_script") or inp.get("normalized_script"),
+            mode=qa_mode,
+            license_status=str(routing_decision.get("status") or "AUTHORIZED_INDEPENDENT_CLEAN_ROOM"),
+            cache=ind_cache,
+            run_post_asr=bool(ov_cfg.get("run_post_asr", False)),
+            asr_runner=ov_cfg.get("asr_runner"),
+            ffmpeg_threads=ff_thr,
+        )
+        write_json_atomic(rdir / "manifests" / "CACHE_MANIFEST.json", ind_cache.manifest())
+
+        rec4_doc = {
+            "schema_version": "kh03.stage_receipt.v1",
+            "stage": "KH03_04_execute_and_qa",
+            "run_id": run_id,
+            "engine_kind": RENDERER_INDEPENDENT_CLEAN_ROOM,
+            "production_profile": eff_profile,
+            "selected_skill_id": skill_id,
+            "selection_receipt_sha256": sel_sha,
+            "creative_plan_sha256": creative_plan["plan_sha256"],
+            "spec_sha256": ind_spec["spec_sha256"],
+            "output_hashes": {
+                "final_mp4_sha256": ind_res["final_mp4_sha256"],
+                "spec_sha256": ind_spec["spec_sha256"],
+            },
+            "evidence_paths": [
+                ind_res["final_mp4_path"],
+                str(rdir / "manifests" / "INDEPENDENT_RENDER_SPEC_V2.json"),
+                str(rdir / "qc" / "FINAL_GATE_MATRIX.json"),
+            ],
+            "technical_pass": bool(ind_qa["technical_pass"]),
+            "rss_tree": get_process_tree_rss_mib(),
+            "elapsed_sec": round(_time.monotonic() - t0_ind, 3),
+        }
+        write_json_atomic(rdir / "STAGE_RECEIPTS" / "KH03_04_execute_and_qa.json", rec4_doc)
+
         lifecycle = resolve_editorial_lifecycle(
-            rendered_candidates=[{
-                "candidate_id": winning_candidate_id or "cand_A",
+            rendered_candidates=cand_preview_receipts or [{
+                "candidate_id": selected_cand_id,
                 "preview_mp4_path": ind_res["final_mp4_path"],
                 "preview_mp4_sha256": ind_res["final_mp4_sha256"],
-                "preview_qa_pass": bool(ind_res["decode_qa_pass"]),
+                "preview_qa_pass": bool(ind_qa["technical_pass"]),
             }],
             pairwise_status="PENDING_REVIEW_MISSING_JUDGE",
             owner_override_candidate_id=owner_override_candidate_id,
             live_judge_available=False,
         )
-        write_json_atomic(rdir / "manifests" / "MANUAL_EDITORIAL_REVIEW.json", {
-            "schema_version": "kh03.manual_editorial_review.v1",
+        write_json_atomic(rdir / "qc" / "MANUAL_EDITORIAL_REVIEW.json", {
+            "schema_version": "kh03.manual_editorial_review.v2",
             "run_id": run_id,
             "engine_kind": RENDERER_INDEPENDENT_CLEAN_ROOM,
+            "production_profile": eff_profile,
             "native_seecut_status": routing_decision["per_renderer_rights"][RENDERER_NATIVE_SEECUT]["status"],
             "lifecycle": lifecycle,
+            "provisional_binding": provisional_binding,
+            "candidates": cand_preview_receipts,
             "final_mp4_path": ind_res["final_mp4_path"],
             "final_mp4_sha256": ind_res["final_mp4_sha256"],
+            "technical_pass": bool(ind_qa["technical_pass"]),
         })
+        write_json_atomic(rdir / "manifests" / "MANUAL_EDITORIAL_REVIEW.json", parse_json_strict(rdir / "qc" / "MANUAL_EDITORIAL_REVIEW.json"))
         (rdir / "FINAL_RENDER_SHA256.txt").write_text(f"{ind_res['final_mp4_sha256']}  {out_mp4_ind.name}\n", encoding="utf-8")
-        transition_state(rdir, STATE_COMPILED, reason="Clean-room independent render spec compiled.", run_id=run_id)
+
+        transition_state(rdir, STATE_COMPILED, reason="Canonical INDEPENDENT_RENDER_SPEC_V2 compiled.", run_id=run_id)
         transition_state(rdir, STATE_RENDERED, reason=f"Rendered via INDEPENDENT_FFMPEG_PIL ({ind_res['final_mp4_sha256'][:12]}).", run_id=run_id)
-        transition_state(rdir, STATE_QA, reason="Decoded frame & audio QA verified on clean-room independent MP4.", run_id=run_id)
-        transition_state(rdir, STATE_CANDIDATE, reason="Candidate rendered cleanly; OWNER_VISUAL/AUDIO approval PENDING.", run_id=run_id)
+        transition_state(rdir, STATE_QA, reason=f"Independent QA technical_pass={ind_qa['technical_pass']}.", run_id=run_id)
+        if not ind_qa["technical_pass"]:
+            transition_state(rdir, STATE_BLOCKED, reason=f"Independent technical QA FAILED: {ind_qa['gate_matrix'].get('failing_gates')}", run_id=run_id)
+            return {
+                "exit_code": 1,
+                "status": "INDEPENDENT_TECHNICAL_QA_FAILED",
+                "mode": mode,
+                "run_id": run_id,
+                "selected_skill_id": skill_id,
+                "engine_kind": RENDERER_INDEPENDENT_CLEAN_ROOM,
+                "final_mp4_path": ind_res["final_mp4_path"],
+                "final_mp4_sha256": ind_res["final_mp4_sha256"],
+                "independent_qa": ind_qa,
+                "owner_visual": "PENDING",
+                "owner_audio": "PENDING",
+                "final_approved": False,
+            }
+
+        transition_state(rdir, STATE_CANDIDATE, reason="Candidate rendered & passed independent technical QA; OWNER_VISUAL/AUDIO PENDING.", run_id=run_id)
         return {
             "exit_code": 0,
             "status": "INDEPENDENT_CLEAN_ROOM_CANDIDATE_RENDERED",
             "mode": mode,
+            "production_profile": eff_profile,
             "run_id": run_id,
             "selected_skill_id": skill_id,
             "selection_receipt_sha256": sel_sha,
             "creative_plan_sha256": creative_plan["plan_sha256"],
+            "spec_sha256": ind_spec["spec_sha256"],
             "engine_kind": RENDERER_INDEPENDENT_CLEAN_ROOM,
             "renderer_routing": routing_decision,
+            "provisional_binding": provisional_binding,
+            "candidates": cand_preview_receipts,
             "lifecycle": lifecycle,
             "final_mp4_path": ind_res["final_mp4_path"],
             "final_mp4_sha256": ind_res["final_mp4_sha256"],
             "independent_render": ind_res,
+            "independent_qa": ind_qa,
             "owner_visual": "PENDING",
             "owner_audio": "PENDING",
             "final_approved": False,
@@ -1293,18 +1576,40 @@ def run_verify(
         issues.append(str(ex))
         sel = None
 
-    required_files = [
-        rdir / "analysis" / "INPUT_ANALYSIS.json",
-        rdir / "selection" / "SKILL_RECOMMENDATION.json",
-        rdir / "selection" / "SELECTION_RECEIPT.json",
-        rdir / "manifests" / "CREATIVE_PLAN.json",
-        rdir / "SHOTBOOK_V2.json",
-        rdir / "qc" / "KH03_QA_REPORT.json",
-        rdir / "STAGE_RECEIPTS" / "F_canonical_shotbook.json",
-    ]
+    ind_spec_p = rdir / "manifests" / "INDEPENDENT_RENDER_SPEC_V2.json"
+    is_independent_run = ind_spec_p.is_file() and not (rdir / "SHOTBOOK_V2.json").is_file()
+
+    if is_independent_run:
+        required_files = [
+            rdir / "analysis" / "INPUT_ANALYSIS.json",
+            rdir / "selection" / "SKILL_RECOMMENDATION.json",
+            rdir / "selection" / "SELECTION_RECEIPT.json",
+            rdir / "manifests" / "CREATIVE_PLAN.json",
+            ind_spec_p,
+        ]
+    else:
+        required_files = [
+            rdir / "analysis" / "INPUT_ANALYSIS.json",
+            rdir / "selection" / "SKILL_RECOMMENDATION.json",
+            rdir / "selection" / "SELECTION_RECEIPT.json",
+            rdir / "manifests" / "CREATIVE_PLAN.json",
+            rdir / "SHOTBOOK_V2.json",
+            rdir / "qc" / "KH03_QA_REPORT.json",
+            rdir / "STAGE_RECEIPTS" / "F_canonical_shotbook.json",
+        ]
     for rf in required_files:
         if not rf.is_file():
             issues.append(f"MISSING_REQUIRED_ARTIFACT: {rf.name}")
+
+    if is_independent_run and ind_spec_p.is_file():
+        from .semantic_timeline import validate_render_spec
+        ind_doc = parse_json_strict(ind_spec_p)
+        ind_body = {k: v for k, v in ind_doc.items() if k != "spec_sha256"}
+        if ind_doc.get("spec_sha256") and hash_artifact(ind_body) != ind_doc["spec_sha256"]:
+            issues.append("TAMPERED_INDEPENDENT_RENDER_SPEC_V2: spec_sha256 does not match body.")
+        iv = validate_render_spec(ind_doc)
+        if not iv["pass"]:
+            issues.append(f"INVALID_INDEPENDENT_RENDER_SPEC_V2: {iv['issues']}")
 
     cp = rdir / "manifests" / "CREATIVE_PLAN.json"
     sb = rdir / "SHOTBOOK_V2.json"
@@ -1404,16 +1709,27 @@ def run_verify(
                 raw_gates = dict(fgm_doc.get("gates") or {})
                 prof = resolve_gate_profile(fgm_doc.get("mode") or eff_vmode)
                 # Cross-check key raw evidence files on disk against stored gate status & MP4 SHA!
-                evidence_file_checks = [
-                    ("G_HOOK_PIXELS", rdir / "qc" / "HOOK_PIXEL_QA.json"),
-                    ("G_COMPONENT_ROI_MOTION", rdir / "qc" / "COMPONENT_PIXEL_QA.json"),
-                    ("G_COMPONENT_COVERAGE", rdir / "qc" / "COMPONENT_COVERAGE.json"),
-                    ("G_FRAME_AUDIT", rdir / "qc" / "FRAME_AUDIT.json"),
-                    ("G_FRAME_COVERAGE", rdir / "qc" / "FRAME_COVERAGE.json"),
-                    ("G_AUDIO_SYNC", rdir / "qc" / "MOTION_SOUND_SYNC.json"),
-                    ("G_EXPORT_QA", rdir / "qc" / "EXPORT_QA.json"),
-                    ("G_ACTION_PROTECTION", rdir / "qc" / "ACTION_PROTECTION.json"),
-                ]
+                is_ind_mat = str(fgm_doc.get("engine_kind") or "").upper() == RENDERER_INDEPENDENT_CLEAN_ROOM or str(prof["mode"]).startswith("INDEPENDENT_")
+                if is_ind_mat:
+                    evidence_file_checks = [
+                        ("G_FRAME_AUDIT", rdir / "qc" / "FRAME_AUDIT.json"),
+                        ("G_FRAME_COVERAGE", rdir / "qc" / "FRAME_COVERAGE.json"),
+                        ("G_COMPONENT_COVERAGE", rdir / "qc" / "COMPONENT_COVERAGE.json"),
+                        ("G_SPATIAL_ALIGNMENT", rdir / "qc" / "SPATIAL_QA.json"),
+                        ("G_CONTINUITY", rdir / "qc" / "CONTINUITY_QA.json"),
+                        ("G_AUDIO_SYNC", rdir / "qc" / "AUDIO_QA.json"),
+                    ]
+                else:
+                    evidence_file_checks = [
+                        ("G_HOOK_PIXELS", rdir / "qc" / "HOOK_PIXEL_QA.json"),
+                        ("G_COMPONENT_ROI_MOTION", rdir / "qc" / "COMPONENT_PIXEL_QA.json"),
+                        ("G_COMPONENT_COVERAGE", rdir / "qc" / "COMPONENT_COVERAGE.json"),
+                        ("G_FRAME_AUDIT", rdir / "qc" / "FRAME_AUDIT.json"),
+                        ("G_FRAME_COVERAGE", rdir / "qc" / "FRAME_COVERAGE.json"),
+                        ("G_AUDIO_SYNC", rdir / "qc" / "MOTION_SOUND_SYNC.json"),
+                        ("G_EXPORT_QA", rdir / "qc" / "EXPORT_QA.json"),
+                        ("G_ACTION_PROTECTION", rdir / "qc" / "ACTION_PROTECTION.json"),
+                    ]
                 for gid_k, ef_p in evidence_file_checks:
                     if gid_k in raw_gates and raw_gates[gid_k].get("status") == "PASS":
                         if ef_p.is_file():
@@ -1541,6 +1857,9 @@ def main(argv: list[str] | None = None) -> int:
     p_exe.add_argument("--compare-baseline", action="append", type=Path, default=None)
     p_exe.add_argument("--export-layers", action="store_true", default=False)
     p_exe.add_argument("--renderer", choices=list(VALID_RENDERER_MODES), default="native_seecut")
+    p_exe.add_argument("--production-profile", choices=["quick", "standard", "high"], default="standard")
+    p_exe.add_argument("--cache-dir", type=Path, default=None)
+    p_exe.add_argument("--job-brief", type=Path, default=None, help="Optional JSON job brief with semantic overlays/camera/art tokens")
     p_exe.add_argument("--seecut-root", type=Path, default=None)
     p_exe.add_argument("--tools-root", type=Path, default=None)
 
@@ -1652,6 +1971,9 @@ def main(argv: list[str] | None = None) -> int:
             compare_baselines=args.compare_baseline,
             export_layers=args.export_layers,
             renderer=args.renderer,
+            production_profile=args.production_profile,
+            cache_dir=args.cache_dir,
+            independent_spec_overrides=(parse_json_strict(args.job_brief) if args.job_brief else None),
             seecut_root=args.seecut_root,
             tools_root=args.tools_root,
         )
