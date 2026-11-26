@@ -559,3 +559,68 @@ def verify_post_render_asr(
     if out_path is not None:
         write_json_atomic(out_path, rep)
     return rep
+
+
+def refine_cut_boundaries_waveform(
+    media_path: str | Path,
+    cuts: list[dict[str, Any]],
+    *,
+    sample_rate: int = 48000,
+    window_ms: int = 12,
+    search_ms: int = 160,
+    step_ms: int = 5,
+) -> list[dict[str, Any]]:
+    """Refine ASR cut boundaries by scanning local waveform energy for deepest quiet phoneme valleys.
+
+    100% generic across all languages/niches: prevents mid-syllable clips and audible splice clicks!
+    """
+    import subprocess
+    import numpy as np
+
+    mp = Path(media_path).resolve()
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-i", str(mp), "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "f32le", "pipe:1"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=60,
+    )
+    wav = np.frombuffer(proc.stdout, dtype=np.float32)
+    dur_sec = len(wav) / float(sample_rate)
+    win_n = max(64, int(round(window_ms * 0.001 * sample_rate)))
+    step_sec = max(0.002, step_ms * 0.001)
+    search_sec = max(0.02, search_ms * 0.001)
+
+    def _find_valley(center_sec: float, lo_sec: float, hi_sec: float) -> tuple[float, float]:
+        best_t = max(lo_sec, min(hi_sec, center_sec))
+        best_db = 0.0
+        t = max(0.0, lo_sec)
+        end_t = min(max(0.0, dur_sec - window_ms * 0.001), hi_sec)
+        while t <= end_t + 1e-6:
+            i0 = int(round(t * sample_rate))
+            seg = wav[i0 : i0 + win_n]
+            if seg.size > 0:
+                rms = float(np.sqrt(np.mean(seg ** 2) + 1e-12))
+                db = float(20.0 * np.log10(rms + 1e-9))
+                if db < best_db:
+                    best_db = db
+                    best_t = round(t, 4)
+            t += step_sec
+        return best_t, round(best_db, 2)
+
+    refined: list[dict[str, Any]] = []
+    for c in cuts:
+        raw_s = float(c["start_sec"])
+        raw_e = float(c["end_sec"])
+        mid = (raw_s + raw_e) * 0.5
+        ref_s, db_s = _find_valley(raw_s, max(0.0, raw_s - search_sec * 0.5), min(mid - 0.02, raw_s + search_sec))
+        ref_e, db_e = _find_valley(raw_e, max(mid + 0.02, raw_e - search_sec * 0.5), min(dur_sec, raw_e + search_sec))
+        if ref_e <= ref_s + 0.04:
+            ref_s, ref_e = raw_s, raw_e
+        refined.append({
+            **c,
+            "raw_start_sec": round(raw_s, 4),
+            "raw_end_sec": round(raw_e, 4),
+            "start_sec": round(ref_s, 4),
+            "end_sec": round(ref_e, 4),
+            "start_valley_db": db_s,
+            "end_valley_db": db_e,
+        })
+    return refined

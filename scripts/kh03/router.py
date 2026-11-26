@@ -59,6 +59,13 @@ from .intelligence import analyze_inputs, build_editorial_context, build_semanti
 from .layout import VALID_LAYOUT_POLICIES, resolve_layout_policy
 from .qa import aggregate_gate_results, evaluate_kh03_editorial, orchestrate_final_render_qa, resolve_gate_profile
 from .recommend import get_skill_contract, issue_recommendation, recommend_skills
+from .renderer_routing import (
+    RENDERER_INDEPENDENT_CLEAN_ROOM,
+    RENDERER_NATIVE_SEECUT,
+    VALID_RENDERER_MODES,
+    resolve_editorial_lifecycle,
+    select_renderer_backend,
+)
 from .research import emit_research_summary
 from .selection import SelectionGateError, record_user_selection, validate_user_selection
 from .sound_director import plan_soundscape_for_skill
@@ -74,6 +81,7 @@ def run_preflight(
     compete_candidates: bool = False,
     online_opt_in: bool = False,
     export_layers: bool = False,
+    renderer: str = "auto",
     seecut_root: Path | None = None,
     tools_root: Path | None = None,
 ) -> dict[str, Any]:
@@ -171,10 +179,19 @@ def run_preflight(
     native_full_ready = bool(native_preview_ready and (has_layers or not export_layers))
     release_ready = False  # Always False at preflight: requires post-render QA + explicit OWNER_VISUAL & OWNER_AUDIO approval on final SHA!
 
+    routing = select_renderer_backend(
+        requested=renderer,
+        intended_purpose=intended_purpose,
+        commercial_permission_evidence=commercial_permission_evidence,
+        seecut_root=up_root,
+        tools_root=troot,
+    )
+    indep_ready = bool(plan_ready and routing["per_renderer_rights"][RENDERER_INDEPENDENT_CLEAN_ROOM]["authorized_for_purpose"])
+
     mode_ready_map = {
         "plan": plan_ready,
-        "preview": native_preview_ready,
-        "full": native_full_ready,
+        "preview": native_preview_ready if renderer == "native_seecut" else (indep_ready if renderer == "independent_clean_room" else (native_preview_ready or (indep_ready and is_comm and False))),
+        "full": native_full_ready if renderer == "native_seecut" else (indep_ready if renderer == "independent_clean_room" else native_full_ready),
         "release": release_ready,
     }
     requested_ready = mode_ready_map[req_mode]
@@ -192,6 +209,14 @@ def run_preflight(
         "commercial_license_ok": license_ok,
         "commercial_release_default": "BLOCKED",
         "requested_mode": req_mode,
+        "requested_renderer": renderer,
+        "selected_renderer": routing.get("selected_renderer"),
+        "renderer_routing": {
+            "status": routing["status"],
+            "selected_renderer": routing["selected_renderer"],
+            "per_renderer_rights": routing["per_renderer_rights"],
+            "fake_permission_receipt_created": False,
+        },
         "os": platform.platform(),
         "python": sys.version.split()[0],
         "cpu_count": os.cpu_count() or 1,
@@ -201,6 +226,7 @@ def run_preflight(
             "PLAN_READY": plan_ready,
             "NATIVE_PREVIEW_READY": native_preview_ready,
             "NATIVE_FULL_RENDER_READY": native_full_ready,
+            "INDEPENDENT_CLEAN_ROOM_READY": indep_ready,
             "RELEASE_READY": release_ready,
         },
         "tools": {
@@ -426,6 +452,7 @@ def run_execute(
     export_layers: bool = False,
     production_mode: bool = True,
     allow_test_only_sfx: bool = False,
+    renderer: str = "native_seecut",
     seecut_root: Path | None = None,
     tools_root: Path | None = None,
 ) -> dict[str, Any]:
@@ -471,56 +498,71 @@ def run_execute(
     eff_lic = str(license_decision or saved_lic).strip().upper()
     perm_check = verify_commercial_permission_evidence(eff_evid)
 
-    # 2. P0 Fail-Closed PROBLEM-01 License Gate (rejects invalid status, commercial override bypass, or unsubstantiated permission!)
-    if eff_lic not in _VALID_LICENSE_DECISIONS or eff_purpose not in _VALID_PURPOSES:
-        transition_state(rdir, STATE_BLOCKED, reason=f"Invalid license/purpose: {eff_lic!r}/{eff_purpose!r}", run_id=run_id)
-        return {
-            "exit_code": 2,
-            "status": "BLOCKED_LICENSE_UNRESOLVED",
-            "run_id": run_id,
-            "selected_skill_id": skill_id,
-            "reason": f"Fail-closed: invalid license_decision={eff_lic!r} or intended_purpose={eff_purpose!r}.",
-        }
-    # Block attempting to downgrade a previously blocked commercial recommendation into NONCOMMERCIAL!
-    if saved_lic in ("BLOCKED_COMMERCIAL_LICENSE", "BLOCKED_LICENSE_UNRESOLVED") and eff_lic == "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED":
-        transition_state(rdir, STATE_BLOCKED, reason="Blocked override from BLOCKED_COMMERCIAL_LICENSE to NONCOMMERCIAL.", run_id=run_id)
-        return {
-            "exit_code": 2,
-            "status": "BLOCKED_COMMERCIAL_LICENSE",
-            "run_id": run_id,
-            "selected_skill_id": skill_id,
-            "reason": "Cannot override a BLOCKED_COMMERCIAL_LICENSE recommendation with NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED.",
-        }
-    if eff_purpose == "COMMERCIAL_MARKETING" and (eff_lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" or not perm_check["verified"]):
-        transition_state(rdir, STATE_BLOCKED, reason=f"COMMERCIAL_MARKETING lacks verified receipt: {perm_check['reason']}", run_id=run_id)
-        return {
-            "exit_code": 2,
-            "status": "BLOCKED_COMMERCIAL_LICENSE",
-            "run_id": run_id,
-            "selected_skill_id": skill_id,
-            "reason": f"COMMERCIAL_MARKETING requires WRITTEN_COMMERCIAL_PERMISSION_VERIFIED with verified structured receipt: {perm_check['reason']}",
-        }
-    if eff_lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" and not perm_check["verified"]:
-        transition_state(rdir, STATE_BLOCKED, reason=f"Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED: {perm_check['reason']}", run_id=run_id)
-        return {
-            "exit_code": 2,
-            "status": "BLOCKED_COMMERCIAL_LICENSE",
-            "run_id": run_id,
-            "selected_skill_id": skill_id,
-            "reason": f"Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED rejected: {perm_check['reason']}",
-        }
-    if eff_lic in ("BLOCKED_COMMERCIAL_LICENSE", "BLOCKED_LICENSE_UNRESOLVED"):
-        transition_state(rdir, STATE_BLOCKED, reason=f"PROBLEM-01 license gate: {eff_lic}", run_id=run_id)
-        return {
-            "exit_code": 2,
-            "status": eff_lic,
-            "run_id": run_id,
-            "selected_skill_id": skill_id,
-            "reason": (
-                f"PROBLEM-01 fail-closed block ({eff_lic}): YeJe-cpu/SeeCut is PolyForm Noncommercial 1.0.0. "
-                "Written commercial permission from aiesecxuanli@gmail.com is required before commercial execution."
-            ),
-        }
+    # 2. Per-Renderer License Routing (R4.2.HOTFIX): separates NATIVE_SEECUT (PolyForm Noncommercial 1.0.0)
+    # from audited clean-room INDEPENDENT_FFMPEG_PIL without weakening PROBLEM-01 on Native SeeCut!
+    routing_decision = select_renderer_backend(
+        requested=renderer,
+        intended_purpose=eff_purpose,
+        commercial_permission_evidence=eff_evid,
+        seecut_root=seecut_root,
+        tools_root=tools_root,
+        out_dir=(None if dry_run else rdir / "manifests"),
+    )
+    use_independent_clean_room = (routing_decision.get("selected_renderer") == RENDERER_INDEPENDENT_CLEAN_ROOM and routing_decision.get("allowed") is True)
+
+    if not use_independent_clean_room:
+        # P0 Fail-Closed PROBLEM-01 License Gate for NATIVE_SEECUT (rejects invalid status, commercial override bypass, or unsubstantiated permission!)
+        if eff_lic not in _VALID_LICENSE_DECISIONS or eff_purpose not in _VALID_PURPOSES:
+            transition_state(rdir, STATE_BLOCKED, reason=f"Invalid license/purpose: {eff_lic!r}/{eff_purpose!r}", run_id=run_id)
+            return {
+                "exit_code": 2,
+                "status": "BLOCKED_LICENSE_UNRESOLVED",
+                "run_id": run_id,
+                "selected_skill_id": skill_id,
+                "reason": f"Fail-closed: invalid license_decision={eff_lic!r} or intended_purpose={eff_purpose!r}.",
+            }
+        # Block attempting to downgrade a previously blocked commercial recommendation into NONCOMMERCIAL!
+        if saved_lic in ("BLOCKED_COMMERCIAL_LICENSE", "BLOCKED_LICENSE_UNRESOLVED") and eff_lic == "NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED":
+            transition_state(rdir, STATE_BLOCKED, reason="Blocked override from BLOCKED_COMMERCIAL_LICENSE to NONCOMMERCIAL.", run_id=run_id)
+            return {
+                "exit_code": 2,
+                "status": "BLOCKED_COMMERCIAL_LICENSE",
+                "run_id": run_id,
+                "selected_skill_id": skill_id,
+                "reason": "Cannot override a BLOCKED_COMMERCIAL_LICENSE recommendation with NONCOMMERCIAL_PERSONAL_EVALUATION_PERMITTED.",
+            }
+        if eff_purpose == "COMMERCIAL_MARKETING" and (eff_lic != "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" or not perm_check["verified"]):
+            transition_state(rdir, STATE_BLOCKED, reason=f"COMMERCIAL_MARKETING lacks verified receipt: {perm_check['reason']}", run_id=run_id)
+            return {
+                "exit_code": 2,
+                "status": "BLOCKED_COMMERCIAL_LICENSE",
+                "run_id": run_id,
+                "selected_skill_id": skill_id,
+                "renderer_routing": routing_decision,
+                "reason": f"COMMERCIAL_MARKETING on NATIVE_SEECUT requires WRITTEN_COMMERCIAL_PERMISSION_VERIFIED with verified structured receipt: {perm_check['reason']}",
+            }
+        if eff_lic == "WRITTEN_COMMERCIAL_PERMISSION_VERIFIED" and not perm_check["verified"]:
+            transition_state(rdir, STATE_BLOCKED, reason=f"Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED: {perm_check['reason']}", run_id=run_id)
+            return {
+                "exit_code": 2,
+                "status": "BLOCKED_COMMERCIAL_LICENSE",
+                "run_id": run_id,
+                "selected_skill_id": skill_id,
+                "reason": f"Unsubstantiated WRITTEN_COMMERCIAL_PERMISSION_VERIFIED rejected: {perm_check['reason']}",
+            }
+        if eff_lic in ("BLOCKED_COMMERCIAL_LICENSE", "BLOCKED_LICENSE_UNRESOLVED"):
+            transition_state(rdir, STATE_BLOCKED, reason=f"PROBLEM-01 license gate: {eff_lic}", run_id=run_id)
+            return {
+                "exit_code": 2,
+                "status": eff_lic,
+                "run_id": run_id,
+                "selected_skill_id": skill_id,
+                "reason": (
+                    f"PROBLEM-01 fail-closed block ({eff_lic}): YeJe-cpu/SeeCut is PolyForm Noncommercial 1.0.0. "
+                    "Written commercial permission from aiesecxuanli@gmail.com is required before commercial native execution, "
+                    "or select audited --renderer independent_clean_room."
+                ),
+            }
 
     # Check disk floor & CMI-10 bounded resource budget BEFORE materializing assets/renders
     pf = run_preflight(run_dir=rdir)
@@ -807,6 +849,22 @@ def run_execute(
         winner_binding_doc = bind_res["binding"]
         if not bind_res["bound"]:
             blk_st = str(candidate_decision.get("status") or "CANDIDATE_BLOCKED")
+            lifecycle = resolve_editorial_lifecycle(
+                rendered_candidates=preview_receipts if preview_receipts else cand_list,
+                pairwise_status=str(ranking.get("pairwise_status") or "PENDING_REVIEW_MISSING_JUDGE"),
+                winner_candidate_id=(ranking.get("winner") or {}).get("candidate_id"),
+                owner_override_candidate_id=owner_override_candidate_id,
+                live_judge_available=bool(online_opt_in and eff_pairwise_fn is not None and ranking.get("pairwise_status") != "PENDING_REVIEW_MISSING_JUDGE"),
+            )
+            write_json_atomic(rdir / "manifests" / "MANUAL_EDITORIAL_REVIEW.json", {
+                "schema_version": "kh03.manual_editorial_review.v1",
+                "run_id": run_id,
+                "mode": mode,
+                "selected_skill_id": skill_id,
+                "lifecycle": lifecycle,
+                "preview_receipts": preview_receipts,
+                "next_action": "Review rendered candidate preview MP4s directly and pass --owner-override-candidate <cand_A|cand_B|cand_C> with --owner-selection-receipt to proceed to full render.",
+            })
             transition_state(rdir, STATE_BLOCKED, reason=f"Candidate competition halted without valid winner ({blk_st}).", run_id=run_id)
             return {
                 "exit_code": 2,
@@ -815,6 +873,8 @@ def run_execute(
                 "selected_skill_id": skill_id,
                 "candidate_decision": candidate_decision,
                 "winner_binding": winner_binding_doc,
+                "lifecycle": lifecycle,
+                "preview_receipts": preview_receipts,
                 "reason": candidate_decision.get("reason") or "No valid consensus/adopted candidate; refusing silent fallback to original plan.",
             }
         # REPLACE authoritative creative_plan, layout_plan, motion_graph with adopted winner bundle BEFORE sound & KH-02 compile!
@@ -937,6 +997,70 @@ def run_execute(
         "sources": sources_list,
     }
     brief_path = write_json_atomic(rdir / "manifests" / "KH02_DERIVED_BRIEF.json", kh02_brief)
+
+    # R4.2.HOTFIX Clean-Room Independent Renderer Branch (zero SeeCut/PolyForm execution, zero fake receipt!)
+    if use_independent_clean_room and not dry_run and mode in ("preview", "full"):
+        from .independent_renderer import build_independent_render_spec_from_plan, render_independent_video
+        sec_srcs = inp.get("secondary_sources") or []
+        sec_p = Path(sec_srcs[0]["path"]) if (sec_srcs and sec_srcs[0].get("path")) else None
+        out_w = 540 if mode == "preview" else (1080 if inp["media"]["aspect_ratio"] == "9:16" else 1920)
+        out_h = 960 if mode == "preview" else (1920 if inp["media"]["aspect_ratio"] == "9:16" else 1080)
+        ind_spec = build_independent_render_spec_from_plan(
+            primary_source_path=Path(inp["video_path"]),
+            secondary_source_path=sec_p,
+            creative_plan=creative_plan,
+            width=out_w,
+            height=out_h,
+            fps_num=int(inp["media"]["fps_num"]),
+            fps_den=int(inp["media"]["fps_den"]),
+            bgm_enabled=(eff_music != "OFF"),
+        )
+        write_json_atomic(rdir / "manifests" / "INDEPENDENT_RENDER_SPEC.json", ind_spec)
+        out_mp4_ind = rdir / "exports" / f"{run_id}_{skill_id.lower()}_independent_{mode}.mp4"
+        ind_res = render_independent_video(ind_spec, out_mp4=out_mp4_ind, stems_dir=rdir / "stems")
+        lifecycle = resolve_editorial_lifecycle(
+            rendered_candidates=[{
+                "candidate_id": winning_candidate_id or "cand_A",
+                "preview_mp4_path": ind_res["final_mp4_path"],
+                "preview_mp4_sha256": ind_res["final_mp4_sha256"],
+                "preview_qa_pass": bool(ind_res["decode_qa_pass"]),
+            }],
+            pairwise_status="PENDING_REVIEW_MISSING_JUDGE",
+            owner_override_candidate_id=owner_override_candidate_id,
+            live_judge_available=False,
+        )
+        write_json_atomic(rdir / "manifests" / "MANUAL_EDITORIAL_REVIEW.json", {
+            "schema_version": "kh03.manual_editorial_review.v1",
+            "run_id": run_id,
+            "engine_kind": RENDERER_INDEPENDENT_CLEAN_ROOM,
+            "native_seecut_status": routing_decision["per_renderer_rights"][RENDERER_NATIVE_SEECUT]["status"],
+            "lifecycle": lifecycle,
+            "final_mp4_path": ind_res["final_mp4_path"],
+            "final_mp4_sha256": ind_res["final_mp4_sha256"],
+        })
+        (rdir / "FINAL_RENDER_SHA256.txt").write_text(f"{ind_res['final_mp4_sha256']}  {out_mp4_ind.name}\n", encoding="utf-8")
+        transition_state(rdir, STATE_COMPILED, reason="Clean-room independent render spec compiled.", run_id=run_id)
+        transition_state(rdir, STATE_RENDERED, reason=f"Rendered via INDEPENDENT_FFMPEG_PIL ({ind_res['final_mp4_sha256'][:12]}).", run_id=run_id)
+        transition_state(rdir, STATE_QA, reason="Decoded frame & audio QA verified on clean-room independent MP4.", run_id=run_id)
+        transition_state(rdir, STATE_CANDIDATE, reason="Candidate rendered cleanly; OWNER_VISUAL/AUDIO approval PENDING.", run_id=run_id)
+        return {
+            "exit_code": 0,
+            "status": "INDEPENDENT_CLEAN_ROOM_CANDIDATE_RENDERED",
+            "mode": mode,
+            "run_id": run_id,
+            "selected_skill_id": skill_id,
+            "selection_receipt_sha256": sel_sha,
+            "creative_plan_sha256": creative_plan["plan_sha256"],
+            "engine_kind": RENDERER_INDEPENDENT_CLEAN_ROOM,
+            "renderer_routing": routing_decision,
+            "lifecycle": lifecycle,
+            "final_mp4_path": ind_res["final_mp4_path"],
+            "final_mp4_sha256": ind_res["final_mp4_sha256"],
+            "independent_render": ind_res,
+            "owner_visual": "PENDING",
+            "owner_audio": "PENDING",
+            "final_approved": False,
+        }
 
     tr_file = rdir / "analysis" / "TRANSCRIPT_NORMALIZED.json"
     kh02_res = execute_kh02_pipeline(
@@ -1354,6 +1478,7 @@ def main(argv: list[str] | None = None) -> int:
     p_pre.add_argument("--compete-candidates", action="store_true", default=False)
     p_pre.add_argument("--online-opt-in", action="store_true", default=False)
     p_pre.add_argument("--export-layers", action="store_true", default=False)
+    p_pre.add_argument("--renderer", choices=list(VALID_RENDERER_MODES), default="auto")
     p_pre.add_argument("--seecut-root", type=Path, default=None)
     p_pre.add_argument("--tools-root", type=Path, default=None)
 
@@ -1415,6 +1540,7 @@ def main(argv: list[str] | None = None) -> int:
     p_exe.add_argument("--run-h2", action="store_true", default=False)
     p_exe.add_argument("--compare-baseline", action="append", type=Path, default=None)
     p_exe.add_argument("--export-layers", action="store_true", default=False)
+    p_exe.add_argument("--renderer", choices=list(VALID_RENDERER_MODES), default="native_seecut")
     p_exe.add_argument("--seecut-root", type=Path, default=None)
     p_exe.add_argument("--tools-root", type=Path, default=None)
 
@@ -1435,6 +1561,7 @@ def main(argv: list[str] | None = None) -> int:
             compete_candidates=args.compete_candidates,
             online_opt_in=args.online_opt_in,
             export_layers=args.export_layers,
+            renderer=args.renderer,
             seecut_root=args.seecut_root,
             tools_root=args.tools_root,
         )
@@ -1524,6 +1651,7 @@ def main(argv: list[str] | None = None) -> int:
             run_h2=args.run_h2,
             compare_baselines=args.compare_baseline,
             export_layers=args.export_layers,
+            renderer=args.renderer,
             seecut_root=args.seecut_root,
             tools_root=args.tools_root,
         )

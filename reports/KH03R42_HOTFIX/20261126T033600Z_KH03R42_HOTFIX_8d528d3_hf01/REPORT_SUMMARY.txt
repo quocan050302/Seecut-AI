@@ -1,0 +1,16 @@
+KH-03.R4.2.HOTFIX — Render Independence & Actual Video Delivery (Sanitized Summary)
+Run ID: 20261126T033600Z_KH03R42_HOTFIX_8d528d3_hf01
+Branch: feat/kh03-universal-editing-intelligence (baseline 8d528d33a03fb5a39e3d57c04ee87ed7649f1c19)
+
+DELIVERABLE_MP4: Olivia_V6_SickDay_Notion_KH03R42_HOTFIX_9x16.mp4 (stored outside git repo)
+DELIVERABLE_SHA256: d327646f6c9beedc479d58bb08a6b546d982c58b45498c4c27af8063e50fd424
+SPECS: 1080x1920 @ 24fps, 860 frames, 35.8333s, 19.92 MB
+FRAME_AUDIT: PASS (860/860 decoded, 0 black, 0 freeze, 0% kitchen, 0% overlay collision)
+AUDIO_QA: PASS (-15.1 LUFS, -2.8 dBTP, secondary audio muted, clean-room BGM + 9 SFX)
+POST_RENDER_ASR: PASS (0 unintended duplicates, 0 missing numbers, Take 2 preserved)
+ACTIVE_RENDERER: INDEPENDENT_FFMPEG_PIL (AUTHORIZED_INDEPENDENT_CLEAN_ROOM, clean_room_verified=true)
+NATIVE_SEECUT_COMMERCIAL: BLOCKED_COMMERCIAL_LICENSE (PolyForm Noncommercial 1.0.0, fake_receipt=false)
+EDITORIAL_LIFECYCLE: CANDIDATE_RENDERED | EDITORIAL_PENDING | OWNER_VISUAL=PENDING | OWNER_AUDIO=PENDING | FINAL_APPROVED=PENDING_OWNER_APPROVAL
+REGRESSION_SERIAL: 225/225 PASS (88 KH02 + 137 KH03) in 348.313s
+REGRESSION_PARALLEL_3W: 225/225 PASS in 160.109s (2.175x speedup, exact_id_parity=true, exact_status_parity=true)
+RENDER_PEAK_RSS_MIB: 300.40
