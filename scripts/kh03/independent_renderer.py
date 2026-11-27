@@ -30,6 +30,16 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from .footage_effects import (
+    apply_exposure_grade_rgb,
+    compose_multilayer_frame,
+    interpolate_keyframes,
+    render_before_after_split_rgb,
+    render_dual_moving_transition,
+    render_pullback_or_transform_frame,
+    resolve_speed_ramp_pts,
+    validate_transition_handles,
+)
 from .ingest_cache import SharedIngestCache, extract_pcm_48k_cached
 from .motion_components import (
     PALETTE_PRESETS,
@@ -37,6 +47,12 @@ from .motion_components import (
     render_component_onto_rgb,
     render_luxury_backdrop,
     resolve_palette,
+)
+from .remotion_adapter import (
+    StreamingAlphaOverlayReader,
+    alpha_composite_rgba_onto_rgb,
+    probe_remotion_runtime,
+    render_remotion_effect_span,
 )
 
 
@@ -786,12 +802,24 @@ def _resolve_camera_transform(
     default_scale: float,
     default_cx: float,
     default_cy: float,
-) -> tuple[float, float, float]:
-    """Evaluate active declarative camera event with smooth cubic easing."""
+) -> dict[str, float]:
+    """Evaluate active declarative camera / transform event with smooth cubic easing (supports scale < 1.0 pullback, tilt, rotation)."""
+    out = {
+        "scale": float(default_scale),
+        "cx": float(default_cx),
+        "cy": float(default_cy),
+        "x_norm": 0.5,
+        "y_norm": 0.5,
+        "rotation_deg": 0.0,
+        "tilt_x_deg": 0.0,
+        "tilt_y_deg": 0.0,
+    }
     for ce in camera_events:
         t0 = float(ce.get("start_sec", 0.0))
         t1 = float(ce.get("end_sec", 0.0))
         if t0 <= t_sec < t1:
+            if ce.get("keyframes"):
+                return interpolate_keyframes(ce["keyframes"], t_sec, out)
             u = _mc_ease_in_out((t_sec - t0) / max(0.04, t1 - t0))
             s0 = float(ce.get("scale_start", default_scale))
             s1 = float(ce.get("scale_end", s0))
@@ -799,8 +827,94 @@ def _resolve_camera_transform(
             cx1 = float(ce.get("cx_end", cx0))
             cy0 = float(ce.get("cy_start", ce.get("cy_norm", default_cy)))
             cy1 = float(ce.get("cy_end", cy0))
-            return (s0 + (s1 - s0) * u, cx0 + (cx1 - cx0) * u, cy0 + (cy1 - cy0) * u)
-    return (default_scale, default_cx, default_cy)
+            x0 = float(ce.get("x_start", ce.get("x_norm", 0.5)))
+            x1 = float(ce.get("x_end", x0))
+            y0 = float(ce.get("y_start", ce.get("y_norm", 0.5)))
+            y1 = float(ce.get("y_end", y0))
+            r0 = float(ce.get("rotation_start", ce.get("rotation_deg", 0.0)))
+            r1 = float(ce.get("rotation_end", r0))
+            tx0 = float(ce.get("tilt_x_start", ce.get("tilt_x_deg", 0.0)))
+            tx1 = float(ce.get("tilt_x_end", tx0))
+            ty0 = float(ce.get("tilt_y_start", ce.get("tilt_y_deg", 0.0)))
+            ty1 = float(ce.get("tilt_y_end", ty0))
+            return {
+                "scale": s0 + (s1 - s0) * u,
+                "cx": cx0 + (cx1 - cx0) * u,
+                "cy": cy0 + (cy1 - cy0) * u,
+                "x_norm": x0 + (x1 - x0) * u,
+                "y_norm": y0 + (y1 - y0) * u,
+                "rotation_deg": r0 + (r1 - r0) * u,
+                "tilt_x_deg": tx0 + (tx1 - tx0) * u,
+                "tilt_y_deg": ty0 + (ty1 - ty0) * u,
+            }
+    return out
+
+
+def _group_remotion_effect_spans(
+    effect_invocations: list[dict[str, Any]],
+    *,
+    fps: float,
+    total_frames: int,
+    merge_gap_sec: float = 0.25,
+) -> list[dict[str, Any]]:
+    """Group active Remotion/hybrid effect invocations into minimal contiguous render spans (renders ONLY spans that need Remotion!)."""
+    rem_events: list[dict[str, Any]] = []
+    for ev in effect_invocations:
+        eid = str(ev.get("resolved_effect_id") or ev.get("effect_id") or "")
+        if not eid.startswith("dx01."):
+            continue
+        # Footage-only / transition-only / depth-layer effects run natively in footage_engine, not Remotion
+        if eid.startswith(("dx01.footage.", "dx01.trans.", "dx01.depth.")):
+            continue
+        rem_events.append(dict(ev, effect_id=eid))
+    if not rem_events:
+        return []
+
+    rem_events.sort(key=lambda e: (float(e["start_sec"]), float(e["end_sec"]), str(e.get("event_id") or "")))
+    groups: list[dict[str, Any]] = []
+    for ev in rem_events:
+        sf = max(0, int(math.floor(float(ev["start_sec"]) * fps)))
+        ef = min(total_frames, max(sf + 2, int(math.ceil(float(ev["end_sec"]) * fps))))
+        gap_f = int(round(merge_gap_sec * fps))
+        if groups and sf <= groups[-1]["end_frame"] + gap_f:
+            groups[-1]["end_frame"] = max(groups[-1]["end_frame"], ef)
+            groups[-1]["events"].append(ev)
+        else:
+            groups.append({
+                "span_id": f"rem_span_{len(groups) + 1:02d}",
+                "start_frame": sf,
+                "end_frame": ef,
+                "events": [ev],
+            })
+    for g in groups:
+        g["duration_in_frames"] = max(2, g["end_frame"] - g["start_frame"])
+        g["span_start_sec"] = round(g["start_frame"] / fps, 6)
+    return groups
+
+
+def _fallback_dx01_event_to_legacy(ev: dict[str, Any]) -> dict[str, Any] | None:
+    """Explicit deterministic fallback from a Remotion DX-01 effect to a clean-room PIL overlay when Remotion is unavailable."""
+    eid = str(ev.get("effect_id") or "")
+    base = {
+        "event_id": str(ev.get("event_id") or "fb_ev"),
+        "start_sec": float(ev["start_sec"]),
+        "end_sec": float(ev["end_sec"]),
+        "y_norm": float(ev.get("y_norm", 0.08)),
+        "z_order": int(ev.get("z_order", 20)),
+        "fallback_from": eid,
+    }
+    if eid == "dx01.typo.kinetic_headline":
+        return {**base, "kind": "editorial_hook_banner", "title": str(ev.get("title") or "")[:48], "subtitle": str(ev.get("subtitle") or "")[:54]}
+    if eid in ("dx01.typo.masked_reveal", "dx01.typo.floating_statement"):
+        return {**base, "kind": "context_chip", "kicker": str(ev.get("kicker") or ""), "title": str(ev.get("title") or "")[:44]}
+    if eid == "dx01.data.kinetic_counter":
+        return {
+            **base, "kind": "numerical_payoff_hero",
+            "from_value": float(ev.get("from_value", 0)), "to_value": float(ev.get("to_value", 100)),
+            "prefix": str(ev.get("prefix", "")), "suffix": str(ev.get("suffix", "")),
+            "kicker": str(ev.get("kicker") or "RESULT"), "subtitle": str(ev.get("qualifier") or ""),
+        }
+    return None
 
 
 def render_independent_video(
@@ -811,14 +925,23 @@ def render_independent_video(
     cancel_event: threading.Event | None = None,
     cache: SharedIngestCache | None = None,
     ffmpeg_threads: int = 4,
+    enable_remotion: bool = True,
+    allow_remotion_fallback: bool = True,
+    remotion_cache_root: Path | None = None,
+    remotion_concurrency: int = 1,
 ) -> dict[str, Any]:
-    """Render a multi-source vertical/horizontal edit strictly via clean-room FFmpeg+Pillow+NumPy.
+    """Render a multi-source edit via clean-room FFmpeg+Pillow+NumPy and optional hybrid local Remotion spans.
 
-    Supports both legacy v1 and canonical `INDEPENDENT_RENDER_SPEC_V2` (arbitrary N sources,
-    declarative camera events, full-frame illustrative backdrops, all 11 ROI-accelerated motion
-    components, parallel audio mix + silent video encode, and stream-copy faststart mux).
-    Uses isolated staging file -> full FFmpeg decode check -> exact frame count check -> atomic os.replace().
-    Never leaves partial MP4 on failure or cancellation!
+    Supports legacy v1, `INDEPENDENT_RENDER_SPEC_V2`, and DX-01 extensions:
+    - Arbitrary N sources & multi-layer canvas transforms (including `< 1.0` pullback, rotation, 2.5D tilt).
+    - Direct footage effects (push/pull zoom, canvas pullback, perspective tilt, exposure/color grade,
+      authentic before/after split wipe).
+    - True dual-moving transitions (`dual_crossfade`, `mask_wipe`, `whip_blur`, `match_reveal`) with
+      explicit outgoing handle validation (NEVER silently freezes outgoing frame!).
+    - Real local Remotion transparent ProRes 4444 (`yuva444p10le`) effect spans streamed in O(1) RAM
+      with content-addressed caching & verifiable per-span receipts.
+    - Parallel audio mix + video encode + stream-copy faststart mux (ONE final delivery video encode).
+    - Isolated staging -> full FFmpeg decode check -> exact frame count check -> atomic os.replace().
     """
     t0 = time.monotonic()
     out_w = int(spec.get("width", 1080))
@@ -837,7 +960,6 @@ def render_independent_video(
     if isinstance(reg.get("sources"), list) and reg["sources"]:
         for ent in reg["sources"]:
             sid = str(ent["source_id"])
-            # Only use low-res proxy when explicitly requested for low-res preview (NEVER upscale as final!)
             eff_p = Path(ent["proxy_path"]).resolve() if (use_proxy and ent.get("proxy_path") and Path(ent["proxy_path"]).is_file()) else Path(ent["path"]).resolve()
             src_entries[sid] = {"path": eff_p, "probe": _probe_video_basic(eff_p)}
         prim_id = str(reg.get("primary_source_id") or reg["sources"][0]["source_id"])
@@ -851,14 +973,124 @@ def render_independent_video(
         if src_b_path and src_b_path.is_file():
             src_entries["B"] = {"path": src_b_path, "probe": _probe_video_basic(src_b_path)}
 
-    # Check cancellation early before launching work
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("RENDER_CANCELLED_BEFORE_START")
 
-    # 1. Start audio stem assembly concurrently with silent video rendering (identical frame/sample clock!)
-    t_aud_start = time.monotonic()
+    default_pal = resolve_palette({}, spec.get("art_tokens") or PALETTE_PRESETS["editorial_dark"])
+    visual_tracks = list(spec["visual_tracks"])
+    layers_list = list(spec.get("layers") or [])
+    footage_fx_list = list(spec.get("footage_effects") or [])
+    camera_events = list(spec.get("camera_events") or [])
+    overlays = list(spec.get("overlays") or [])
+    effect_invocations = list(spec.get("effect_invocations") or [])
 
-    def _run_audio_stage() -> dict[str, Any]:
+    # 0. Pre-render minimal Remotion transparent RGBA spans (cached + bounded concurrency!)
+    t_rem_start = time.monotonic()
+    remotion_spans_plan = _group_remotion_effect_spans(effect_invocations, fps=fps, total_frames=total_frames)
+    remotion_receipts: list[dict[str, Any]] = []
+    fallback_events: list[dict[str, Any]] = []
+    active_remotion_spans: list[dict[str, Any]] = []
+    rem_cache_dir = remotion_cache_root or (cache.root if cache is not None else (stems_dir.parent / "cache"))
+
+    if remotion_spans_plan:
+        rem_probe = probe_remotion_runtime() if enable_remotion else {"ready": False, "status": "DISABLED_BY_CALLER"}
+        if rem_probe.get("ready"):
+            def _render_span(sp: dict[str, Any]) -> dict[str, Any]:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("RENDER_CANCELLED_DURING_REMOTION")
+                span_props = {
+                    "span_id": sp["span_id"],
+                    "width": out_w,
+                    "height": out_h,
+                    "fps": int(round(fps)),
+                    "duration_in_frames": sp["duration_in_frames"],
+                    "span_start_sec": sp["span_start_sec"],
+                    "transparent": True,
+                    "palette": default_pal,
+                    "events": sp["events"],
+                    "seed": int(spec.get("seed", 20261126)),
+                }
+                rec = render_remotion_effect_span(
+                    span_props,
+                    cache_root=rem_cache_dir,
+                    codec="prores",
+                    concurrency=max(1, min(2, int(remotion_concurrency))),
+                )
+                return {**sp, "receipt": rec}
+
+            span_workers = max(1, min(2, int(remotion_concurrency)))
+            if span_workers > 1 and len(remotion_spans_plan) > 1:
+                with ThreadPoolExecutor(max_workers=span_workers) as rpool:
+                    done_spans = list(rpool.map(_render_span, remotion_spans_plan))
+            else:
+                done_spans = [_render_span(sp) for sp in remotion_spans_plan]
+            done_spans.sort(key=lambda x: int(x["start_frame"]))
+            for ds in done_spans:
+                remotion_receipts.append(ds["receipt"])
+                active_remotion_spans.append({
+                    "span_id": ds["span_id"],
+                    "start_frame": ds["start_frame"],
+                    "end_frame": ds["end_frame"],
+                    "output_path": Path(ds["receipt"]["output_path"]),
+                    "effect_ids": ds["receipt"]["effect_ids"],
+                })
+        elif allow_remotion_fallback:
+            for sp in remotion_spans_plan:
+                for ev in sp["events"]:
+                    fb = _fallback_dx01_event_to_legacy(ev)
+                    fallback_events.append({
+                        "event_id": ev.get("event_id"),
+                        "requested_effect_id": ev.get("effect_id"),
+                        "reason": f"Remotion unavailable ({rem_probe.get('status')})",
+                        "fallback_overlay_kind": fb["kind"] if fb else None,
+                    })
+                    if fb is not None:
+                        overlays.append(fb)
+        else:
+            raise RuntimeError(f"REMOTION_BACKEND_REQUIRED_BUT_UNAVAILABLE: {rem_probe.get('status')}")
+    t_rem_elapsed = round(time.monotonic() - t_rem_start, 3)
+
+    # Validate dual-moving transition handles up-front (explicit receipts, zero silent frozen outgoing tails!)
+    src_durs_map = {sid: float(info["probe"]["video_duration_sec"]) for sid, info in src_entries.items()}
+    transition_receipts: list[dict[str, Any]] = []
+    track_transition_plan: dict[int, dict[str, Any]] = {}
+    for ti in range(1, len(visual_tracks)):
+        tr_prev = visual_tracks[ti - 1]
+        tr_cur = visual_tracks[ti]
+        req_f = int(tr_cur.get("transition_frames", 0))
+        t_kind = str(tr_cur.get("transition_kind") or ("dx01.trans.dual_crossfade" if req_f > 0 else "cut"))
+        if req_f > 0 and t_kind != "cut":
+            hval = validate_transition_handles(
+                tr_prev, tr_cur, requested_frames=req_f, source_durations_sec=src_durs_map, fps=fps,
+            )
+            rec_t = {
+                "boundary_track_idx": ti,
+                "from_track": tr_prev.get("track_id", f"trk_{ti}"),
+                "to_track": tr_cur.get("track_id", f"trk_{ti + 1}"),
+                "boundary_frame": int(tr_cur["out_start_frame"]),
+                "transition_kind": "cut" if hval["fallback_to_cut"] else t_kind,
+                "direction": str(tr_cur.get("transition_direction") or "left"),
+                "feather_px": float(tr_cur.get("transition_feather_px", 48.0)),
+                "blur_px": float(tr_cur.get("transition_blur_px", 20.0)),
+                "dual_moving_verified": not hval["fallback_to_cut"],
+                **hval,
+            }
+            transition_receipts.append(rec_t)
+            if rec_t["effective_frames"] > 0:
+                track_transition_plan[ti] = rec_t
+
+    # 1. Start audio stem assembly concurrently with silent video rendering (supports explicit silent_policy!)
+    is_silent_job = bool(spec.get("silent_policy")) and (not src_entries[prim_id]["probe"].get("has_audio", True))
+
+    def _run_audio_stage() -> dict[str, Any] | None:
+        if is_silent_job:
+            return {
+                "silent_policy": True,
+                "mix_wav": None,
+                "secondary_audio_muted": True,
+                "integrated_lufs": None,
+                "true_peak_dbtp": None,
+            }
         return build_speech_master_and_mix(
             primary_video=src_a_path,
             voice_segments=list(spec["voice_segments"]),
@@ -895,6 +1127,12 @@ def render_independent_video(
             unique_readers.append(rdr)
         readers[sid] = rdr
 
+    # Dedicated secondary reader pool for true dual-moving outgoing handles when outgoing & incoming share same file
+    handle_readers: dict[str, _SequentialFrameReader] = {}
+    alpha_readers: dict[str, StreamingAlphaOverlayReader] = {}
+    for sp in active_remotion_spans:
+        alpha_readers[sp["span_id"]] = StreamingAlphaOverlayReader(sp["output_path"], out_w, out_h)
+
     fps_str = f"{fps_num}/{fps_den}"
     ff_t = str(max(1, int(ffmpeg_threads)))
     enc_cmd = [
@@ -911,55 +1149,101 @@ def render_independent_video(
     elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
         popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
-    visual_tracks = list(spec["visual_tracks"])
-    camera_events = list(spec.get("camera_events") or [])
-    overlays = list(spec.get("overlays") or [])
-    default_pal = resolve_palette({}, spec.get("art_tokens") or PALETTE_PRESETS["editorial_dark"])
     vis_dur_a = 0
     vis_dur_b = 0
     frames_written = 0
 
-    def _lookup_source_frame(sid: str, t_sec_req: float) -> Image.Image | None:
+    def _lookup_source_frame(sid: str, t_sec_req: float, *, use_handle_reader: bool = False) -> Image.Image | None:
         info = src_entries.get(sid)
-        rdr = readers.get(sid)
-        if info is None or rdr is None:
+        if info is None:
             return None
         pr = info["probe"]
         clamped = max(0.0, min(max(0.04, pr["video_duration_sec"] - 0.04), t_sec_req))
         fi = max(0, min(pr["nb_frames"] - 1, int(round(clamped * pr["fps"]))))
-        return rdr.get_frame(fi)
+        if use_handle_reader:
+            hr = handle_readers.get(sid)
+            if hr is None:
+                hr = _SequentialFrameReader(info["path"], out_w, out_h)
+                handle_readers[sid] = hr
+            return hr.get_frame(fi)
+        rdr = readers.get(sid)
+        return rdr.get_frame(fi) if rdr is not None else None
 
-    def _resolve_track_frame(tr: dict[str, Any], out_f: int, t_sec: float) -> np.ndarray:
+    def _resolve_track_frame(tr: dict[str, Any], out_f: int, t_sec: float, *, outgoing_handle_offset_f: int = 0) -> np.ndarray:
         mode = str(tr.get("mode") or "source").lower()
         if mode == "illustrative_backdrop":
             return render_luxury_backdrop(out_w, out_h, default_pal)
+        if mode == "before_after_split":
+            sid_a = str(tr.get("before_source_id") or prim_id)
+            sid_b = str(tr.get("after_source_id") or sid_a)
+            tr_start = int(tr["out_start_frame"])
+            tr_end = max(tr_start + 1, int(tr["out_end_frame"]))
+            u = (out_f - tr_start) / float(max(1, tr_end - tr_start - 1))
+            tb = float(tr.get("before_in_sec", 0.0)) + u * (float(tr.get("before_out_sec", 1.0)) - float(tr.get("before_in_sec", 0.0)))
+            ta = float(tr.get("after_in_sec", 0.0)) + u * (float(tr.get("after_out_sec", 1.0)) - float(tr.get("after_in_sec", 0.0)))
+            im_b = _lookup_source_frame(sid_a, tb, use_handle_reader=False) or Image.new("RGB", (out_w, out_h), (20, 20, 20))
+            im_a = _lookup_source_frame(sid_b, ta, use_handle_reader=(sid_b == sid_a)) or im_b
+            return render_before_after_split_rgb(
+                np.asarray(im_b, dtype=np.uint8),
+                np.asarray(im_a, dtype=np.uint8),
+                progress=u,
+                pause_at=float(tr.get("divider_pause_at", 0.5)),
+            )
+
         sid = str(tr.get("source_id") or tr.get("source") or prim_id)
         if sid not in src_entries:
-            sid = "B" if sid.upper() == "B" and "B" in src_entries else prim_id
+            raise KeyError(f"UNKNOWN_VISUAL_TRACK_SOURCE_ID:{sid!r}")
         info = src_entries[sid]
         pr = info["probe"]
-        rdr = readers[sid]
         tr_start = int(tr["out_start_frame"])
         tr_end = max(tr_start + 1, int(tr["out_end_frame"]))
-        u = (out_f - tr_start) / float(max(1, tr_end - tr_start - 1))
         src_in = float(tr["src_in_sec"])
         src_out = float(tr["src_out_sec"])
-        max_sec = max(0.05, pr["video_duration_sec"] - 0.04)
-        clamped_out = min(src_out, max_sec)
-        clamped_in = min(src_in, max(0.0, clamped_out - 0.04))
-        t_src = clamped_in + u * (clamped_out - clamped_in)
-        f_idx = max(0, min(pr["nb_frames"] - 1, int(round(t_src * pr["fps"]))))
-        im = rdr.get_frame(f_idx)
+        max_sec = max(0.05, pr["video_duration_sec"] - 0.03)
+        if outgoing_handle_offset_f > 0:
+            # True moving outgoing handle advancing past tr's nominal out_end_frame!
+            t_src = min(max_sec, src_out + (outgoing_handle_offset_f / fps))
+            u = 1.0
+        else:
+            u = (out_f - tr_start) / float(max(1, tr_end - tr_start - 1))
+            clamped_out = min(src_out, max_sec)
+            clamped_in = min(src_in, max(0.0, clamped_out - 0.04))
+            is_master = (sid == prim_id)
+            t_src = resolve_speed_ramp_pts(
+                u_norm=u,
+                src_in_sec=clamped_in,
+                src_out_sec=clamped_out,
+                ramp_curve=str(tr.get("speed_ramp") or "linear"),
+                is_master_dialogue=is_master,
+            )
+
+        im = _lookup_source_frame(sid, t_src, use_handle_reader=(outgoing_handle_offset_f > 0))
+        if im is None:
+            im = Image.new("RGB", (out_w, out_h), (18, 20, 22))
 
         sc0 = float(tr.get("scale_start", 1.0))
         sc1 = float(tr.get("scale_end", sc0))
         base_sc = sc0 + (sc1 - sc0) * _ease_in_out_cubic(u)
         base_cx = float(tr.get("cx_norm", tr.get("focus_x", 0.5)))
         base_cy = float(tr.get("cy_norm", tr.get("focus_y", 0.5)))
-        cur_sc, cx, cy = _resolve_camera_transform(camera_events, t_sec, base_sc, base_cx, base_cy)
-        im_out = _zoom_pan_frame(im, out_w, out_h, cur_sc, cx_norm=cx, cy_norm=cy)
+        cam = _resolve_camera_transform(camera_events, t_sec, base_sc, base_cx, base_cy)
+        im_out = render_pullback_or_transform_frame(
+            im, out_w, out_h,
+            scale=cam["scale"],
+            cx_norm=cam["cx"],
+            cy_norm=cam["cy"],
+            x_norm=cam["x_norm"],
+            y_norm=cam["y_norm"],
+            rotation_deg=cam["rotation_deg"] + float(tr.get("rotation_deg", 0.0)),
+            tilt_x_deg=cam["tilt_x_deg"] + float(tr.get("tilt_x_deg", 0.0)),
+            tilt_y_deg=cam["tilt_y_deg"] + float(tr.get("tilt_y_deg", 0.0)),
+            border_radius_px=int(tr.get("border_radius_px", 0)),
+            palette=default_pal,
+            fit_mode=str(tr.get("fit_mode") or "cover"),
+            crop_rect_norm=tr.get("crop_rect_norm"),
+        )
 
-        # Optional spatial inset preview card (backward-compatible v1/v2)
+        # Optional spatial inset preview (palette-driven, zero hardcoded green/gold!)
         inset = tr.get("inset_b")
         if inset and "B" in readers and "B" in src_entries:
             it0, it1 = int(inset["out_start_frame"]), int(inset["out_end_frame"])
@@ -981,14 +1265,15 @@ def render_independent_video(
                 mask = Image.new("L", (cw, ch), 0)
                 ImageDraw.Draw(mask).rounded_rectangle((0, 0, cw, ch), radius=max(10, int(22 * out_w / 1080.0)), fill=int(255 * iv))
                 comp = im_out.convert("RGBA")
-                _draw_rounded_card(comp, (px - 6, py - 6, px + cw + 6, py + ch + 6), radius=max(12, int(26 * out_w / 1080.0)), fill=(25, 48, 38, int(230 * iv)), outline=(217, 182, 107, int(235 * iv)), outline_w=max(2, int(3 * out_w / 1080.0)))
+                bg_c = _parse_hex_rgba(default_pal["bg_hex"], int(230 * iv))
+                ac_c = _parse_hex_rgba(default_pal["accent_hex"], int(235 * iv))
+                _draw_rounded_card(comp, (px - 6, py - 6, px + cw + 6, py + ch + 6), radius=max(12, int(26 * out_w / 1080.0)), fill=bg_c, outline=ac_c, outline_w=max(2, int(3 * out_w / 1080.0)))
                 comp.paste(bcrop, (px, py), mask)
                 im_out = comp.convert("RGB")
         return np.asarray(im_out, dtype=np.uint8).copy()
 
     t_vid_start = time.monotonic()
     enc_proc = subprocess.Popen(enc_cmd, **popen_kw)
-    prev_track_end_arr: np.ndarray | None = None
     aud_res: dict[str, Any] | None = None
 
     try:
@@ -1013,20 +1298,66 @@ def render_independent_video(
 
                 frame_arr = _resolve_track_frame(tr, f_out, t_sec)
 
-                # Smooth crossfade across track boundaries
-                xf_f = int(tr.get("transition_frames", 0))
-                local_f = f_out - int(tr["out_start_frame"])
-                if xf_f > 0 and local_f < xf_f and prev_track_end_arr is not None and tr_idx > 0:
-                    alpha = float(_ease_in_out_cubic((local_f + 1) / float(xf_f + 1)))
-                    frame_arr = np.clip(
-                        frame_arr.astype(np.float32) * alpha + prev_track_end_arr.astype(np.float32) * (1.0 - alpha),
-                        0.0, 255.0,
-                    ).astype(np.uint8)
+                # True dual-moving transition across track boundary (evaluates BOTH moving sources at live PTS!)
+                t_plan = track_transition_plan.get(tr_idx)
+                if t_plan is not None:
+                    local_f = f_out - int(tr["out_start_frame"])
+                    eff_f = int(t_plan["effective_frames"])
+                    if 0 <= local_f < eff_f:
+                        out_arr = _resolve_track_frame(
+                            visual_tracks[tr_idx - 1],
+                            f_out,
+                            t_sec,
+                            outgoing_handle_offset_f=local_f + 1,
+                        )
+                        prog = (local_f + 1) / float(eff_f + 1)
+                        frame_arr = render_dual_moving_transition(
+                            out_arr,
+                            frame_arr,
+                            progress=prog,
+                            kind=str(t_plan["transition_kind"]),
+                            direction=str(t_plan["direction"]),
+                            feather_px=float(t_plan["feather_px"]),
+                            blur_px=float(t_plan["blur_px"]),
+                        )
 
-                if f_out == int(tr["out_end_frame"]) - 1:
-                    prev_track_end_arr = frame_arr.copy()
+                # Direct footage grade/exposure treatments
+                for ffx in footage_fx_list:
+                    ft0, ft1 = float(ffx.get("start_sec", 0.0)), float(ffx.get("end_sec", 0.0))
+                    if ft0 <= t_sec < ft1:
+                        el_f = t_sec - ft0
+                        rem_f = ft1 - t_sec
+                        ramp = min(1.0, el_f / 0.2, rem_f / 0.2)
+                        frame_arr = apply_exposure_grade_rgb(
+                            frame_arr,
+                            exposure_ev=float(ffx.get("exposure_ev", 0.0)) * ramp,
+                            contrast=1.0 + (float(ffx.get("contrast", 1.0)) - 1.0) * ramp,
+                            saturation=1.0 + (float(ffx.get("saturation", 1.0)) - 1.0) * ramp,
+                            warmth=float(ffx.get("warmth", 0.0)) * ramp,
+                            vignette=float(ffx.get("vignette", 0.0)) * ramp,
+                        )
 
-                # ROI-accelerated NumPy compositing of ALL 11 declarative motion components!
+                # True N-source multi-layer composition (split, floating evidence, parallax)
+                if layers_list:
+                    frame_arr = compose_multilayer_frame(
+                        frame_arr,
+                        layers_list,
+                        t_sec=t_sec,
+                        out_w=out_w,
+                        out_h=out_h,
+                        source_frame_lookup=lambda s, ts: _lookup_source_frame(s, ts, use_handle_reader=(s == src_tag)),
+                        palette=default_pal,
+                    )
+
+                # Stream-composite verified Remotion transparent ProRes 4444 spans (O(1) RAM!)
+                for sp in active_remotion_spans:
+                    if sp["start_frame"] <= f_out < sp["end_frame"]:
+                        loc_idx = f_out - sp["start_frame"]
+                        ov_rgba = alpha_readers[sp["span_id"]].get_frame_rgba(loc_idx)
+                        if ov_rgba is not None:
+                            alpha_composite_rgba_onto_rgb(frame_arr, ov_rgba)
+
+                # ROI-accelerated NumPy compositing of preserved R4.3 declarative motion components
                 for ev in overlays:
                     render_component_onto_rgb(
                         frame_arr, ev, t_sec,
@@ -1066,23 +1397,35 @@ def render_independent_video(
                 pass
         for rdr in unique_readers:
             rdr.close()
+        for hr in handle_readers.values():
+            hr.close()
+        for ar in alpha_readers.values():
+            ar.close()
 
     t_vid_elapsed = round(time.monotonic() - t_vid_start, 3)
 
-    # 2. Fast stream-copy final mux (-c:v copy -c:a aac -movflags +faststart — ZERO second video encode!)
+    # 2. Fast stream-copy final mux (-c:v copy -movflags +faststart — ONE delivery encode!)
     t_mux = time.monotonic()
     assert aud_res is not None
-    mux_cmd = [
-        "ffmpeg", "-v", "error", "-y", "-nostdin",
-        "-i", str(video_staging),
-        "-i", aud_res["mix_wav"],
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        "-shortest",
-        "-movflags", "+faststart",
-        str(staging_mp4),
-    ]
+    if is_silent_job or not aud_res.get("mix_wav"):
+        mux_cmd = [
+            "ffmpeg", "-v", "error", "-y", "-nostdin",
+            "-i", str(video_staging),
+            "-c:v", "copy", "-an", "-movflags", "+faststart",
+            str(staging_mp4),
+        ]
+    else:
+        mux_cmd = [
+            "ffmpeg", "-v", "error", "-y", "-nostdin",
+            "-i", str(video_staging),
+            "-i", aud_res["mix_wav"],
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            "-shortest",
+            "-movflags", "+faststart",
+            str(staging_mp4),
+        ]
     mux_p = subprocess.run(mux_cmd, capture_output=True, text=True, timeout=90)
     video_staging.unlink(missing_ok=True)
     if mux_p.returncode != 0:
@@ -1105,11 +1448,20 @@ def render_independent_video(
 
     os.replace(staging_mp4, out_mp4)
     final_sha = _sha256_file(out_mp4)
+    used_remotion = len(remotion_receipts) > 0
     return {
-        "schema_version": "kh03.independent_render_receipt.v2",
-        "engine_kind": "INDEPENDENT_FFMPEG_PIL",
+        "schema_version": "kh03.independent_render_receipt.v3",
+        "engine_kind": "HYBRID_REMOTION_FFMPEG" if used_remotion else "INDEPENDENT_FFMPEG_PIL",
+        "remotion_used": used_remotion,
+        "remotion_span_count": len(remotion_receipts),
+        "remotion_effect_ids": sorted({eid for rec in remotion_receipts for eid in (rec.get("effect_ids") or [])}),
+        "remotion_receipts": remotion_receipts,
+        "fallback_events": fallback_events,
+        "transition_receipts": transition_receipts,
+        "delivery_video_encode_count": 1,
         "uses_seecut_upstream": False,
         "spec_sha256": spec.get("spec_sha256"),
+        "normalized_creative_plan_sha256": spec.get("normalized_creative_plan_sha256"),
         "final_mp4_path": str(out_mp4),
         "final_mp4_sha256": final_sha,
         "final_mp4_bytes": out_mp4.stat().st_size,
@@ -1125,6 +1477,7 @@ def render_independent_video(
         "source_b_visible_sec": round(vis_dur_b / fps, 3),
         "audio": aud_res,
         "timings": {
+            "remotion_spans_sec": t_rem_elapsed,
             "visual_encode_and_audio_parallel_sec": t_vid_elapsed,
             "stream_copy_mux_sec": t_mux_elapsed,
             "total_render_sec": round(time.monotonic() - t0, 3),

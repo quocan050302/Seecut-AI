@@ -1,0 +1,43 @@
+DX-01 UNIVERSAL MOTION GRAPHICS & HYBRID REMOTION ENGINE — SUMMARY REPORT
+========================================================================
+Run ID         : 20261126T094000Z_DX01_3d906b1_dx01
+Branch         : feat/dx-01-universal-motion-remotion
+Base QA SHA    : 3d906b16c7b16d258d544466bd180cb3c42cdd3c (aba15a8 verified ancestor)
+Master SHA     : ae51ccd4127c95a456e96c66d46a77fb65142b80 (untouched)
+Timestamp UTC  : 2026-11-27T02:26:00Z
+
+SEPARATED STATUS MATRIX
+-----------------------
+ENGINEERING          : PASS (243/243 serial & parallel w=3 exact parity; tsc --noEmit 0 errors; 0 core hardcodes)
+RENDER_BACKEND       : PASS (HYBRID_REMOTION_FFMPEG, Remotion 4.0.545 offline ProRes 4444 alpha + clean PIL fallback)
+CANDIDATE_RENDERED   : PASS (Olivia_V8_Paid_Friday_DX01_Motion_9x16_FINAL_CANDIDATE.mp4, SHA256 efe698326d8b25e104d4bdde8bed204bb0fd0b61d16eedf608e3cfd802344b80)
+TECHNICAL_QA         : PASS (VERIFY_PASS; 719/719 frames; remotion_verified=true; -15.2 LUFS / -2.9 dBTP; post-mux ASR VERIFIED_PASS)
+CROSS_NICHE_COVERAGE : PARTIAL (14/14 UNI-01 niches planned + 7 synthetic renders + 4 edge cases + 4 REAL media clips; remaining real corpora BLOCKED_INPUT)
+PERFORMANCE_TARGET   : MIXED (Warm Quick 39.344s PASS; Warm Standard 149.984s PASS; Cold 2-cand + Remotion + ASR 368.594s within High Motion 5-10m)
+EDITORIAL_PENDING    : EDITORIAL_PENDING (OWNER_VISUAL=PENDING, OWNER_AUDIO=PENDING, FINAL_APPROVED=false; live AI judge absent)
+RELEASE              : RELEASE_BLOCKED (awaiting explicit owner playback/audio approval; Native SeeCut remains BLOCKED_COMMERCIAL_LICENSE)
+
+DELIVERABLE METRICS (OLIVIA V8 DX-01)
+-------------------------------------
+Output Name          : Olivia_V8_Paid_Friday_DX01_Motion_9x16_FINAL_CANDIDATE.mp4
+Output Location      : <EXTERNAL_JOB_WORKSPACE>/exports/Olivia_V8_Paid_Friday_DX01_Motion_9x16_FINAL_CANDIDATE.mp4
+Output SHA-256       : efe698326d8b25e104d4bdde8bed204bb0fd0b61d16eedf608e3cfd802344b80
+Geometry / Codec     : 1080x1920, 24fps CFR, 719f (29.958s), H.264 yuv420p, AAC 48kHz stereo, 14,582,303 bytes
+Delivery Encodes     : 1 (vs 2 in prior V8 baseline)
+Remotion Effects (9) : dx01.typo.kinetic_headline, dx01.typo.masked_reveal, dx01.typo.karaoke_cue,
+                       dx01.geom.svg_path_draw, dx01.geom.callout_arrow, dx01.data.sequential_tally,
+                       dx01.data.kinetic_counter, dx01.evidence.ui_spotlight, dx01.atmo.light_sweep
+Footage / Trans      : <1.0 pullback + 2.5D tilt, exposure grade, 6 verified dual-moving transitions
+A/B Balance          : 18.500s A-roll (61.8%) / 11.458s real Notion B-roll (38.2%, B audio MUTED)
+Normalized Plan SHA  : 6a025e739ea87ecf1005f85c6349c69294e6eee657b7b30d647c3bae390f36ea (preview == final exact match)
+Candidate Diversity  : 2 distinct structural signatures & 2 distinct visual fingerprints (cand_A vs cand_B)
+Audio QA (Post-Mux)  : -15.2 LUFS, -2.9 dBTP, LRA 4.3 LU, AV diff 0.000s, Post-ASR VERIFIED_PASS (0 dups, 0 missing nums)
+
+BENCHMARKS (ACTUAL MEASURED ON HOST)
+------------------------------------
+Warm Quick (540x960) E2E            : 39.344s (Remotion cache hit 0.375s, encode 33.125s)
+Warm Standard (1080x1920) E2E       : 149.984s (Remotion cache hit 0.375s, encode 134.953s, QA ~12.7s)
+Cold Full (2 cands + Remotion + ASR): 368.594s (Cold 1080p Remotion spans 78.546s, encode 135.813s, QA 18.812s)
+Prior V8 Baseline (0 components)    : 81.686s (67.921s render + 13.765s ASS re-encode; 0 Remotion/DX-01 effects)
+Peak Process Tree RSS               : 75.34 MiB (O(1) streaming decode/composite)
+Regression Parity (243 tests)       : Serial 358.547s vs Parallel w=3 204.641s (1.75x, exact parity=True)

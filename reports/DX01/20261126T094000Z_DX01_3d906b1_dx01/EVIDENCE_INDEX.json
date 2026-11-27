@@ -1,0 +1,142 @@
+{
+  "schema_version": "kh03.dx01.evidence_index.v1",
+  "run_id": "20261126T094000Z_DX01_3d906b1_dx01",
+  "timestamp_utc": "2026-11-27T02:26:00Z",
+  "git": {
+    "branch": "feat/dx-01-universal-motion-remotion",
+    "base_ref": "origin/QA",
+    "base_sha": "3d906b16c7b16d258d544466bd180cb3c42cdd3c",
+    "r43_ancestor_verified": "aba15a87072780cc4e59f9657e2fe78edea82f2f",
+    "origin_master_sha_untouched": "ae51ccd4127c95a456e96c66d46a77fb65142b80"
+  },
+  "status_breakdown": {
+    "ENGINEERING": "PASS",
+    "RENDER_BACKEND": "PASS",
+    "CANDIDATE_RENDERED": "PASS",
+    "TECHNICAL_QA": "PASS",
+    "CROSS_NICHE_COVERAGE": "PARTIAL_REAL_PLUS_14_NICHE_SYNTHETIC",
+    "PERFORMANCE_TARGET": "WARM_PASS_COLD_MULTI_CAND_HIGH_MOTION_TIER",
+    "EDITORIAL_PENDING": "EDITORIAL_PENDING",
+    "RELEASE": "RELEASE_BLOCKED"
+  },
+  "owner_approvals": {
+    "OWNER_VISUAL": "PENDING",
+    "OWNER_AUDIO": "PENDING",
+    "FINAL_APPROVED": false
+  },
+  "remotion_runtime": {
+    "status": "READY_OFFLINE",
+    "remotion_version": "4.0.545",
+    "versions_aligned": true,
+    "typecheck_tsc_noemit_pass": true,
+    "offline_capable": true,
+    "existing_workspace_modified": false,
+    "uses_seecut_polyform": false
+  },
+  "effect_registry": {
+    "registry_version": "dx01.1.0.0",
+    "family_count": 8,
+    "dx01_effect_count": 26,
+    "legacy_component_count": 11,
+    "all_8_families_rendered_and_verified": true,
+    "verified_render_effect_ids": [
+      "dx01.atmo.light_sweep",
+      "dx01.atmo.seeded_particles_grain",
+      "dx01.data.flow_bar",
+      "dx01.data.kinetic_counter",
+      "dx01.data.sequential_tally",
+      "dx01.depth.adaptive_split",
+      "dx01.depth.floating_evidence",
+      "dx01.evidence.before_after_wipe",
+      "dx01.evidence.ui_spotlight",
+      "dx01.footage.exposure_grade",
+      "dx01.footage.perspective_tilt",
+      "dx01.footage.pullback_canvas",
+      "dx01.footage.push_zoom",
+      "dx01.geom.callout_arrow",
+      "dx01.geom.focus_ring",
+      "dx01.geom.shape_morph",
+      "dx01.geom.svg_path_draw",
+      "dx01.trans.dual_crossfade",
+      "dx01.trans.mask_wipe",
+      "dx01.trans.whip_blur",
+      "dx01.typo.floating_statement",
+      "dx01.typo.karaoke_cue",
+      "dx01.typo.kinetic_headline",
+      "dx01.typo.masked_reveal"
+    ]
+  },
+  "regression_parity": {
+    "kh02_tests": 88,
+    "kh03_baseline_tests": 147,
+    "dx01_new_tests": 8,
+    "total_tests": 243,
+    "serial_passed": 243,
+    "serial_wall_sec": 358.547,
+    "parallel_w3_passed": 243,
+    "parallel_w3_wall_sec": 204.641,
+    "speedup_factor": 1.75,
+    "exact_test_id_and_status_parity": true,
+    "post_polish_reverify_passed": 15,
+    "post_polish_reverify_total": 15
+  },
+  "uni01_cross_niche": {
+    "niche_categories_tested": 14,
+    "niche_planning_all_pass": true,
+    "niche_synthetic_renders_tested": 7,
+    "niche_synthetic_renders_pass": true,
+    "edge_cases_all_pass": true,
+    "real_media_clips_tested": 4,
+    "real_media_clips_pass": 4,
+    "unsupplied_real_niche_corpora_status": "REAL_CORPUS_NOT_SUPPLIED_BLOCKED_INPUT"
+  },
+  "olivia_v8_deliverable": {
+    "external_workspace_relpath": "<EXTERNAL_JOB_WORKSPACE>/exports/Olivia_V8_Paid_Friday_DX01_Motion_9x16_FINAL_CANDIDATE.mp4",
+    "final_mp4_sha256": "efe698326d8b25e104d4bdde8bed204bb0fd0b61d16eedf608e3cfd802344b80",
+    "bytes": 14582303,
+    "width": 1080,
+    "height": 1920,
+    "fps": 24.0,
+    "nb_frames": 719,
+    "duration_sec": 29.9583,
+    "engine_kind": "HYBRID_REMOTION_FFMPEG",
+    "remotion_verified": true,
+    "delivery_video_encode_count": 1,
+    "normalized_creative_plan_sha256": "6a025e739ea87ecf1005f85c6349c69294e6eee657b7b30d647c3bae390f36ea",
+    "spec_sha256": "63f2639ff88bdf434a2fa4d04c28f000ff08180429b97c21de2dd9adfd3b22f1",
+    "candidate_distinct_structural_count": 2,
+    "candidate_distinct_visual_fingerprint_count": 2,
+    "source_a_sha256": "25036880cbe1a7047cea9e3354e8e790de4ed4da6027d89c7bab13b35e9a2be3",
+    "source_b_sha256": "f3305fa9c5689858c06703e3afd024485c4d3da430c78557fd7098e6abce027e",
+    "reference_r_sha256": "9fe3034167faf58f53cf925c35a6182dfc733f6e83a623bcab2a1b388aef7dc6",
+    "reference_pixels_or_audio_reused": false,
+    "audio_lufs": -15.2,
+    "audio_true_peak_dbtp": -2.9,
+    "post_render_asr_status": "VERIFIED_PASS",
+    "verify_status": "VERIFY_PASS",
+    "benchmarks": {
+      "warm_quick_540x960_e2e_sec": 39.344,
+      "warm_standard_1080x1920_e2e_sec": 149.984,
+      "warm_remotion_spans_cache_hit_sec": 0.375,
+      "cold_remotion_spans_1080p_sec": 78.546,
+      "cold_full_with_2_candidates_and_post_asr_sec": 368.594,
+      "prior_v8_baseline_two_encode_sec": 81.686,
+      "peak_process_tree_rss_mib": 75.34
+    }
+  },
+  "tracked_artifacts": [
+    "reports/DX01/20261126T094000Z_DX01_3d906b1_dx01/README.md",
+    "reports/DX01/20261126T094000Z_DX01_3d906b1_dx01/REPORT_SUMMARY.txt",
+    "reports/DX01/20261126T094000Z_DX01_3d906b1_dx01/EVIDENCE_INDEX.json",
+    "reports/DX01/20261126T094000Z_DX01_3d906b1_dx01/THIRD_PARTY_INVENTORY.json",
+    "THIRD_PARTY_NOTICES_DX01.md"
+  ],
+  "external_workspace_artifacts": [
+    "<EXTERNAL_JOB_WORKSPACE>/exports/Olivia_V8_Paid_Friday_DX01_Motion_9x16_FINAL_CANDIDATE.mp4",
+    "<EXTERNAL_JOB_WORKSPACE>/OLIVIA_V8_DX01_ACCEPTANCE_SUMMARY.json",
+    "<EXTERNAL_JOB_WORKSPACE>/visual_audit/OLIVIA_V8_DX01_DENSE_BEATS_SHEET.jpg",
+    "<EXTERNAL_JOB_WORKSPACE>/family_verification/FAMILY_VERIFICATION_REPORT.json",
+    "<EXTERNAL_JOB_WORKSPACE>/regression/REGRESSION_PARITY_REPORT.json",
+    "<EXTERNAL_JOB_WORKSPACE>/uni01/UNI01_MATRIX_REPORT.json"
+  ]
+}

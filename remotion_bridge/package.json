@@ -1,0 +1,13 @@
+{
+  "name": "seecut-ai-dx01-remotion-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DX-01 deterministic offline Remotion bridge reusing host-installed pinned Remotion runtime.",
+  "dx01RuntimeContract": {
+    "expectedRemotionMajor": 4,
+    "verifiedRemotionVersion": "4.0.545",
+    "requiresNetworkAtRender": false,
+    "usesSeecutPolyFormCode": false
+  }
+}

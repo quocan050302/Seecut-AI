@@ -60,6 +60,7 @@ from .layout import VALID_LAYOUT_POLICIES, resolve_layout_policy
 from .qa import aggregate_gate_results, evaluate_kh03_editorial, orchestrate_final_render_qa, resolve_gate_profile
 from .recommend import get_skill_contract, issue_recommendation, recommend_skills
 from .renderer_routing import (
+    RENDERER_HYBRID_REMOTION,
     RENDERER_INDEPENDENT_CLEAN_ROOM,
     RENDERER_NATIVE_SEECUT,
     VALID_RENDERER_MODES,
@@ -188,10 +189,25 @@ def run_preflight(
     )
     indep_ready = bool(plan_ready and routing["per_renderer_rights"][RENDERER_INDEPENDENT_CLEAN_ROOM]["authorized_for_purpose"])
 
+    from .effect_registry import get_default_effect_registry
+    from .remotion_adapter import probe_remotion_runtime
+
+    rem_probe = probe_remotion_runtime()
+    eff_reg_snap = get_default_effect_registry().snapshot()
+    hybrid_remotion_ready = bool(indep_ready and rem_probe.get("ready"))
+
     mode_ready_map = {
         "plan": plan_ready,
-        "preview": native_preview_ready if renderer == "native_seecut" else (indep_ready if renderer == "independent_clean_room" else (native_preview_ready or (indep_ready and is_comm and False))),
-        "full": native_full_ready if renderer == "native_seecut" else (indep_ready if renderer == "independent_clean_room" else native_full_ready),
+        "preview": (
+            native_preview_ready if renderer == "native_seecut"
+            else (hybrid_remotion_ready if renderer == "hybrid_remotion"
+                  else (indep_ready if renderer == "independent_clean_room" else (native_preview_ready or (indep_ready and is_comm and False))))
+        ),
+        "full": (
+            native_full_ready if renderer == "native_seecut"
+            else (hybrid_remotion_ready if renderer == "hybrid_remotion"
+                  else (indep_ready if renderer == "independent_clean_room" else native_full_ready))
+        ),
         "release": release_ready,
     }
     requested_ready = mode_ready_map[req_mode]
@@ -227,6 +243,7 @@ def run_preflight(
             "NATIVE_PREVIEW_READY": native_preview_ready,
             "NATIVE_FULL_RENDER_READY": native_full_ready,
             "INDEPENDENT_CLEAN_ROOM_READY": indep_ready,
+            "HYBRID_REMOTION_READY": hybrid_remotion_ready,
             "RELEASE_READY": release_ready,
         },
         "tools": {
@@ -234,6 +251,12 @@ def run_preflight(
             "ffprobe": bool(ffprobe_bin),
             "node": bool(node_bin),
             "chromium": bool(chrome_bin),
+            "remotion_ready": bool(rem_probe.get("ready")),
+            "remotion_status": rem_probe.get("status"),
+            "remotion_version": rem_probe.get("remotion_version"),
+            "remotion_browser_found": bool(rem_probe.get("browser_executable")),
+            "dx01_effect_count": eff_reg_snap.get("dx01_effect_count"),
+            "dx01_families": eff_reg_snap.get("families"),
             "upstream_seecut_render_mjs": has_upstream_render,
             "upstream_h1_geom_check_mjs": has_h1,
             "upstream_jianying_layers_mjs": has_layers,
@@ -247,7 +270,10 @@ def run_preflight(
             "detector_primary": det_caps.get("primary_detector"),
             "detector_semantic_classification": det_caps.get("semantic_object_classification"),
         },
-        "render_capability": "FULL_SEECUT_CORE_READY" if native_preview_ready else "PLAN_AND_OFFLINE_QA_ONLY_UPSTREAM_OR_LICENSE_BLOCKED",
+        "render_capability": (
+            "FULL_SEECUT_CORE_READY" if native_preview_ready
+            else ("HYBRID_REMOTION_AND_INDEPENDENT_READY" if hybrid_remotion_ready else "PLAN_AND_OFFLINE_QA_ONLY_UPSTREAM_OR_LICENSE_BLOCKED")
+        ),
         "blockers": blockers,
         "next_actions": next_actions,
         "pass": requested_ready,
@@ -255,6 +281,32 @@ def run_preflight(
     if run_dir is not None:
         write_json_atomic(run_dir / "manifests" / "ENV_REPORT.json", rep)
     return rep
+
+
+def run_capabilities(*, workspace_override: Path | None = None) -> dict[str, Any]:
+    """DX01-01 CLI capability discovery: reflects ACTUAL installed Remotion runtime & EffectRegistry state."""
+    from .effect_registry import get_default_effect_registry
+    from .remotion_adapter import probe_remotion_runtime
+
+    rem = probe_remotion_runtime(remotion_root=workspace_override)
+    reg = get_default_effect_registry()
+    reg.set_remotion_available(bool(rem.get("ready")))
+    snap = reg.snapshot()
+    return {
+        "schema_version": "kh03.capabilities.v1",
+        "kh03_version": __version__,
+        "registry_version": snap["registry_version"],
+        "remotion_runtime": {
+            "ready": bool(rem.get("ready")),
+            "status": rem.get("status"),
+            "remotion_version": rem.get("remotion_version"),
+            "versions_aligned": bool(rem.get("versions_aligned")),
+            "browser_available": bool(rem.get("browser_exists")),
+            "offline_capable": bool(rem.get("offline_capable")),
+            "node_version": rem.get("node_version"),
+        },
+        "effect_registry": snap,
+    }
 
 
 _VALID_LICENSE_DECISIONS = frozenset({
@@ -511,7 +563,11 @@ def run_execute(
         tools_root=tools_root,
         out_dir=(None if dry_run else rdir / "manifests"),
     )
-    use_independent_clean_room = (routing_decision.get("selected_renderer") == RENDERER_INDEPENDENT_CLEAN_ROOM and routing_decision.get("allowed") is True)
+    use_independent_clean_room = (
+        routing_decision.get("selected_renderer") in (RENDERER_INDEPENDENT_CLEAN_ROOM, RENDERER_HYBRID_REMOTION)
+        and routing_decision.get("allowed") is True
+    )
+    use_hybrid_remotion = (routing_decision.get("selected_renderer") == RENDERER_HYBRID_REMOTION)
 
     if not use_independent_clean_room:
         # P0 Fail-Closed PROBLEM-01 License Gate for NATIVE_SEECUT (rejects invalid status, commercial override bypass, or unsubstantiated permission!)
@@ -1045,21 +1101,65 @@ def run_execute(
         sat_ind = parse_json_strict(sat_p_ind) if sat_p_ind.is_file() else None
 
         is_portrait = inp["media"]["aspect_ratio"] == "9:16"
-        full_w, full_h = (1080, 1920) if is_portrait else (1920, 1080)
-        prev_w, prev_h = (540, 960) if is_portrait else (960, 540)
+        is_square = inp["media"]["aspect_ratio"] == "1:1"
+        if is_square:
+            full_w, full_h = (1080, 1080)
+            prev_w, prev_h = (540, 540)
+        elif is_portrait:
+            full_w, full_h = (1080, 1920)
+            prev_w, prev_h = (540, 960)
+        else:
+            full_w, full_h = (1920, 1080)
+            prev_w, prev_h = (960, 540)
         out_w = prev_w if (mode == "preview" or eff_profile == "quick") else full_w
         out_h = prev_h if (mode == "preview" or eff_profile == "quick") else full_h
         fps_n = int(inp["media"]["fps_num"])
         fps_d = int(inp["media"]["fps_den"])
         ff_thr = max(1, min(4, int(budget.get("ffmpeg_threads") or 2)))
+        rem_conc = max(1, min(2, int(budget.get("browser_render_concurrency") or 1)))
         eff_bgm = (eff_music != "OFF") and bool(ov_cfg.get("bgm_enabled", True))
         eff_sfx = (sfx_policy != "OFF") and bool(ov_cfg.get("sfx_enabled", True))
+        eff_enable_remotion = bool(use_hybrid_remotion or ov_cfg.get("enable_remotion", False))
+        eff_prefer_dx01 = bool(use_hybrid_remotion or ov_cfg.get("prefer_dx01_non_card", False))
+        eff_silent_policy = bool(ov_cfg.get("silent_policy", not inp["media"].get("has_audio", True)))
+        rem_cache_dir = (cache_dir.parent if cache_dir is not None else (rdir / "cache"))
 
-        # Optional bounded-parallel low-res candidate competition (NO 3x full-res renders!)
+        # DX01-08: Distinct candidate competition (structural dedup + visual fingerprint + real preview QA + normalized plan binding)
         cand_preview_receipts: list[dict[str, Any]] = []
+        skipped_duplicate_cands: list[dict[str, Any]] = []
         provisional_binding: dict[str, Any] | None = None
         selected_cand_id = str(owner_override_candidate_id or "cand_A")
         cand_variants: list[dict[str, Any]] = list(ov_cfg.get("candidate_variants") or [])
+        cand_specs_by_id: dict[str, dict[str, Any]] = {}
+
+        def _strip_ids_and_palette(spec_obj: dict[str, Any]) -> dict[str, Any]:
+            """Structural signature excluding IDs and palette/colors so color-only clones are detected."""
+            def _clean_ev(ev: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    k: v for k, v in ev.items()
+                    if k not in ("event_id", "track_id", "layer_id", "color", "accent", "bg_color", "palette")
+                }
+            return {
+                "visual_tracks": [_clean_ev(t) for t in (spec_obj.get("visual_tracks") or [])],
+                "layers": [_clean_ev(l) for l in (spec_obj.get("layers") or [])],
+                "footage_effects": [_clean_ev(f) for f in (spec_obj.get("footage_effects") or [])],
+                "transitions": [_clean_ev(tr) for tr in (spec_obj.get("transitions") or [])],
+                "camera_events": [_clean_ev(c) for c in (spec_obj.get("camera_events") or [])],
+                "overlays": [_clean_ev(o) for o in (spec_obj.get("overlays") or [])],
+                "effect_invocations": [_clean_ev(fx) for fx in (spec_obj.get("effect_invocations") or [])],
+            }
+
+        def _sample_mp4_visual_fingerprint(mp4_path: Path, n_frames: int) -> str:
+            import hashlib as _hl
+            import subprocess as _sp
+            fps_sample = max(0.05, 3.0 / max(0.5, n_frames / 24.0))
+            cmd = [
+                "ffmpeg", "-v", "error", "-nostdin", "-i", str(mp4_path),
+                "-vf", f"fps={fps_sample:.4f},scale=64:64:flags=area",
+                "-frames:v", "3", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+            ]
+            p = _sp.run(cmd, capture_output=True, timeout=30)
+            return _hl.sha256(p.stdout or b"").hexdigest()
 
         if compete_candidates and eff_profile in ("standard", "high"):
             # Build reusable low-res proxy ONLY for candidate previews (NEVER upscaled as final!)
@@ -1087,17 +1187,99 @@ def run_execute(
                 cache=ind_cache,
             )
             if not cand_variants:
+                # Synthesize genuinely distinct A/B/C structural strategies (framing, pullback, transitions, effect grammar)
+                prim_dur = float(src_reg["by_id"]["primary_aroll"]["video_duration_sec"])
+                tot_f_est = max(12, int(round(prim_dur * (fps_n / float(max(1, fps_d))))))
+                mid_f = max(4, tot_f_est // 2)
+                has_sec = len(sec_entries) > 0
+                sec_id = sec_entries[0]["source_id"] if has_sec else "primary_aroll"
+                sec_dur = float(src_reg["by_id"][sec_id]["video_duration_sec"]) if has_sec else prim_dur
+
+                # Candidate A: Clean subject-led framing with subtle micro-zoom and minimal lower/top motion
+                cand_a_tracks = ov_cfg.get("visual_tracks") or [{
+                    "track_id": "trk_01", "source_id": "primary_aroll", "mode": "source",
+                    "out_start_frame": 0, "out_end_frame": tot_f_est,
+                    "src_in_sec": 0.0, "src_out_sec": prim_dur,
+                    "scale_start": 1.0, "scale_end": 1.04, "cx_norm": 0.5, "cy_norm": 0.48,
+                    "transition_frames": 0, "transition_kind": "cut",
+                }]
+                # Candidate B: Evidence / Pullback-led framing (<1.0 pullback or multi-source dual-moving mask wipe!)
+                if has_sec and tot_f_est >= 24:
+                    cand_b_tracks = [
+                        {
+                            "track_id": "trk_01", "source_id": "primary_aroll", "mode": "source",
+                            "out_start_frame": 0, "out_end_frame": mid_f,
+                            "src_in_sec": 0.0, "src_out_sec": min(prim_dur, mid_f / (fps_n / float(max(1, fps_d)))),
+                            "scale_start": 1.0, "scale_end": 1.02, "cx_norm": 0.5, "cy_norm": 0.5,
+                            "transition_frames": 0, "transition_kind": "cut",
+                        },
+                        {
+                            "track_id": "trk_02", "source_id": sec_id, "mode": "source",
+                            "out_start_frame": mid_f, "out_end_frame": tot_f_est,
+                            "src_in_sec": min(0.2, max(0.0, sec_dur - 0.5)),
+                            "src_out_sec": min(sec_dur - 0.05, 0.2 + (tot_f_est - mid_f) / (fps_n / float(max(1, fps_d)))),
+                            "scale_start": 0.92, "scale_end": 0.96, "cx_norm": 0.5, "cy_norm": 0.5,
+                            "border_radius_px": 24,
+                            "transition_frames": min(6, max(2, mid_f // 4)),
+                            "transition_kind": "dx01.trans.mask_wipe",
+                            "transition_direction": "left",
+                        },
+                    ]
+                else:
+                    cand_b_tracks = [{
+                        "track_id": "trk_01", "source_id": "primary_aroll", "mode": "source",
+                        "out_start_frame": 0, "out_end_frame": tot_f_est,
+                        "src_in_sec": 0.0, "src_out_sec": prim_dur,
+                        "scale_start": 0.90, "scale_end": 0.96, "cx_norm": 0.5, "cy_norm": 0.5,
+                        "tilt_y_deg": 4.0, "border_radius_px": 28,
+                        "transition_frames": 0, "transition_kind": "cut",
+                    }]
+                # Candidate C: Contrast & camera rhythm variant (framed emphasis + exposure grade)
+                cand_c_tracks = [{
+                    "track_id": "trk_01", "source_id": "primary_aroll", "mode": "source",
+                    "out_start_frame": 0, "out_end_frame": tot_f_est,
+                    "src_in_sec": 0.0, "src_out_sec": prim_dur,
+                    "scale_start": 1.06, "scale_end": 1.01, "cx_norm": 0.5, "cy_norm": 0.44,
+                    "transition_frames": 0, "transition_kind": "cut",
+                }]
+                cand_c_ffx = [{
+                    "event_id": "ffx_c_grade", "effect_id": "dx01.footage.exposure_grade",
+                    "start_sec": 0.0, "end_sec": prim_dur,
+                    "params": {"exposure_gain": 1.04, "contrast": 1.06, "saturation": 1.05, "vignette": 0.14},
+                }]
+
                 cand_variants = [
-                    {"candidate_id": "cand_A", "label": "A", "strategy": "KOL_LED_EDITORIAL", "overlays": ov_cfg.get("semantic_overlays"), "camera_events": ov_cfg.get("camera_events"), "visual_tracks": ov_cfg.get("visual_tracks")},
-                    {"candidate_id": "cand_B", "label": "B", "strategy": "GRAPHIC_EVIDENCE_LED", "overlays": ov_cfg.get("semantic_overlays"), "camera_events": ov_cfg.get("camera_events"), "visual_tracks": ov_cfg.get("visual_tracks")},
-                    {"candidate_id": "cand_C", "label": "C", "strategy": "CONTRAST_INTERACTION_LED", "overlays": ov_cfg.get("semantic_overlays"), "camera_events": ov_cfg.get("camera_events"), "visual_tracks": ov_cfg.get("visual_tracks")},
+                    {
+                        "candidate_id": "cand_A", "label": "A", "strategy": "SUBJECT_CLEAN_PACED",
+                        "visual_tracks": cand_a_tracks,
+                        "overlays": ov_cfg.get("semantic_overlays"),
+                        "effect_invocations": ov_cfg.get("effect_invocations"),
+                        "camera_events": ov_cfg.get("camera_events"),
+                        "footage_effects": ov_cfg.get("footage_effects"),
+                    },
+                    {
+                        "candidate_id": "cand_B", "label": "B", "strategy": "EVIDENCE_PULLBACK_WIPE",
+                        "visual_tracks": cand_b_tracks,
+                        "overlays": ov_cfg.get("semantic_overlays"),
+                        "effect_invocations": ov_cfg.get("effect_invocations"),
+                        "camera_events": ov_cfg.get("camera_events"),
+                        "footage_effects": ov_cfg.get("footage_effects"),
+                    },
+                    {
+                        "candidate_id": "cand_C", "label": "C", "strategy": "CONTRAST_DYNAMIC_GRADE",
+                        "visual_tracks": cand_c_tracks,
+                        "overlays": ov_cfg.get("semantic_overlays"),
+                        "effect_invocations": ov_cfg.get("effect_invocations"),
+                        "camera_events": ov_cfg.get("camera_events"),
+                        "footage_effects": cand_c_ffx,
+                    },
                 ][: max(1, min(3, int(max_candidates)))]
 
-            def _render_one_cand(cv: dict[str, Any]) -> dict[str, Any]:
+            # Compile & structurally deduplicate BEFORE wasting render cycles on cosmetic clones!
+            unique_cand_jobs: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+            seen_struct_sigs: dict[str, str] = {}
+            for cv in cand_variants:
                 cid = str(cv["candidate_id"])
-                lbl = str(cv.get("label") or cid[-1])
-                cdir = rdir / "candidates" / lbl
-                cdir.mkdir(parents=True, exist_ok=True)
                 cspec = compile_semantic_timeline(
                     job_id=f"{run_id}_{cid}",
                     source_registry=proxy_reg,
@@ -1110,13 +1292,20 @@ def run_execute(
                     subject_action_tracks=sat_ind,
                     selection_receipt=sel_val["receipt"],
                     candidate_binding={"provisional_candidate_id": cid, "strategy": cv.get("strategy")},
-                    visual_tracks=cv.get("visual_tracks"),
-                    camera_events=cv.get("camera_events"),
-                    semantic_overlays=cv.get("overlays"),
+                    visual_tracks=cv.get("visual_tracks", ov_cfg.get("visual_tracks")),
+                    layers=cv.get("layers", ov_cfg.get("layers")),
+                    footage_effects=cv.get("footage_effects", ov_cfg.get("footage_effects")),
+                    transitions=cv.get("transitions", ov_cfg.get("transitions")),
+                    effect_invocations=cv.get("effect_invocations", ov_cfg.get("effect_invocations")),
+                    motion_director_plan=cv.get("motion_director_plan", ov_cfg.get("motion_director_plan")),
+                    camera_events=cv.get("camera_events", ov_cfg.get("camera_events")),
+                    semantic_overlays=cv.get("overlays", ov_cfg.get("semantic_overlays")),
                     sfx_cues=cv.get("sfx_cues", ov_cfg.get("sfx_cues")),
                     continuity_seams=cv.get("continuity_seams", ov_cfg.get("continuity_seams")),
                     occupancy_windows=cv.get("occupancy_windows", ov_cfg.get("occupancy_windows")),
                     art_tokens=cv.get("art_tokens", ov_cfg.get("art_tokens")),
+                    caption_policy=eff_caption,
+                    prefer_dx01_non_card=eff_prefer_dx01,
                     width=prev_w,
                     height=prev_h,
                     fps_num=fps_n,
@@ -1132,31 +1321,82 @@ def run_execute(
                     production_profile=eff_profile,
                     pass_through_allowed=bool(ov_cfg.get("pass_through_allowed", False)),
                 )
+                if eff_silent_policy:
+                    cspec["silent_policy"] = True
+                sig = hash_artifact(_strip_ids_and_palette(cspec))
+                if sig in seen_struct_sigs:
+                    skipped_duplicate_cands.append({
+                        "candidate_id": cid,
+                        "duplicate_of": seen_struct_sigs[sig],
+                        "structural_signature_sha256": sig,
+                        "reason": "SKIPPED_STRUCTURAL_DUPLICATE: identical tracks/layers/effects/overlays ignoring IDs and colors.",
+                    })
+                    continue
+                seen_struct_sigs[sig] = cid
+                cand_specs_by_id[cid] = cspec
+                unique_cand_jobs.append((cv, cspec, sig))
+
+            def _render_one_cand(item: tuple[dict[str, Any], dict[str, Any], str]) -> dict[str, Any]:
+                cv, cspec, sig = item
+                cid = str(cv["candidate_id"])
+                lbl = str(cv.get("label") or cid[-1])
+                cdir = rdir / "candidates" / lbl
+                cdir.mkdir(parents=True, exist_ok=True)
                 write_json_atomic(cdir / "spec.json", cspec)
                 cmp4 = cdir / f"preview_{cid}_{prev_w}x{prev_h}.mp4"
                 cres = render_independent_video(
                     cspec, out_mp4=cmp4, stems_dir=cdir / "stems",
                     cache=ind_cache, ffmpeg_threads=max(1, ff_thr // 2),
+                    enable_remotion=eff_enable_remotion,
+                    remotion_cache_root=rem_cache_dir,
+                    remotion_concurrency=1,
                 )
+                # Real candidate technical QA (coverage + isolated motion + spatial + continuity + audio, NOT decode-only!)
+                cqa = run_independent_render_qa(
+                    run_id=f"{run_id}_{cid}",
+                    run_dir=cdir,
+                    final_mp4=cmp4,
+                    render_spec=cspec,
+                    render_receipt=cres,
+                    reference_script=ov_cfg.get("reference_script") or inp.get("normalized_script"),
+                    mode="INDEPENDENT_PREVIEW",
+                    license_status=str(routing_decision.get("status") or "AUTHORIZED_INDEPENDENT_CLEAN_ROOM"),
+                    cache=ind_cache,
+                    run_post_asr=False,
+                    ffmpeg_threads=max(1, ff_thr // 2),
+                )
+                vfp = _sample_mp4_visual_fingerprint(cmp4, int(cres["nb_frames"]))
                 rec_c = {
                     "candidate_id": cid,
                     "label": lbl,
                     "strategy": str(cv.get("strategy") or cid),
+                    "engine_kind": cres["engine_kind"],
+                    "remotion_used": bool(cres.get("remotion_used")),
                     "spec_sha256": cspec["spec_sha256"],
+                    "normalized_creative_plan_sha256": cspec["normalized_creative_plan_sha256"],
+                    "structural_signature_sha256": sig,
+                    "visual_fingerprint_sha256": vfp,
                     "preview_mp4_path": cres["final_mp4_path"],
                     "preview_mp4_sha256": cres["final_mp4_sha256"],
                     "duration_sec": cres["duration_sec"],
                     "nb_frames": cres["nb_frames"],
-                    "preview_qa_pass": bool(cres["decode_qa_pass"]),
+                    "decode_qa_pass": bool(cres["decode_qa_pass"]),
+                    "preview_qa_pass": bool(cqa["technical_pass"]),
+                    "preview_qa_failing_gates": list(cqa["gate_matrix"].get("failing_gates") or []),
                     "elapsed_sec": cres["elapsed_sec"],
                 }
                 write_json_atomic(cdir / "PREVIEW_RECEIPT.json", rec_c)
                 return rec_c
 
             cand_pool_w = max(1, min(2, int(eff_workers)))
-            with ThreadPoolExecutor(max_workers=cand_pool_w) as cpool:
-                cand_preview_receipts = list(cpool.map(_render_one_cand, cand_variants))
+            if cand_pool_w > 1 and len(unique_cand_jobs) > 1:
+                with ThreadPoolExecutor(max_workers=cand_pool_w) as cpool:
+                    cand_preview_receipts = list(cpool.map(_render_one_cand, unique_cand_jobs))
+            else:
+                cand_preview_receipts = [_render_one_cand(j) for j in unique_cand_jobs]
             cand_preview_receipts.sort(key=lambda r: r["candidate_id"])
+
+            vfp_set = {r["visual_fingerprint_sha256"] for r in cand_preview_receipts}
             passing_cands = [r for r in cand_preview_receipts if r["preview_qa_pass"]]
             if not passing_cands:
                 transition_state(rdir, STATE_BLOCKED, reason="ALL_INDEPENDENT_CANDIDATES_FAILED_QA", run_id=run_id)
@@ -1169,22 +1409,28 @@ def run_execute(
                 bind_mode = "PROVISIONAL_TECHNICAL_DEFAULT_NOT_EDITORIALLY_APPROVED"
             sel_preview = next(r for r in passing_cands if r["candidate_id"] == selected_cand_id)
             provisional_binding = {
-                "schema_version": "kh03.provisional_binding.v1",
+                "schema_version": "kh03.provisional_binding.v2",
                 "run_id": run_id,
                 "provisional_candidate_id": selected_cand_id,
                 "winning_candidate_id": selected_cand_id,
                 "binding_mode": bind_mode,
                 "editorially_approved": False,
                 "preview_spec_sha256": sel_preview["spec_sha256"],
+                "normalized_creative_plan_sha256": sel_preview["normalized_creative_plan_sha256"],
                 "preview_mp4_sha256": sel_preview["preview_mp4_sha256"],
                 "selection_receipt_sha256": sel_sha,
+                "distinct_structural_count": len(cand_preview_receipts),
+                "distinct_visual_fingerprint_count": len(vfp_set),
+                "skipped_duplicates": skipped_duplicate_cands,
                 "candidates_evaluated": cand_preview_receipts,
             }
             provisional_binding["winner_binding_sha256"] = hash_artifact(provisional_binding)
             write_json_atomic(rdir / "manifests" / "PROVISIONAL_BINDING.json", provisional_binding)
+            write_json_atomic(rdir / "manifests" / "CANDIDATE_DIVERSITY_AND_BINDING.json", provisional_binding)
 
         chosen_cv = next((c for c in cand_variants if c.get("candidate_id") == selected_cand_id), {}) if cand_variants else {}
         # Compile canonical FULL-RES `INDEPENDENT_RENDER_SPEC_V2` from ORIGINAL source (NEVER proxy!)
+        # Strictly bound to winning candidate's exact normalized creative plan!
         ind_spec = compile_semantic_timeline(
             job_id=f"{run_id}_{selected_cand_id}",
             source_registry=src_reg,
@@ -1198,12 +1444,19 @@ def run_execute(
             selection_receipt=sel_val["receipt"],
             candidate_binding=provisional_binding or {"provisional_candidate_id": selected_cand_id},
             visual_tracks=chosen_cv.get("visual_tracks", ov_cfg.get("visual_tracks")),
+            layers=chosen_cv.get("layers", ov_cfg.get("layers")),
+            footage_effects=chosen_cv.get("footage_effects", ov_cfg.get("footage_effects")),
+            transitions=chosen_cv.get("transitions", ov_cfg.get("transitions")),
+            effect_invocations=chosen_cv.get("effect_invocations", ov_cfg.get("effect_invocations")),
+            motion_director_plan=chosen_cv.get("motion_director_plan", ov_cfg.get("motion_director_plan")),
             camera_events=chosen_cv.get("camera_events", ov_cfg.get("camera_events")),
             semantic_overlays=chosen_cv.get("overlays", ov_cfg.get("semantic_overlays")),
             sfx_cues=chosen_cv.get("sfx_cues", ov_cfg.get("sfx_cues")),
             continuity_seams=chosen_cv.get("continuity_seams", ov_cfg.get("continuity_seams")),
             occupancy_windows=chosen_cv.get("occupancy_windows", ov_cfg.get("occupancy_windows")),
             art_tokens=chosen_cv.get("art_tokens", ov_cfg.get("art_tokens")),
+            caption_policy=eff_caption,
+            prefer_dx01_non_card=eff_prefer_dx01,
             width=out_w,
             height=out_h,
             fps_num=fps_n,
@@ -1219,6 +1472,24 @@ def run_execute(
             production_profile=eff_profile,
             pass_through_allowed=bool(ov_cfg.get("pass_through_allowed", False)),
         )
+        if eff_silent_policy:
+            ind_spec["silent_policy"] = True
+            ind_spec["spec_sha256"] = hash_artifact({k: v for k, v in ind_spec.items() if k != "spec_sha256"})
+
+        # DX01-08 Fail-closed normalized plan hash parity check between winning preview & full-res render!
+        if provisional_binding is not None:
+            want_norm_sha = provisional_binding.get("normalized_creative_plan_sha256")
+            got_norm_sha = ind_spec.get("normalized_creative_plan_sha256")
+            if want_norm_sha and got_norm_sha != want_norm_sha:
+                transition_state(rdir, STATE_BLOCKED, reason=f"NORMALIZED_PLAN_DRIFT: preview={want_norm_sha[:12]} != final={str(got_norm_sha)[:12]}", run_id=run_id)
+                return {
+                    "exit_code": 1,
+                    "status": "CANDIDATE_PLAN_BINDING_DRIFT",
+                    "run_id": run_id,
+                    "preview_normalized_sha256": want_norm_sha,
+                    "final_normalized_sha256": got_norm_sha,
+                }
+
         write_json_atomic(rdir / "manifests" / "INDEPENDENT_RENDER_SPEC_V2.json", ind_spec)
         write_json_atomic(rdir / "manifests" / "INDEPENDENT_RENDER_SPEC.json", ind_spec)
 
@@ -1227,37 +1498,48 @@ def run_execute(
         ind_res = render_independent_video(
             ind_spec, out_mp4=out_mp4_ind, stems_dir=rdir / "stems",
             cache=ind_cache, ffmpeg_threads=ff_thr,
+            enable_remotion=eff_enable_remotion,
+            remotion_cache_root=rem_cache_dir,
+            remotion_concurrency=rem_conc,
         )
+        actual_engine_kind = str(ind_res.get("engine_kind") or RENDERER_INDEPENDENT_CLEAN_ROOM)
         write_json_atomic(rdir / "manifests" / "RENDER_PROOF.json", ind_res)
         write_json_atomic(rdir / "manifests" / "CACHE_MANIFEST.json", ind_cache.manifest())
 
-        # Mandatory fail-closed independent production QA (NOT decode-only!)
+        # Mandatory fail-closed independent/hybrid production QA (NOT decode-only!)
         qa_mode = "INDEPENDENT_PREVIEW" if (mode == "preview" or eff_profile == "quick") else "INDEPENDENT_FULL"
         ind_qa = run_independent_render_qa(
             run_id=run_id,
             run_dir=rdir,
             final_mp4=out_mp4_ind,
             render_spec=ind_spec,
+            render_receipt=ind_res,
             reference_script=ov_cfg.get("reference_script") or inp.get("normalized_script"),
             mode=qa_mode,
             license_status=str(routing_decision.get("status") or "AUTHORIZED_INDEPENDENT_CLEAN_ROOM"),
             cache=ind_cache,
             run_post_asr=bool(ov_cfg.get("run_post_asr", False)),
             asr_runner=ov_cfg.get("asr_runner"),
+            max_true_peak_dbtp=float(ov_cfg.get("max_true_peak_dbtp", -1.0)),
+            min_lufs=float(ov_cfg.get("min_lufs", -22.0)),
+            max_lufs=float(ov_cfg.get("max_lufs", -10.0)),
             ffmpeg_threads=ff_thr,
         )
         write_json_atomic(rdir / "manifests" / "CACHE_MANIFEST.json", ind_cache.manifest())
 
         rec4_doc = {
-            "schema_version": "kh03.stage_receipt.v1",
+            "schema_version": "kh03.stage_receipt.v2",
             "stage": "KH03_04_execute_and_qa",
             "run_id": run_id,
-            "engine_kind": RENDERER_INDEPENDENT_CLEAN_ROOM,
+            "engine_kind": actual_engine_kind,
+            "remotion_used": bool(ind_res.get("remotion_used")),
+            "remotion_verified": bool(ind_qa.get("remotion_verified")),
             "production_profile": eff_profile,
             "selected_skill_id": skill_id,
             "selection_receipt_sha256": sel_sha,
             "creative_plan_sha256": creative_plan["plan_sha256"],
             "spec_sha256": ind_spec["spec_sha256"],
+            "normalized_creative_plan_sha256": ind_spec.get("normalized_creative_plan_sha256"),
             "output_hashes": {
                 "final_mp4_sha256": ind_res["final_mp4_sha256"],
                 "spec_sha256": ind_spec["spec_sha256"],
@@ -1266,6 +1548,7 @@ def run_execute(
                 ind_res["final_mp4_path"],
                 str(rdir / "manifests" / "INDEPENDENT_RENDER_SPEC_V2.json"),
                 str(rdir / "qc" / "FINAL_GATE_MATRIX.json"),
+                str(rdir / "qc" / "ISOLATED_MOTION_PROOF.json"),
             ],
             "technical_pass": bool(ind_qa["technical_pass"]),
             "rss_tree": get_process_tree_rss_mib(),
@@ -1287,7 +1570,8 @@ def run_execute(
         write_json_atomic(rdir / "qc" / "MANUAL_EDITORIAL_REVIEW.json", {
             "schema_version": "kh03.manual_editorial_review.v2",
             "run_id": run_id,
-            "engine_kind": RENDERER_INDEPENDENT_CLEAN_ROOM,
+            "engine_kind": actual_engine_kind,
+            "remotion_verified": bool(ind_qa.get("remotion_verified")),
             "production_profile": eff_profile,
             "native_seecut_status": routing_decision["per_renderer_rights"][RENDERER_NATIVE_SEECUT]["status"],
             "lifecycle": lifecycle,
@@ -1300,18 +1584,19 @@ def run_execute(
         write_json_atomic(rdir / "manifests" / "MANUAL_EDITORIAL_REVIEW.json", parse_json_strict(rdir / "qc" / "MANUAL_EDITORIAL_REVIEW.json"))
         (rdir / "FINAL_RENDER_SHA256.txt").write_text(f"{ind_res['final_mp4_sha256']}  {out_mp4_ind.name}\n", encoding="utf-8")
 
-        transition_state(rdir, STATE_COMPILED, reason="Canonical INDEPENDENT_RENDER_SPEC_V2 compiled.", run_id=run_id)
-        transition_state(rdir, STATE_RENDERED, reason=f"Rendered via INDEPENDENT_FFMPEG_PIL ({ind_res['final_mp4_sha256'][:12]}).", run_id=run_id)
+        transition_state(rdir, STATE_COMPILED, reason="Canonical INDEPENDENT_RENDER_SPEC_V2 (+DX-01) compiled.", run_id=run_id)
+        transition_state(rdir, STATE_RENDERED, reason=f"Rendered via {actual_engine_kind} ({ind_res['final_mp4_sha256'][:12]}).", run_id=run_id)
         transition_state(rdir, STATE_QA, reason=f"Independent QA technical_pass={ind_qa['technical_pass']}.", run_id=run_id)
         if not ind_qa["technical_pass"]:
             transition_state(rdir, STATE_BLOCKED, reason=f"Independent technical QA FAILED: {ind_qa['gate_matrix'].get('failing_gates')}", run_id=run_id)
             return {
                 "exit_code": 1,
-                "status": "INDEPENDENT_TECHNICAL_QA_FAILED",
+                "status": "CANDIDATE_QA_FAILED",
                 "mode": mode,
                 "run_id": run_id,
                 "selected_skill_id": skill_id,
-                "engine_kind": RENDERER_INDEPENDENT_CLEAN_ROOM,
+                "engine_kind": actual_engine_kind,
+                "remotion_verified": bool(ind_qa.get("remotion_verified")),
                 "final_mp4_path": ind_res["final_mp4_path"],
                 "final_mp4_sha256": ind_res["final_mp4_sha256"],
                 "independent_qa": ind_qa,
@@ -1320,10 +1605,10 @@ def run_execute(
                 "final_approved": False,
             }
 
-        transition_state(rdir, STATE_CANDIDATE, reason="Candidate rendered & passed independent technical QA; OWNER_VISUAL/AUDIO PENDING.", run_id=run_id)
+        transition_state(rdir, STATE_CANDIDATE, reason=f"Candidate rendered via {actual_engine_kind} & passed technical QA; OWNER_VISUAL/AUDIO PENDING.", run_id=run_id)
         return {
             "exit_code": 0,
-            "status": "INDEPENDENT_CLEAN_ROOM_CANDIDATE_RENDERED",
+            "status": "HYBRID_REMOTION_CANDIDATE_RENDERED" if actual_engine_kind == RENDERER_HYBRID_REMOTION else "INDEPENDENT_CLEAN_ROOM_CANDIDATE_RENDERED",
             "mode": mode,
             "production_profile": eff_profile,
             "run_id": run_id,
@@ -1331,10 +1616,13 @@ def run_execute(
             "selection_receipt_sha256": sel_sha,
             "creative_plan_sha256": creative_plan["plan_sha256"],
             "spec_sha256": ind_spec["spec_sha256"],
-            "engine_kind": RENDERER_INDEPENDENT_CLEAN_ROOM,
+            "normalized_creative_plan_sha256": ind_spec.get("normalized_creative_plan_sha256"),
+            "engine_kind": actual_engine_kind,
+            "remotion_verified": bool(ind_qa.get("remotion_verified")),
             "renderer_routing": routing_decision,
             "provisional_binding": provisional_binding,
             "candidates": cand_preview_receipts,
+            "skipped_duplicate_candidates": skipped_duplicate_cands,
             "lifecycle": lifecycle,
             "final_mp4_path": ind_res["final_mp4_path"],
             "final_mp4_sha256": ind_res["final_mp4_sha256"],
@@ -1610,6 +1898,13 @@ def run_verify(
         iv = validate_render_spec(ind_doc)
         if not iv["pass"]:
             issues.append(f"INVALID_INDEPENDENT_RENDER_SPEC_V2: {iv['issues']}")
+        pb_p = rdir / "manifests" / "PROVISIONAL_BINDING.json"
+        if pb_p.is_file():
+            pb_doc = parse_json_strict(pb_p)
+            want_norm = pb_doc.get("normalized_creative_plan_sha256")
+            got_norm = ind_doc.get("normalized_creative_plan_sha256")
+            if want_norm and got_norm and want_norm != got_norm:
+                issues.append(f"NORMALIZED_PLAN_DRIFT: PROVISIONAL_BINDING ({want_norm[:12]}) != INDEPENDENT_RENDER_SPEC_V2 ({got_norm[:12]}).")
 
     cp = rdir / "manifests" / "CREATIVE_PLAN.json"
     sb = rdir / "SHOTBOOK_V2.json"
@@ -1709,7 +2004,10 @@ def run_verify(
                 raw_gates = dict(fgm_doc.get("gates") or {})
                 prof = resolve_gate_profile(fgm_doc.get("mode") or eff_vmode)
                 # Cross-check key raw evidence files on disk against stored gate status & MP4 SHA!
-                is_ind_mat = str(fgm_doc.get("engine_kind") or "").upper() == RENDERER_INDEPENDENT_CLEAN_ROOM or str(prof["mode"]).startswith("INDEPENDENT_")
+                is_ind_mat = (
+                    str(fgm_doc.get("engine_kind") or "").upper() in (RENDERER_INDEPENDENT_CLEAN_ROOM, RENDERER_HYBRID_REMOTION)
+                    or str(prof["mode"]).startswith("INDEPENDENT_")
+                )
                 if is_ind_mat:
                     evidence_file_checks = [
                         ("G_FRAME_AUDIT", rdir / "qc" / "FRAME_AUDIT.json"),
@@ -1719,6 +2017,12 @@ def run_verify(
                         ("G_CONTINUITY", rdir / "qc" / "CONTINUITY_QA.json"),
                         ("G_AUDIO_SYNC", rdir / "qc" / "AUDIO_QA.json"),
                     ]
+                    iso_p = rdir / "qc" / "ISOLATED_MOTION_PROOF.json"
+                    if iso_p.is_file():
+                        iso_d = parse_json_strict(iso_p)
+                        if iso_d.get("pass") is False and raw_gates.get("G_COMPONENT_COVERAGE", {}).get("status") == "PASS":
+                            issues.append("FORGED_GATE_PASS(G_COMPONENT_COVERAGE): ISOLATED_MOTION_PROOF.json reports pass=False.")
+                            raw_gates["G_COMPONENT_COVERAGE"] = {**raw_gates["G_COMPONENT_COVERAGE"], "status": "FAIL", "reason": "ISOLATED_MOTION_PROOF_FAILED"}
                 else:
                     evidence_file_checks = [
                         ("G_HOOK_PIXELS", rdir / "qc" / "HOOK_PIXEL_QA.json"),
@@ -1866,11 +2170,18 @@ def main(argv: list[str] | None = None) -> int:
     p_st = sub.add_parser("status", help="Inspect KH-03 state machine and binding receipt")
     p_st.add_argument("--run-root", required=True, type=Path)
 
+    p_cap = sub.add_parser("capabilities", help="Report live installed Remotion backend and DX-01 effect registry capabilities")
+    p_cap.add_argument("--remotion-workspace", type=Path, default=None)
+
     p_vf = sub.add_parser("verify", help="Verify selection receipt and KH-03 -> KH-02 SHA propagation")
     p_vf.add_argument("--run-root", required=True, type=Path)
     p_vf.add_argument("--require-render", action="store_true", default=False)
 
     args = ap.parse_args(argv)
+    if args.cmd == "capabilities":
+        out = run_capabilities(workspace_override=args.remotion_workspace)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
     if args.cmd == "preflight":
         out = run_preflight(
             run_dir=args.run_root,

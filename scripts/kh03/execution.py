@@ -172,11 +172,14 @@ def compute_resource_budget(
         chk = chk.parent
     du = shutil.disk_usage(str(chk))
     free_disk_gib = round(du.free / (1024.0 ** 3), 3)
+    total_disk_gib = round(du.total / (1024.0 ** 3), 3)
+    rec_disk_reserve_gib = round(max(10.0, total_disk_gib * 0.15), 3)
 
     total_ram_mib, avail_ram_mib = get_host_memory_mib()
     cur_rss_mib = get_process_rss_mib()
     safe_cap_mib = round(max(256.0, min(total_ram_mib * 0.45, max(512.0, avail_ram_mib * 0.70))), 2)
     mem_budget_mib = round(min(float(max_memory_mib), safe_cap_mib), 2) if max_memory_mib is not None else safe_cap_mib
+    browser_conc = 1 if avail_ram_mib < 8192.0 else max(1, min(2, eff_workers))
 
     status = "OK"
     reason = "Within calibrated host RAM, CPU, and disk reserve budgets."
@@ -207,11 +210,13 @@ def compute_resource_budget(
         "workers": eff_workers,
         "network_workers": net_workers,
         "heavy_render_concurrency": 1,
+        "browser_render_concurrency": browser_conc,
         "gpu_model_concurrency": 1,
         "decoder_pool": dec_pool,
         "queue_frames": q_frames,
         "ffmpeg_threads": ff_threads,
         "disk_reserve_gib": round(float(disk_reserve_gib), 3),
+        "recommended_disk_reserve_gib": rec_disk_reserve_gib,
         "max_disk_gib": round(float(max_disk_gib), 3) if max_disk_gib is not None else None,
         "free_disk_gib": free_disk_gib,
         "host_ram_mib": total_ram_mib,

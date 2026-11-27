@@ -22,10 +22,11 @@ from typing import Any
 from . import UPSTREAM_SEECUT_SHA
 from .contracts import hash_artifact, now_utc, verify_commercial_permission_evidence, write_json_atomic
 
-VALID_RENDERER_MODES = ("auto", "native_seecut", "independent_clean_room")
+VALID_RENDERER_MODES = ("auto", "native_seecut", "independent_clean_room", "hybrid_remotion")
 
 RENDERER_NATIVE_SEECUT = "NATIVE_SEECUT"
 RENDERER_INDEPENDENT_CLEAN_ROOM = "INDEPENDENT_FFMPEG_PIL"
+RENDERER_HYBRID_REMOTION = "HYBRID_REMOTION_FFMPEG"
 
 # Forbidden upstream tokens/imports inside clean-room independent renderer modules
 _FORBIDDEN_SEECUT_MARKERS = (
@@ -174,6 +175,8 @@ def select_renderer_backend(
     req = str(requested or "auto").strip().lower()
     if req in ("independent", "independent_ffmpeg_pil", "clean_room"):
         req = "independent_clean_room"
+    elif req in ("hybrid", "remotion", "hybrid_remotion_ffmpeg"):
+        req = "hybrid_remotion"
     elif req in ("native", "seecut"):
         req = "native_seecut"
     if req not in VALID_RENDERER_MODES:
@@ -211,6 +214,25 @@ def select_renderer_backend(
             allowed = True
             status = "AUTHORIZED_NATIVE_SEECUT"
             reason = "Native SeeCut authorized for requested purpose and runtime verified."
+    elif req == "hybrid_remotion":
+        from .remotion_adapter import probe_remotion_runtime
+        rem_pr = probe_remotion_runtime()
+        if indep_usable and rem_pr.get("ready"):
+            selected = RENDERER_HYBRID_REMOTION
+            allowed = True
+            status = "AUTHORIZED_HYBRID_REMOTION"
+            reason = (
+                f"Audited hybrid Remotion ({rem_pr.get('remotion_version')}) + clean-room FFmpeg/PIL renderer selected "
+                "(zero PolyForm Noncommercial SeeCut code/assets; Remotion License eligibility applies per deployment)."
+            )
+        elif indep_usable:
+            selected = RENDERER_INDEPENDENT_CLEAN_ROOM
+            allowed = True
+            status = "AUTHORIZED_INDEPENDENT_FALLBACK_REMOTION_UNAVAILABLE"
+            reason = f"Remotion backend unavailable ({rem_pr.get('status')}); fell back honestly to INDEPENDENT_FFMPEG_PIL."
+        else:
+            status = "BLOCKED_INDEPENDENT_AUDIT_FAILED"
+            reason = f"Hybrid/independent clean-room renderer failed audit: {indep_audit.get('isolation_violations')}"
     elif req == "independent_clean_room":
         if indep_usable:
             selected = RENDERER_INDEPENDENT_CLEAN_ROOM
@@ -334,6 +356,7 @@ def resolve_editorial_lifecycle(
 
 
 __all__ = [
+    "RENDERER_HYBRID_REMOTION",
     "RENDERER_INDEPENDENT_CLEAN_ROOM",
     "RENDERER_NATIVE_SEECUT",
     "VALID_RENDERER_MODES",

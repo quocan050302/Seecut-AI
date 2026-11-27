@@ -1,0 +1,111 @@
+{
+  "schema_version": "kh03.dx01.third_party_inventory.v1",
+  "audited_at_utc": "2026-11-26T09:40:00Z",
+  "base_branch": "origin/QA",
+  "base_sha": "3d906b16c7b16d258d544466bd180cb3c42cdd3c",
+  "dx01_branch": "feat/dx-01-universal-motion-remotion",
+  "runtime_engine": {
+    "name": "Remotion (local existing pinned workspace)",
+    "version": "4.0.545",
+    "packages_verified": [
+      {"name": "remotion", "version": "4.0.545", "license": "Remotion License (Free License for individuals, <=3-employee for-profit, non-profits, evaluation; Company License for >3-employee for-profit)"},
+      {"name": "@remotion/bundler", "version": "4.0.545", "license": "Remotion License"},
+      {"name": "@remotion/renderer", "version": "4.0.545", "license": "Remotion License"},
+      {"name": "@remotion/compositor-win32-x64-msvc", "version": "4.0.545", "license": "Remotion License"},
+      {"name": "@remotion/paths", "version": "4.0.545", "license": "MIT"},
+      {"name": "@remotion/captions", "version": "4.0.545", "license": "MIT"},
+      {"name": "@remotion/media-utils", "version": "4.0.545", "license": "MIT"},
+      {"name": "react", "version": "19.0.0", "license": "MIT"},
+      {"name": "react-dom", "version": "19.0.0", "license": "MIT"},
+      {"name": "typescript", "version": "5.8.2", "license": "Apache-2.0"}
+    ],
+    "license_summary": "Remotion is NOT blanket MIT; Free License permits commercial & non-commercial video creation for individuals, non-profits, evaluation, and for-profit organizations with up to 3 employees. Larger organizations must hold a Remotion Company License. Owner eligibility must be confirmed per deployment.",
+    "modified_existing_workspace": false,
+    "offline_capable": true,
+    "browser_strategy": "Local preinstalled Chromium/Chrome executable passed via browserExecutable; zero runtime downloads"
+  },
+  "upstream_sources_audited": [
+    {
+      "repo": "Remocn/remocn",
+      "url": "https://github.com/Remocn/remocn",
+      "commit_sha": "ac1e4081edcc70757db4dc4af32b079cb9ae5490",
+      "role": "primary_runtime_source",
+      "license_spdx": "MIT",
+      "license_file_verified": "LICENSE (MIT License, Copyright (c) 2026 Remocn)",
+      "eligibility_decision": "CURATED_ADAPTATION_MIT",
+      "findings": "MIT-licensed component registry (790 entries). Upstream components directly import @remotion/google-fonts (network fetch), @paper-design/shaders-react, and @remotion/transitions (uninstalled locally). Curated zero-network, zero-external-dep deterministic adaptations of before-after wipe, beat-count kinetic counter, animated bar/flow chart, beam/flare light sweep, and baseline/masked kinetic text were adapted cleanly using local fonts + pure Remotion 4.0.545 + @remotion/paths.",
+      "imported_or_adapted_files": [
+        "remotion_bridge/src/effects/CuratedRemocnPrimitives.tsx"
+      ]
+    },
+    {
+      "repo": "av/remotion-bits",
+      "url": "https://github.com/av/remotion-bits",
+      "commit_sha": "de35fda84b7b6acbe549a0b302a82ef211e8ef1e",
+      "role": "secondary_motion_primitives",
+      "license_spdx": "MIT",
+      "license_file_verified": "package.json (license: MIT) and README.md (## License: MIT); note no separate top-level LICENSE file",
+      "eligibility_decision": "CURATED_ADAPTATION_MIT",
+      "findings": "MIT declared in both package.json and README.md. Adapted deterministic seeded random helper pattern (using Remotion random(seed)), word/character staggered kinetic text animation, deterministic particle simulation, and numeric counter interpolation without pulling culori or three.",
+      "imported_or_adapted_files": [
+        "remotion_bridge/src/effects/CuratedBitsPrimitives.tsx"
+      ]
+    },
+    {
+      "repo": "remotion-dev/skills",
+      "url": "https://github.com/remotion-dev/skills",
+      "commit_sha": "a3f4098a2afd0e13f6a6f8c8760e275f75457ea9",
+      "role": "guidance_only",
+      "license_spdx": "NOASSERTION",
+      "license_file_verified": "Remotion official repository package (remotion-license reference); no code copied",
+      "eligibility_decision": "GUIDANCE_ONLY_NO_CODE_COPIED",
+      "findings": "Consulted as untrusted documentation reference for Remotion v4 renderMedia/bundle/selectComposition and deterministic useCurrentFrame best practices. Zero files copied."
+    },
+    {
+      "repo": "iart-ai/motion-skills",
+      "url": "https://github.com/iart-ai/motion-skills",
+      "commit_sha": "e8ba1f4eb2bcca3d1639d7545b9cd2bcfe4a3c6f",
+      "role": "guidance_only",
+      "license_spdx": "MIT",
+      "license_file_verified": "LICENSE (MIT License, Copyright (c) 2026 iart.ai)",
+      "eligibility_decision": "GUIDANCE_ONLY_NO_CODE_COPIED",
+      "findings": "Consulted for high-level motion design principles (contrast, negative space, typography pacing). Zero executable skill code copied."
+    },
+    {
+      "repo": "haidrrrry/claude-remotion-skill",
+      "url": "https://github.com/haidrrrry/claude-remotion-skill",
+      "commit_sha": "1dcbe5e3fc6cf970bd10d3cc05f0a8a5d19d0383",
+      "role": "guidance_only",
+      "license_spdx": "MIT",
+      "license_file_verified": "LICENSE (MIT License, Copyright (c) 2025 haidrrrry)",
+      "eligibility_decision": "GUIDANCE_ONLY_NO_CODE_COPIED",
+      "findings": "Consulted design-rules.md and motion-patterns.md as untrusted motion choreography guidance mapped into motion_director.py rules (anticipation-impact-settle, typography hierarchy, restraint). Zero code copied."
+    },
+    {
+      "repo": "GovinduSasanka/opus-motion-library",
+      "url": "https://github.com/GovinduSasanka/opus-motion-library",
+      "commit_sha": "7bde15aa904671fb0a1a06c2d88e7012dbab2069",
+      "role": "optional_research",
+      "license_spdx": "MIT",
+      "license_file_verified": "LICENSE (MIT) + THIRD_PARTY_NOTICES.md",
+      "eligibility_decision": "SKIPPED_SOURCE_NOT_NEEDED",
+      "findings": "Verified MIT, not required for DX-01 initial 26-effect catalog; skipped to keep bundle lean and fully audited."
+    },
+    {
+      "repo": "reactvideoeditor/remotion-templates",
+      "url": "https://github.com/reactvideoeditor/remotion-templates",
+      "commit_sha": "6209b724798e48ff395f8df1a6fa2d26082372b5",
+      "role": "optional_research",
+      "license_spdx": "NOASSERTION",
+      "license_file_verified": "No top-level LICENSE file verified",
+      "eligibility_decision": "SKIPPED_SOURCE_UNVERIFIED_LICENSE",
+      "findings": "Skipped: no verifiable top-level license file and not required."
+    }
+  ],
+  "seecut_polyform_isolation": {
+    "native_seecut_license": "PolyForm Noncommercial License 1.0.0",
+    "dx01_remotion_and_independent_uses_seecut_code": false,
+    "dx01_remotion_and_independent_uses_seecut_assets": false,
+    "problem_01_gate_preserved": true
+  }
+}

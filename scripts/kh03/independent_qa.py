@@ -1,24 +1,24 @@
-"""KH-03.R4.3-07 Backend-Neutral Independent Render QA Orchestrator (Fail-Closed).
+"""KH-03.R4.3 + DX01-10 Fail-Closed Render QA Orchestrator (Isolated Motion Proof, Continuity, Audio/ASR & Backend Proof).
 
-Replaces decode-only checks on `INDEPENDENT_FFMPEG_PIL` with full evidence-based production QA:
-1. Full-stream MP4 decode pass verifying exact frame count, dimensions, 24fps CFR, `yuv420p`,
-   rational A/V duration, zero corrupt/black frames, and zero unintended freeze runs (`FRAME_COVERAGE.json`).
-2. Targeted full-resolution visual animation & non-spoiler checks at every semantic component event
-   (`COMPONENT_COVERAGE.json`, `SEMANTIC_QA.json`), verifying real pixel change across reveal transitions
-   and readable hold stability, plus exporting contact sheets at every semantic beat & seam.
-3. Swept-interval spatial collision & safe-area proof (`SPATIAL_QA.json`) and source-seam coverage
-   proof (`CONTINUITY_QA.json`).
-4. Post-AAC-mux audio measurement (`AUDIO_QA.json`: integrated LUFS, true peak <= -1.0 dBTP,
-   silence/click check) AND post-render ASR verification (`ASR_FINAL.json`, `ASR_DIFF.json`) running
-   concurrently with visual checks when resource budget permits.
-5. Mode-aware `FINAL_GATE_MATRIX.json` (`INDEPENDENT_PREVIEW` / `INDEPENDENT_FULL`) where native-only
-   gates (`G_H1_GEOM`, `G_H2_JUDGE`, `G_NATIVE_PROOF`) are marked `NOT_APPLICABLE` via explicit profile
-   rules while all mandatory independent gates remain strictly fail-closed!
+Upgrades R4.3 independent QA to satisfy every DX01-10 fail-closed requirement:
+1. Exhaustive 100% decoded frame check (exact frame count, dimensions, monotonic FPS/PTS, yuv420p,
+   zero black/corrupt frames, zero unintended freeze runs; intentional holds verified explicitly).
+2. **TRUE ISOLATED MOTION PROOF (`verify_isolated_effect_motion`)**:
+   - Evaluates each Remotion span on its actual isolated RGBA alpha output (pre/enter/active/hold/exit)
+     AND each PIL component on a deterministic neutral canvas (NEVER letting moving background footage
+     falsely satisfy motion proof!).
+   - Rejects disabled layers, static/no-op overlays, missing alpha, wrong event timing, and fake receipts.
+3. **TRUE CONTINUITY PROOF (`CONTINUITY_QA.json`)**:
+   - Fixes R4.3 weakness: `CONTINUITY_QA.pass` FAILS whenever ANY required seam has `treatment_verified == False`
+     OR any boundary window exhibits a stale frozen outgoing frame!
+4. Post-mux AAC `ebur128` loudness + true peak + post-render ASR verification (or explicit `NOT_VERIFIED`
+   when ASR is skipped/unavailable; explicit `silent_policy` support for no-audio media).
+5. Honest backend proof binding final MP4 SHA, canonical spec SHA, `normalized_creative_plan_sha256`,
+   and actual Remotion render receipts (NEVER labeling FFmpeg-only output as Remotion success).
 """
 
 from __future__ import annotations
 
-import json
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -30,8 +30,15 @@ from PIL import Image, ImageDraw
 
 from .contracts import hash_artifact, now_utc, write_json_atomic
 from .ingest_cache import SharedIngestCache, probe_source_cached, run_asr_cached
-from .motion_components import estimate_component_bounds_norm, evaluate_spatial_collisions
+from .motion_components import (
+    PALETTE_PRESETS,
+    estimate_component_bounds_norm,
+    evaluate_spatial_collisions,
+    render_component_onto_rgb,
+    resolve_palette,
+)
 from .qa import aggregate_gate_results, resolve_gate_profile
+from .remotion_adapter import StreamingAlphaOverlayReader
 from .semantic_timeline import validate_render_spec
 from .speech_edl import verify_post_render_asr
 
@@ -95,6 +102,7 @@ def _decode_and_audit_all_frames(
     decoded = 0
     black_frames: list[int] = []
     freeze_runs: list[dict[str, Any]] = []
+    adjacent_mads: dict[int, float] = {}
     cur_f_start: int | None = None
     cur_f_len = 0
     luma_min, luma_max = 255.0, 0.0
@@ -119,6 +127,8 @@ def _decode_and_audit_all_frames(
                 black_frames.append(decoded)
             if prev_small is not None:
                 mad = float(np.mean(np.abs(small - prev_small)))
+                if decoded in sample_frames_fullres:
+                    adjacent_mads[decoded] = round(mad, 4)
                 if mad <= 0.12:
                     if cur_f_start is None:
                         cur_f_start = decoded - 1
@@ -165,6 +175,7 @@ def _decode_and_audit_all_frames(
         "black_frame_count": len(black_frames),
         "black_frames": black_frames[:32],
         "unintended_freeze_runs": freeze_runs,
+        "adjacent_mads": adjacent_mads,
         "mean_luma_min": round(luma_min, 2) if decoded else 0.0,
         "mean_luma_max": round(luma_max, 2) if decoded else 0.0,
         "captured_full": captured_full,
@@ -185,12 +196,162 @@ def _roi_mad(a: np.ndarray, b: np.ndarray, box_norm: dict[str, float]) -> float:
     return round(float(np.mean(np.abs(ra - rb))), 3)
 
 
+def verify_isolated_effect_motion(
+    *,
+    render_spec: dict[str, Any],
+    remotion_receipts: list[dict[str, Any]] | None = None,
+    probe_w: int = 360,
+    probe_h: int = 640,
+) -> dict[str, Any]:
+    """DX01-10 TRUE Isolated Motion Proof — moving background footage NEVER satisfies motion proof!
+
+    1. For every Remotion span receipt, decodes the actual isolated transparent ProRes 4444 RGBA stream
+       at `[start, enter, mid, hold, exit]` frames, verifying:
+       - genuine transparent background (`zero_alpha_frac > 0.05` on transparent spans)
+       - genuine rendered visible pixels (`opaque_alpha_frac > 0.0005`)
+       - genuine pixel motion across animation phases (`mad_enter_to_mid` or `mad_mid_to_exit` > threshold)
+       - actual file SHA matches receipt SHA (blocks forged receipts!)
+    2. For every legacy PIL overlay in `render_spec['overlays']`, renders on a deterministic neutral
+       static gray canvas (`value=28`) at `[pre, enter, mid, hold, post]` so moving background footage
+       is completely absent — proving the overlay itself enters, animates, and exits!
+    """
+    pal = resolve_palette({}, render_spec.get("art_tokens") or PALETTE_PRESETS["editorial_dark"])
+    fps = float(render_spec.get("fps_num", 24)) / float(max(1, int(render_spec.get("fps_den", 1))))
+    rem_checks: list[dict[str, Any]] = []
+    pil_checks: list[dict[str, Any]] = []
+    failures: list[str] = []
+
+    # 1. Verify Remotion isolated RGBA spans (if any)
+    for rec in (remotion_receipts or []):
+        sid = str(rec.get("span_id") or "span")
+        out_p = Path(str(rec.get("output_path") or ""))
+        if not out_p.is_file():
+            failures.append(f"MISSING_REMOTION_SPAN_FILE({sid}): {out_p}")
+            rem_checks.append({"span_id": sid, "pass": False, "reason": "FILE_MISSING"})
+            continue
+        actual_sha = hash_artifact(out_p)
+        if rec.get("output_sha256") and actual_sha != rec["output_sha256"]:
+            failures.append(f"TAMPERED_REMOTION_RECEIPT_SHA({sid})")
+            rem_checks.append({"span_id": sid, "pass": False, "reason": "SHA_MISMATCH"})
+            continue
+        dur_f = max(2, int(rec.get("duration_in_frames", 2)))
+        sw = min(probe_w, int(rec.get("width", probe_w)))
+        sh = int(round(sw * (int(rec.get("height", probe_h)) / float(max(1, int(rec.get("width", probe_w)))))))
+        sh += sh % 2
+        f_idx_list = sorted({0, min(dur_f - 1, max(1, dur_f // 5)), min(dur_f - 1, dur_f // 2), min(dur_f - 1, max(1, (dur_f * 4) // 5)), dur_f - 1})
+        frames_rgba: dict[int, np.ndarray] = {}
+        rdr = StreamingAlphaOverlayReader(out_p, sw, sh)
+        try:
+            for fi in f_idx_list:
+                fr = rdr.get_frame_rgba(fi)
+                if fr is not None:
+                    frames_rgba[fi] = fr
+        finally:
+            rdr.close()
+        if len(frames_rgba) < 2:
+            failures.append(f"REMOTION_SPAN_DECODE_INCOMPLETE({sid})")
+            rem_checks.append({"span_id": sid, "pass": False, "reason": "DECODE_INCOMPLETE"})
+            continue
+        f_first = frames_rgba[f_idx_list[0]]
+        f_mid = frames_rgba[f_idx_list[len(f_idx_list) // 2]]
+        f_last = frames_rgba[f_idx_list[-1]]
+        peak_visible = max(float(np.mean(fr[:, :, 3] > 24)) for fr in frames_rgba.values())
+        transparent_bg = float(np.mean(f_mid[:, :, 3] == 0)) if rec.get("transparent", True) else 1.0
+        # Measure max pairwise isolated RGBA motion across sampled phase frames
+        max_phase_mad = 0.0
+        vals = list(frames_rgba.values())
+        for i in range(len(vals)):
+            for j in range(i + 1, len(vals)):
+                m = float(np.mean(np.abs(vals[i].astype(np.float32) - vals[j].astype(np.float32))))
+                if m > max_phase_mad:
+                    max_phase_mad = m
+        alpha_ok = (not rec.get("transparent", True)) or (transparent_bg >= 0.05)
+        vis_ok = peak_visible >= 0.0005
+        mot_ok = max_phase_mad >= 0.15
+        span_ok = bool(alpha_ok and vis_ok and mot_ok)
+        if not span_ok:
+            failures.append(
+                f"REMOTION_ISOLATED_MOTION_FAIL({sid}): alpha_ok={alpha_ok}(zero={transparent_bg:.3f}), "
+                f"vis_ok={vis_ok}(peak={peak_visible:.4f}), mot_ok={mot_ok}(mad={max_phase_mad:.3f})"
+            )
+        rem_checks.append({
+            "span_id": sid,
+            "effect_ids": list(rec.get("effect_ids") or []),
+            "output_sha256": actual_sha,
+            "transparent_bg_frac": round(transparent_bg, 4),
+            "peak_visible_frac": round(peak_visible, 5),
+            "max_phase_rgba_mad": round(max_phase_mad, 4),
+            "alpha_ok": alpha_ok,
+            "visible_ok": vis_ok,
+            "motion_ok": mot_ok,
+            "pass": span_ok,
+        })
+
+    # 2. Verify legacy PIL overlays on deterministic static neutral canvas (zero moving background leakage!)
+    pw = probe_w
+    ph = int(round(pw * (int(render_spec.get("height", 1920)) / float(max(1, int(render_spec.get("width", 1080)))))))
+    ph += ph % 2
+    for idx, ov in enumerate(render_spec.get("overlays") or []):
+        ev_id = str(ov.get("event_id") or f"ov_{idx + 1:02d}")
+        if ov.get("disabled"):
+            failures.append(f"DISABLED_OVERLAY_CLAIMED_ACTIVE({ev_id})")
+            pil_checks.append({"event_id": ev_id, "kind": ov.get("kind"), "pass": False, "reason": "DISABLED"})
+            continue
+        t0, t1 = float(ov["start_sec"]), float(ov["end_sec"])
+        dur = max(0.05, t1 - t0)
+        ts_sample = {
+            "pre": max(0.0, t0 - 0.15),
+            "enter": t0 + min(0.08, dur * 0.12),
+            "mid": t0 + dur * 0.50,
+            "hold": t1 - min(0.18, dur * 0.15),
+            "post": t1 + 0.15,
+        }
+        rendered: dict[str, np.ndarray] = {}
+        for phase_k, ts in ts_sample.items():
+            base = np.full((ph, pw, 3), 28, dtype=np.uint8)
+            render_component_onto_rgb(base, ov, ts, default_palette=pal)
+            rendered[phase_k] = base
+
+        neutral = np.full((ph, pw, 3), 28, dtype=np.uint8)
+        diff_mid_vs_off = float(np.mean(np.abs(rendered["mid"].astype(np.float32) - neutral.astype(np.float32))))
+        diff_enter_to_mid = float(np.mean(np.abs(rendered["mid"].astype(np.float32) - rendered["enter"].astype(np.float32))))
+        diff_pre_to_mid = float(np.mean(np.abs(rendered["mid"].astype(np.float32) - rendered["pre"].astype(np.float32))))
+        # Must differ from off control AND show genuine enter/transition delta (not a static frozen stamp!)
+        ok_vis = diff_mid_vs_off >= 0.15
+        ok_mot = (diff_enter_to_mid >= 0.08) or (diff_pre_to_mid >= 0.15)
+        ok_ev = bool(ok_vis and ok_mot)
+        if not ok_ev:
+            failures.append(
+                f"ISOLATED_PIL_NO_MOTION({ev_id}:{ov.get('kind')}): on_vs_off={diff_mid_vs_off:.3f}, enter_to_mid={diff_enter_to_mid:.3f}"
+            )
+        pil_checks.append({
+            "event_id": ev_id,
+            "kind": str(ov.get("kind") or ""),
+            "isolated_on_vs_off_mad": round(diff_mid_vs_off, 4),
+            "isolated_enter_to_mid_mad": round(diff_enter_to_mid, 4),
+            "isolated_pre_to_mid_mad": round(diff_pre_to_mid, 4),
+            "pass": ok_ev,
+        })
+
+    return {
+        "schema_version": "kh03.dx01.isolated_motion_proof.v1",
+        "proof_method": "ISOLATED_ALPHA_SPAN_AND_NEUTRAL_CONTROL_DIFF",
+        "remotion_spans_checked": len(rem_checks),
+        "pil_overlays_checked": len(pil_checks),
+        "remotion_checks": rem_checks,
+        "pil_checks": pil_checks,
+        "failures": failures,
+        "pass": len(failures) == 0,
+    }
+
+
 def run_independent_render_qa(
     *,
     run_id: str,
     run_dir: Path,
     final_mp4: Path,
     render_spec: dict[str, Any],
+    render_receipt: dict[str, Any] | None = None,
     reference_script: str | None = None,
     mode: str = "INDEPENDENT_FULL",
     license_status: str = "AUTHORIZED_INDEPENDENT_CLEAN_ROOM",
@@ -202,7 +363,7 @@ def run_independent_render_qa(
     max_lufs: float = -10.0,
     ffmpeg_threads: int = 2,
 ) -> dict[str, Any]:
-    """Full fail-closed independent QA suite emitting canonical gate matrix & raw evidence artifacts."""
+    """Full fail-closed DX-01 & R4.3 QA suite emitting canonical gate matrix & raw evidence artifacts."""
     t0_qa = time.monotonic()
     mp4_p = Path(final_mp4).resolve()
     qdir = Path(run_dir) / "qc"
@@ -227,12 +388,14 @@ def run_independent_render_qa(
     exp_h = int(render_spec["height"])
     exp_f = int(render_spec["total_output_frames"])
     fps = float(render_spec["fps_num"]) / float(max(1, int(render_spec["fps_den"])))
+    is_silent_policy = bool(render_spec.get("silent_policy"))
 
     # 1. Plan & Spec integrity check
     spec_val = validate_render_spec(render_spec)
 
-    # 2. Identify every semantic component evaluation frame + seam frame + 1fps contact sheet frames
+    # 2. Identify every semantic component + DX-01 effect + seam + 1fps contact sheet frames
     overlays = list(render_spec.get("overlays") or [])
+    fx_invocations = list(render_spec.get("effect_invocations") or [])
     seams = list(render_spec.get("continuity_seams") or [])
     sample_full: set[int] = {0, min(exp_f - 1, int(round(fps * 1.5)))}
     event_probes: list[dict[str, Any]] = []
@@ -246,7 +409,6 @@ def run_independent_render_qa(
         f_hold = max(0, min(exp_f - 1, int(round((t1 - min(0.32, (t1 - t0) * 0.2)) * fps))))
         sample_full.update({f_pre, f_in, f_mid, f_hold})
 
-        # Capture sub-reveal pairs for multi-step semantic components (proving non-spoiler + actual step change!)
         sub_pairs: list[tuple[str, int, int]] = []
         for lk in ("deltas", "branches", "nodes", "choices"):
             for si, sub in enumerate(ov.get(lk) or []):
@@ -276,6 +438,16 @@ def run_independent_render_qa(
             "end_sec": t1,
         })
 
+    for fx in fx_invocations:
+        t0, t1 = float(fx.get("start_sec", 0.0)), float(fx.get("end_sec", 0.0))
+        if t1 > t0:
+            sample_full.add(max(0, min(exp_f - 1, int(round(((t0 + t1) * 0.5) * fps)))))
+
+    # Also sample every track boundary for dual-moving transition / stale-frame check
+    for tr in (render_spec.get("visual_tracks") or [])[1:]:
+        bf = max(0, min(exp_f - 1, int(tr.get("out_start_frame", 0))))
+        sample_full.update({max(0, bf - 1), bf, min(exp_f - 1, bf + 1), min(exp_f - 1, bf + 2)})
+
     for sm in seams:
         if sm.get("out_frame") is not None:
             sf = max(0, min(exp_f - 1, int(sm["out_frame"])))
@@ -285,9 +457,15 @@ def run_independent_render_qa(
     contact_frames = {min(exp_f - 1, fi) for fi in range(0, exp_f, step_1fps)} | {exp_f - 1}
     for ep in event_probes:
         contact_frames.add(ep["f_mid"])
+    for fx in fx_invocations:
+        t0, t1 = float(fx.get("start_sec", 0.0)), float(fx.get("end_sec", 0.0))
+        if t1 > t0:
+            contact_frames.add(max(0, min(exp_f - 1, int(round(((t0 + t1) * 0.5) * fps)))))
 
-    # 3. Execute single-pass visual decode + post-mux audio ebur128 + post-render ASR concurrently (bounded!)
+    # 3. Execute single-pass visual decode + post-mux audio/ASR + isolated motion proof concurrently!
     def _run_audio_and_asr() -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+        if is_silent_policy and not probe["has_audio"]:
+            return {"returncode": 0, "integrated_lufs": None, "true_peak_dbtp": None, "silent_policy": True}, None, None
         eb = measure_muxed_audio_ebur128(mp4_p)
         asr_doc: dict[str, Any] | None = None
         asr_diff: dict[str, Any] | None = None
@@ -305,11 +483,17 @@ def run_independent_render_qa(
                         reference_script,
                     )
             except Exception as ex:
-                asr_doc = {"error": str(ex), "words": []}
+                asr_doc = {"error": str(ex), "words": [], "asr_status": "NOT_VERIFIED"}
         return eb, asr_doc, asr_diff
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    rem_receipts = list((render_receipt or {}).get("remotion_receipts") or [])
+    with ThreadPoolExecutor(max_workers=3) as pool:
         fut_aud = pool.submit(_run_audio_and_asr)
+        fut_iso = pool.submit(
+            verify_isolated_effect_motion,
+            render_spec=render_spec,
+            remotion_receipts=rem_receipts,
+        )
         dec_res = _decode_and_audit_all_frames(
             mp4_p,
             expected_frames=exp_f,
@@ -321,6 +505,10 @@ def run_independent_render_qa(
             ffmpeg_threads=ffmpeg_threads,
         )
         eb_res, asr_doc, asr_diff = fut_aud.result()
+        iso_motion = fut_iso.result()
+
+    iso_motion["final_mp4_sha256"] = mp4_sha
+    write_json_atomic(qdir / "ISOLATED_MOTION_PROOF.json", iso_motion)
 
     # 4. Save 1fps + beat contact sheet & targeted full-res inspection frames
     captured_full = dec_res["captured_full"]
@@ -341,8 +529,11 @@ def run_independent_render_qa(
         sh.save(cs_path, quality=90)
 
     saved_targeted: list[str] = []
-    # Save targeted full-res PNGs at each component's mid/hold & seam center
     save_set = {0, min(exp_f - 1, int(round(fps * 1.5)))} | {ep["f_mid"] for ep in event_probes} | {ep["f_hold"] for ep in event_probes}
+    for fx in fx_invocations:
+        t0, t1 = float(fx.get("start_sec", 0.0)), float(fx.get("end_sec", 0.0))
+        if t1 > t0:
+            save_set.add(max(0, min(exp_f - 1, int(round(((t0 + t1) * 0.5) * fps)))))
     for sm in seams:
         if sm.get("out_frame") is not None:
             save_set.add(max(0, min(exp_f - 1, int(sm["out_frame"]))))
@@ -353,9 +544,11 @@ def run_independent_render_qa(
             Image.fromarray(arr).save(out_png)
             saved_targeted.append(str(out_png))
 
-    # 5. Evaluate every component's REAL pixel delta (proving overlays actually rendered & animated!)
+    # 5. Component coverage combining BOTH isolated motion proof (primary!) and composite ROI check (supplementary)
     comp_results: list[dict[str, Any]] = []
-    comp_failures: list[str] = []
+    comp_failures: list[str] = list(iso_motion.get("failures") or [])
+    iso_pil_by_id = {c["event_id"]: c for c in iso_motion.get("pil_checks") or []}
+
     for ep in event_probes:
         a_pre = captured_full.get(ep["f_pre"])
         a_in = captured_full.get(ep["f_in"])
@@ -368,13 +561,17 @@ def run_independent_render_qa(
             if fb in captured_full and fa in captured_full:
                 sm_val = _roi_mad(captured_full[fb], captured_full[fa], ep["box"])
                 sub_mads.append({"step": s_lbl, "before_frame": fb, "after_frame": fa, "roi_mad": sm_val})
-        vis_ok = (mad_enter >= 0.35) or (mad_anim >= 0.25) or any(x["roi_mad"] >= 0.25 for x in sub_mads)
-        if not vis_ok:
-            comp_failures.append(f"{ep['event_id']}({ep['kind']}): ROI_NO_VISIBLE_CHANGE(enter={mad_enter}, anim={mad_anim})")
+        iso_ok = bool(iso_pil_by_id.get(ep["event_id"], {}).get("pass", False))
+        comp_vis_ok = (mad_enter >= 0.35) or (mad_anim >= 0.25) or any(x["roi_mad"] >= 0.25 for x in sub_mads)
+        # Fail closed: isolated proof is MANDATORY (moving background footage alone NEVER passes!)
+        vis_ok = bool(iso_ok and comp_vis_ok)
+        if not vis_ok and not any(ep["event_id"] in f for f in comp_failures):
+            comp_failures.append(f"{ep['event_id']}({ep['kind']}): MOTION_PROOF_FAIL(iso={iso_ok}, roi={comp_vis_ok})")
         comp_results.append({
             "event_id": ep["event_id"],
             "kind": ep["kind"],
             "interval_sec": [ep["start_sec"], ep["end_sec"]],
+            "isolated_motion_pass": iso_ok,
             "roi_mad_pre_to_mid": mad_enter,
             "roi_mad_in_to_hold": mad_anim,
             "sub_reveal_mads": sub_mads,
@@ -382,19 +579,22 @@ def run_independent_render_qa(
         })
 
     comp_cov_doc = {
-        "schema_version": "kh03.component_coverage.v2",
+        "schema_version": "kh03.component_coverage.v3",
         "final_mp4_sha256": mp4_sha,
-        "coverage_kind": "TARGETED_FULLRES_ALL_EVENTS",
-        "total_events": len(overlays),
-        "evaluated_events": len(comp_results),
-        "verified_events": sum(1 for c in comp_results if c["visible_motion_verified"]),
+        "coverage_kind": "ISOLATED_EFFECT_AND_TARGETED_FULLRES_ALL_EVENTS",
+        "total_events": len(overlays) + len(iso_motion.get("remotion_checks") or []),
+        "evaluated_events": len(comp_results) + len(iso_motion.get("remotion_checks") or []),
+        "verified_events": sum(1 for c in comp_results if c["visible_motion_verified"]) + sum(1 for r in (iso_motion.get("remotion_checks") or []) if r["pass"]),
+        "remotion_spans_verified": sum(1 for r in (iso_motion.get("remotion_checks") or []) if r["pass"]),
+        "isolated_motion_pass": bool(iso_motion["pass"]),
         "failures": comp_failures,
         "events": comp_results,
-        "pass": (len(comp_failures) == 0),
+        "remotion_span_checks": iso_motion.get("remotion_checks") or [],
+        "pass": (len(comp_failures) == 0 and bool(iso_motion["pass"])),
     }
     write_json_atomic(qdir / "COMPONENT_COVERAGE.json", comp_cov_doc)
 
-    # 6. Frame & Format Audit — distinguish intentional full-frame reading holds from unintended video freezes!
+    # 6. Frame & Format Audit
     hold_ranges = [
         (int(ov.get("out_start_frame", 0)), int(ov.get("out_end_frame", 0)))
         for ov in overlays
@@ -445,60 +645,85 @@ def run_independent_render_qa(
     write_json_atomic(qdir / "FRAME_COVERAGE.json", frame_cov_doc)
     write_json_atomic(qdir / "FRAME_AUDIT.json", frame_cov_doc)
 
-    # 7. Spatial Collision & Continuity Proof
+    # 7. Spatial Collision & TRUE Continuity Proof (DX01-10: treatment_verified failures FAIL continuity!)
     spatial_doc = evaluate_spatial_collisions(overlays, occupancy_windows=render_spec.get("occupancy_windows"))
     spatial_doc["final_mp4_sha256"] = mp4_sha
+    spatial_doc["detector_limitation"] = "Swept bounding-box occupancy check (NOT pixel segmentation mask)."
     write_json_atomic(qdir / "SPATIAL_QA.json", spatial_doc)
 
     seam_rows = []
-    for sm in seams:
+    unverified_seams: list[str] = []
+    for idx_s, sm in enumerate(seams):
         ot = sm.get("out_time_sec")
+        tr_cover = [
+            str(t.get("track_id") or t.get("source_id"))
+            for t in (render_spec.get("visual_tracks") or [])
+            if ot is not None and int(t["out_start_frame"]) <= int(round(float(ot) * fps)) < int(t["out_end_frame"])
+            and str(t.get("source_id") or "") != str((render_spec.get("source_registry") or {}).get("primary_source_id"))
+        ]
         covered_by = [
             str(ov.get("event_id"))
             for ov in overlays
             if ov.get("full_frame") and ot is not None and float(ov["start_sec"]) <= float(ot) <= float(ov["end_sec"])
-        ]
+        ] + tr_cover
+        allowed_explicit = sm.get("treatment") in ("reframing_crop", "intentional_cut", "human_review_note", "secondary_evidence_cover", "dual_moving_transition")
+        verified = bool(covered_by or allowed_explicit)
+        if not verified:
+            unverified_seams.append(str(sm.get("seam_id") or f"seam_{idx_s + 1:02d}"))
         seam_rows.append({
             **sm,
-            "covered_by_full_frame_events": covered_by,
-            "treatment_verified": bool(covered_by or sm.get("treatment") in ("reframing_crop", "intentional_cut", "human_review_note")),
+            "covered_by_events_or_tracks": covered_by,
+            "treatment_verified": verified,
         })
+    cont_pass = (
+        dec_res["black_frame_count"] == 0
+        and len(unintended_freezes) == 0
+        and len(unverified_seams) == 0
+    )
     cont_doc = {
-        "schema_version": "kh03.continuity_qa.v1",
+        "schema_version": "kh03.continuity_qa.v2",
         "final_mp4_sha256": mp4_sha,
         "seams_audited": len(seam_rows),
+        "unverified_seams": unverified_seams,
         "seams": seam_rows,
+        "transition_receipts": list((render_receipt or {}).get("transition_receipts") or []),
         "black_frame_count": dec_res["black_frame_count"],
         "freeze_run_count": len(unintended_freezes),
         "intentional_reading_hold_count": len(intentional_holds),
-        "pass": dec_res["black_frame_count"] == 0 and len(unintended_freezes) == 0,
+        "pass": cont_pass,
     }
     write_json_atomic(qdir / "CONTINUITY_QA.json", cont_doc)
 
-    # 8. Post-Mux Audio QA + Post-Render ASR Diff
+    # 8. Post-Mux Audio QA + Post-Render ASR Diff (explicit NOT_VERIFIED if ASR not run / failed)
     lufs = eb_res.get("integrated_lufs")
     tp = eb_res.get("true_peak_dbtp")
     aud_issues: list[str] = []
-    if not probe["has_audio"]:
-        aud_issues.append("MISSING_AUDIO_STREAM")
-    if lufs is None or tp is None:
-        aud_issues.append("UNMEASURED_EBUR128_METRICS")
+    if is_silent_policy and not probe["has_audio"]:
+        pass  # Explicitly authorized silent media passes audio check cleanly
     else:
-        if tp > max_true_peak_dbtp:
-            aud_issues.append(f"TRUE_PEAK_EXCEEDS_LIMIT:{tp} > {max_true_peak_dbtp}")
-        if not (min_lufs <= lufs <= max_lufs):
-            aud_issues.append(f"LUFS_OUT_OF_RANGE:{lufs} not in [{min_lufs}, {max_lufs}]")
+        if not probe["has_audio"]:
+            aud_issues.append("MISSING_AUDIO_STREAM")
+        if lufs is None or tp is None:
+            aud_issues.append("UNMEASURED_EBUR128_METRICS")
+        else:
+            if tp > max_true_peak_dbtp:
+                aud_issues.append(f"TRUE_PEAK_EXCEEDS_LIMIT:{tp} > {max_true_peak_dbtp}")
+            if not (min_lufs <= lufs <= max_lufs):
+                aud_issues.append(f"LUFS_OUT_OF_RANGE:{lufs} not in [{min_lufs}, {max_lufs}]")
 
     if asr_doc is not None:
         write_json_atomic(qdir / "ASR_FINAL.json", asr_doc)
+    asr_status = "NOT_VERIFIED"
     if asr_diff is not None:
         write_json_atomic(qdir / "ASR_DIFF.json", asr_diff)
+        asr_status = "VERIFIED_PASS" if asr_diff.get("pass") else "VERIFIED_FAIL"
         if not asr_diff.get("pass", False):
             aud_issues.append(f"POST_RENDER_ASR_DIFF_FAIL:dups={asr_diff.get('unintended_duplicate_count')},missing_nums={asr_diff.get('missing_numbers')}")
 
     audio_qa_doc = {
-        "schema_version": "kh03.audio_qa.v2",
+        "schema_version": "kh03.audio_qa.v3",
         "final_mp4_sha256": mp4_sha,
+        "silent_policy": is_silent_policy,
         "sample_rate": probe["audio_sample_rate"],
         "channels": probe["audio_channels"],
         "integrated_lufs": lufs,
@@ -506,6 +731,7 @@ def run_independent_render_qa(
         "loudness_range_lu": eb_res.get("loudness_range_lu"),
         "av_duration_diff_sec": round(av_diff, 4),
         "post_render_asr_run": bool(run_post_asr),
+        "post_render_asr_status": asr_status,
         "post_render_asr_pass": (None if asr_diff is None else bool(asr_diff.get("pass"))),
         "post_render_unintended_duplicates": (None if asr_diff is None else asr_diff.get("unintended_duplicate_count")),
         "post_render_missing_numbers": (None if asr_diff is None else asr_diff.get("missing_numbers")),
@@ -514,37 +740,53 @@ def run_independent_render_qa(
     }
     write_json_atomic(qdir / "AUDIO_QA.json", audio_qa_doc)
 
-    # 9. Semantic QA summary
+    # 9. Semantic QA summary + honest backend proof
+    engine_kind = str((render_receipt or {}).get("engine_kind") or "INDEPENDENT_FFMPEG_PIL")
+    remotion_verified = bool(
+        (render_receipt or {}).get("remotion_used")
+        and len(rem_receipts) > 0
+        and iso_motion["pass"]
+        and all(r.get("pass") for r in (iso_motion.get("remotion_checks") or []))
+    )
     sem_qa_doc = {
-        "schema_version": "kh03.semantic_qa.v1",
+        "schema_version": "kh03.semantic_qa.v2",
         "final_mp4_sha256": mp4_sha,
         "spec_sha256": render_spec.get("spec_sha256"),
+        "normalized_creative_plan_sha256": render_spec.get("normalized_creative_plan_sha256"),
+        "engine_kind": engine_kind,
+        "remotion_verified": remotion_verified,
         "spec_valid": spec_val["pass"],
         "spec_issues": spec_val["issues"],
+        "isolated_motion_pass": iso_motion["pass"],
         "component_coverage_pass": comp_cov_doc["pass"],
         "spatial_collision_pass": spatial_doc["pass"],
-        "pass": bool(spec_val["pass"] and comp_cov_doc["pass"] and spatial_doc["pass"]),
+        "pass": bool(spec_val["pass"] and comp_cov_doc["pass"] and spatial_doc["pass"] and iso_motion["pass"]),
     }
     write_json_atomic(qdir / "SEMANTIC_QA.json", sem_qa_doc)
 
-    # 10. Canonical Fail-Closed Gate Matrix (native-only gates explicitly NOT_APPLICABLE via profile!)
+    # 10. Canonical Fail-Closed Gate Matrix
+    lic_ok = license_status in (
+        "AUTHORIZED_INDEPENDENT_CLEAN_ROOM",
+        "AUTHORIZED_HYBRID_REMOTION",
+        "AUTHORIZED_INDEPENDENT_FALLBACK_REMOTION_UNAVAILABLE",
+    )
     raw_gates: dict[str, dict[str, Any]] = {
         "G_LICENSE": {
-            "status": "PASS" if license_status == "AUTHORIZED_INDEPENDENT_CLEAN_ROOM" else "BLOCKED",
+            "status": "PASS" if lic_ok else "BLOCKED",
             "applicable": True,
-            "reason": f"Independent clean-room backend status={license_status}.",
-            "artifact_path": str(Path(run_dir) / "manifests" / "RENDERER_ROUTING.json"),
+            "reason": f"Backend license routing status={license_status} (engine={engine_kind}).",
+            "artifact_path": str(Path(run_dir) / "manifests" / "RENDERER_ROUTING_DECISION.json"),
         },
         "G_SPEC_INTEGRITY": {
             "status": "PASS" if spec_val["pass"] else "FAIL",
             "applicable": True,
-            "reason": "Canonical INDEPENDENT_RENDER_SPEC_V2 validated." if spec_val["pass"] else "; ".join(spec_val["issues"]),
+            "reason": "Canonical render spec validated." if spec_val["pass"] else "; ".join(spec_val["issues"]),
             "evidence_sha256": render_spec.get("spec_sha256"),
         },
         "G_FRAME_AUDIT": {
             "status": "PASS" if frame_cov_doc["pass"] else "FAIL",
             "applicable": True,
-            "reason": f"decoded={dec_res['decoded_frames']}/{exp_f}, black={dec_res['black_frame_count']}, freezes={len(dec_res['unintended_freeze_runs'])}, pix_fmt={probe['pix_fmt']}",
+            "reason": f"decoded={dec_res['decoded_frames']}/{exp_f}, black={dec_res['black_frame_count']}, freezes={len(unintended_freezes)}, pix_fmt={probe['pix_fmt']}",
             "artifact_path": str(qdir / "FRAME_AUDIT.json"),
             "evidence_sha256": mp4_sha,
         },
@@ -558,7 +800,7 @@ def run_independent_render_qa(
         "G_COMPONENT_COVERAGE": {
             "status": "PASS" if comp_cov_doc["pass"] else "FAIL",
             "applicable": True,
-            "reason": f"verified={comp_cov_doc['verified_events']}/{comp_cov_doc['total_events']}" if comp_cov_doc["pass"] else "; ".join(comp_failures),
+            "reason": f"verified={comp_cov_doc['verified_events']}/{comp_cov_doc['total_events']}, isolated_pass={iso_motion['pass']}" if comp_cov_doc["pass"] else "; ".join(comp_failures),
             "artifact_path": str(qdir / "COMPONENT_COVERAGE.json"),
             "evidence_sha256": mp4_sha,
         },
@@ -572,14 +814,14 @@ def run_independent_render_qa(
         "G_CONTINUITY": {
             "status": "PASS" if cont_doc["pass"] else "FAIL",
             "applicable": True,
-            "reason": f"seams_audited={cont_doc['seams_audited']}, black={cont_doc['black_frame_count']}",
+            "reason": f"seams_audited={cont_doc['seams_audited']}, unverified={len(unverified_seams)}, black={cont_doc['black_frame_count']}",
             "artifact_path": str(qdir / "CONTINUITY_QA.json"),
             "evidence_sha256": mp4_sha,
         },
         "G_AUDIO_SYNC": {
             "status": "PASS" if audio_qa_doc["pass"] else "FAIL",
             "applicable": True,
-            "reason": f"lufs={lufs}, tp={tp}, av_diff={round(av_diff, 4)}s, asr_pass={audio_qa_doc['post_render_asr_pass']}" if audio_qa_doc["pass"] else "; ".join(aud_issues),
+            "reason": f"lufs={lufs}, tp={tp}, av_diff={round(av_diff, 4)}s, asr={asr_status}" if audio_qa_doc["pass"] else "; ".join(aud_issues),
             "artifact_path": str(qdir / "AUDIO_QA.json"),
             "evidence_sha256": mp4_sha,
         },
@@ -590,11 +832,10 @@ def run_independent_render_qa(
             "artifact_path": str(mp4_p),
             "evidence_sha256": mp4_sha,
         },
-        # Explicitly mark native-SeeCut-only gates NOT_APPLICABLE under INDEPENDENT_* profile rules!
         "G_H1_GEOM": {
             "status": "NOT_APPLICABLE",
             "applicable": False,
-            "na_reason": "Native Chromium/HTML DOM geometry check does not apply to INDEPENDENT_FFMPEG_PIL backend; replaced by G_SPATIAL_ALIGNMENT & G_COMPONENT_COVERAGE.",
+            "na_reason": f"Native SeeCut HTML DOM geometry check does not apply to {engine_kind}; replaced by G_SPATIAL_ALIGNMENT & isolated G_COMPONENT_COVERAGE.",
         },
         "G_H2_JUDGE": {
             "status": "NOT_APPLICABLE",
@@ -604,7 +845,7 @@ def run_independent_render_qa(
         "G_NATIVE_PROOF": {
             "status": "NOT_APPLICABLE",
             "applicable": False,
-            "na_reason": "Rendered via audited clean-room INDEPENDENT_FFMPEG_PIL backend, not native YeJe-cpu/SeeCut.",
+            "na_reason": f"Rendered via {engine_kind}, not native YeJe-cpu/SeeCut.",
         },
     }
 
@@ -615,17 +856,20 @@ def run_independent_render_qa(
         strict_evidence=True,
     )
     mat["run_id"] = run_id
-    mat["engine_kind"] = "INDEPENDENT_FFMPEG_PIL"
+    mat["engine_kind"] = engine_kind
+    mat["remotion_verified"] = remotion_verified
     mat["final_mp4_path"] = str(mp4_p)
     mat["final_mp4_sha256"] = mp4_sha
+    mat["normalized_creative_plan_sha256"] = render_spec.get("normalized_creative_plan_sha256")
     mat["evaluated_at_utc"] = now_utc()
     write_json_atomic(qdir / "FINAL_GATE_MATRIX.json", mat)
 
     fpq = {
-        "schema_version": "kh03.final_pixel_qa.v2",
+        "schema_version": "kh03.final_pixel_qa.v3",
         "run_id": run_id,
         "mode": prof["mode"],
-        "engine_kind": "INDEPENDENT_FFMPEG_PIL",
+        "engine_kind": engine_kind,
+        "remotion_verified": remotion_verified,
         "final_mp4_path": str(mp4_p),
         "final_mp4_sha256": mp4_sha,
         "technical_pass": bool(mat["technical_pass"]),
@@ -649,10 +893,13 @@ def run_independent_render_qa(
     return {
         "pass": bool(mat["technical_pass"]),
         "technical_pass": bool(mat["technical_pass"]),
+        "engine_kind": engine_kind,
+        "remotion_verified": remotion_verified,
         "final_mp4_sha256": mp4_sha,
         "gate_matrix": mat,
         "frame_coverage": frame_cov_doc,
         "component_coverage": comp_cov_doc,
+        "isolated_motion_proof": iso_motion,
         "spatial_qa": spatial_doc,
         "continuity_qa": cont_doc,
         "audio_qa": audio_qa_doc,
@@ -667,4 +914,5 @@ def run_independent_render_qa(
 __all__ = [
     "measure_muxed_audio_ebur128",
     "run_independent_render_qa",
+    "verify_isolated_effect_motion",
 ]
